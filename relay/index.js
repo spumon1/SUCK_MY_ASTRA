@@ -59,6 +59,9 @@ const RELAY_MODE_DEFAULT = 'mint';
 // 打票默认值:模型/验收参数可被 X-Mint-* 覆盖;冷却和整次调用上限只能由服务端配置。
 const MINT_PATH = '/backend-api/codex/responses';
 const MINT_UA = 'codex-tui/0.154.0 (Ubuntu 24.04; x86_64) OVH (codex-tui; 0.154.0)';
+// 默认目标网关。动态住宅出口每次落到不同 unified-N,满血与否由 served_model/行为
+// 判定而非网关号,所以本地/动态出口部署应显式设 MINT_GATEWAY=any(见 s.yaml)不限
+// 网关;要定向某个已知网关时设 MINT_GATEWAY=unified-N。
 const MINT_GATEWAY_DEFAULT = 'unified-88';
 const MINT_MODELS_DEFAULT = 'gpt-6-sol,gpt-6-luna,gpt-6-astra';
 const MINT_TICKET_LEN_DEFAULT = 780;
