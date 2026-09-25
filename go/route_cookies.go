@@ -592,6 +592,94 @@ func (s *pluginState) bestRouteCookieLocked(now time.Time, ttl time.Duration) (r
 		cookieEntryKey(e.Pairs), true
 }
 
+// poolRow is one pool entry rendered for the dashboard. It carries no cookie
+// value -- only the routing node it pins, where it was minted, and its timing.
+// Via is shown verbatim only when it is a plain label (e.g. "cloud-fill"); a
+// value that looks like a proxy URL with credentials is masked.
+type poolRow struct {
+	Gateway     string `json:"gateway"`
+	Via         string `json:"via,omitempty"`
+	State       string `json:"state"` // "usable" | "penalized" | "expired"
+	SecondsLeft int64  `json:"seconds_left"`
+	AgeSeconds  int64  `json:"age_seconds"`
+}
+
+// poolSnapshot is the dashboard view of the global route-cookie pool: totals,
+// how many are inside their window right now, the usable-count per gateway, and
+// a per-entry breakdown. It is a point-in-time read; the pool oscillates, so a
+// pair counted usable here may be degraded moments later.
+type poolSnapshot struct {
+	Total    int            `json:"total"`
+	Usable   int            `json:"usable"`
+	Gateways map[string]int `json:"gateways"`
+	Rows     []poolRow      `json:"rows"`
+}
+
+// poolSnapshotLocked builds the dashboard view. The caller must hold state.mu.
+func (s *pluginState) poolSnapshotLocked(now time.Time, ttl time.Duration) poolSnapshot {
+	snap := poolSnapshot{Gateways: map[string]int{}, Rows: []poolRow{}}
+	for _, e := range s.cookies {
+		if e == nil {
+			continue
+		}
+		snap.Total++
+		// Prefer the real node id decoded from the __oailb JWT (unified-N), which
+		// is what the operator reasons about; fall back to the stored fingerprint
+		// label only when the JWT carries no readable node.
+		gw := cloudCookieGateway(e.Pairs)
+		if gw == "" {
+			gw = e.Gateway
+		}
+		if gw == "" {
+			gw = "未知"
+		}
+		row := poolRow{Gateway: gw, Via: poolViaLabel(e.Via)}
+		if seen := entrySeen(*e); !seen.IsZero() {
+			row.AgeSeconds = int64(now.Sub(seen).Seconds())
+		}
+		deadline := entrySeen(*e).Add(ttl)
+		if exp := entryExpiry(*e); !exp.IsZero() && exp.Before(deadline) {
+			deadline = exp
+		}
+		if d := int64(deadline.Sub(now).Seconds()); d > 0 {
+			row.SecondsLeft = d
+		}
+		switch {
+		case !entryUsable(*e, now, ttl):
+			row.State = "expired"
+		case entryBad(*e, now, routeCookieBadPenalty):
+			row.State = "penalized"
+		default:
+			row.State = "usable"
+			snap.Usable++
+			snap.Gateways[gw]++
+		}
+		snap.Rows = append(snap.Rows, row)
+	}
+	sort.Slice(snap.Rows, func(i, j int) bool {
+		order := map[string]int{"usable": 0, "penalized": 1, "expired": 2}
+		if order[snap.Rows[i].State] != order[snap.Rows[j].State] {
+			return order[snap.Rows[i].State] < order[snap.Rows[j].State]
+		}
+		return snap.Rows[i].SecondsLeft > snap.Rows[j].SecondsLeft
+	})
+	return snap
+}
+
+// poolViaLabel keeps a plain source label ("cloud-fill", "probe") readable but
+// masks anything that carries proxy credentials, so the pool view never prints
+// a userinfo-bearing exit URL.
+func poolViaLabel(via string) string {
+	via = strings.TrimSpace(via)
+	if via == "" {
+		return ""
+	}
+	if strings.Contains(via, "@") || strings.Contains(via, "://") {
+		return maskProxyURL(via)
+	}
+	return via
+}
+
 // markRouteCookieOutcomeLocked stamps good_at or bad_at onto the entry a
 // steered request carried, from the serving state the upstream signed for it.
 // The pair's own question is narrow: did the node accept the steer and serve

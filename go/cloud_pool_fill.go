@@ -19,6 +19,46 @@ var poolFiller = struct {
 	cancel context.CancelFunc
 }{}
 
+// poolFillStatus is the dashboard view of the灌池 loop: whether it is running,
+// its cadence and scope, and the outcome of the last completed round. Updated
+// on reconfigure/stop and at the end of every round.
+var poolFillStatus = struct {
+	sync.Mutex
+	running     bool
+	intervalMS  int
+	accounts    int
+	models      int
+	gateway     string
+	lastRoundAt time.Time
+	lastPooled  int
+	lastAttempt int
+}{}
+
+type poolFillSnap struct {
+	Running     bool   `json:"running"`
+	IntervalMS  int    `json:"interval_ms"`
+	Accounts    int    `json:"accounts"`
+	Models      int    `json:"models"`
+	Gateway     string `json:"gateway"`
+	LastRoundAt string `json:"last_round_at,omitempty"`
+	LastPooled  int    `json:"last_pooled"`
+	LastAttempt int    `json:"last_attempt"`
+}
+
+func poolFillSnapshot() poolFillSnap {
+	poolFillStatus.Lock()
+	defer poolFillStatus.Unlock()
+	snap := poolFillSnap{
+		Running: poolFillStatus.running, IntervalMS: poolFillStatus.intervalMS,
+		Accounts: poolFillStatus.accounts, Models: poolFillStatus.models, Gateway: poolFillStatus.gateway,
+		LastPooled: poolFillStatus.lastPooled, LastAttempt: poolFillStatus.lastAttempt,
+	}
+	if !poolFillStatus.lastRoundAt.IsZero() {
+		snap.LastRoundAt = poolFillStatus.lastRoundAt.UTC().Format(time.RFC3339)
+	}
+	return snap
+}
+
 // 按新配置重启灌池循环:先停旧的,若 cloud_mint.pool_fill 开启则起新的。
 func cloudPoolFillerReconfigure(cfg pluginConfig) {
 	poolFiller.Lock()
@@ -28,8 +68,18 @@ func cloudPoolFillerReconfigure(cfg pluginConfig) {
 		poolFiller.cancel = nil
 	}
 	if !cfg.CloudMint.PoolFill {
+		poolFillStatus.Lock()
+		poolFillStatus.running = false
+		poolFillStatus.Unlock()
 		return
 	}
+	poolFillStatus.Lock()
+	poolFillStatus.running = true
+	poolFillStatus.intervalMS = cfg.CloudMint.poolFillIntervalMS()
+	poolFillStatus.accounts = len(cfg.ProbeAccounts)
+	poolFillStatus.models = len(cfg.Models)
+	poolFillStatus.gateway = cfg.CloudMint.Gateway
+	poolFillStatus.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	poolFiller.cancel = cancel
 	go cloudPoolFillLoop(ctx, cfg)
@@ -44,6 +94,9 @@ func cloudPoolFillerStop() {
 		poolFiller.cancel()
 		poolFiller.cancel = nil
 	}
+	poolFillStatus.Lock()
+	poolFillStatus.running = false
+	poolFillStatus.Unlock()
 }
 
 func cloudPoolFillLoop(ctx context.Context, cfg pluginConfig) {
@@ -76,6 +129,7 @@ func cloudPoolFillOnce(ctx context.Context, cfg pluginConfig) {
 	client := newProbeClient(cfg)
 	creds := probeDownloadCreds(ctx, client, cfg.ProbeAccounts, time.Now())
 	pooled := 0
+	attempt := 0
 	for _, cred := range creds {
 		for _, model := range cfg.Models {
 			select {
@@ -83,6 +137,7 @@ func cloudPoolFillOnce(ctx context.Context, cfg pluginConfig) {
 				return
 			default:
 			}
+			attempt++
 			work := cloudMintWork{
 				cfg:      cfg.CloudMint,
 				creds:    cloudMintCredentials{AuthID: cred.name, AccessToken: cred.accessToken, AccountID: cred.accountID},
@@ -110,6 +165,11 @@ func cloudPoolFillOnce(ctx context.Context, cfg pluginConfig) {
 				cloudFingerprint(cred.name), cloudSafeLabel(model), entry.Gateway, len(entry.Ticket))
 		}
 	}
+	poolFillStatus.Lock()
+	poolFillStatus.lastRoundAt = time.Now()
+	poolFillStatus.lastPooled = pooled
+	poolFillStatus.lastAttempt = attempt
+	poolFillStatus.Unlock()
 	if pooled > 0 {
 		log.Printf(logPrefix+"FC 灌池一轮:入池 %d 个满血 pair", pooled)
 	}

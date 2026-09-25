@@ -12,7 +12,7 @@ import (
 )
 
 const routeCloudDashboardStatus = "/codex-turn-state/cloud-status"
-const cloudDashboardBuild = "cloud-mint-ui-20260924-ws-chain"
+const cloudDashboardBuild = "cloud-mint-ui-20260925-pool-view"
 const cloudDashboardLogLimit = 80
 
 type cloudDashboardLog struct {
@@ -111,9 +111,12 @@ func (s *cloudMintService) dashboardRows() []cloudDashboardRow {
 }
 
 func handleCloudDashboardStatus() pluginapi.ManagementResponse {
+	now := time.Now()
 	state.mu.Lock()
 	cfg := state.config
+	pool := state.poolSnapshotLocked(now, cfg.ttl())
 	state.mu.Unlock()
+	fill := poolFillSnapshot()
 	rows := currentCloudMintService().dashboardRows()
 	cloudDashboardLogs.Lock()
 	logs := append([]cloudDashboardLog{}, cloudDashboardLogs.items...)
@@ -122,7 +125,12 @@ func handleCloudDashboardStatus() pluginapi.ManagementResponse {
 	return jsonResponse(http.StatusOK, map[string]any{
 		"plugin_id": currentCloudPluginID(), "build": cloudDashboardBuild, "enabled": cfg.CloudMint.Enabled, "role": cfg.Role, "dry_run": cfg.DryRun,
 		"effective": map[string]any{"enabled": cfg.CloudMint.Enabled, "transport": cfg.CloudMint.Transport, "gateway": cfg.CloudMint.Gateway,
-			"ticket_length": cfg.CloudMint.TicketLength, "ttl_seconds": cfg.CloudMint.TTLSeconds, "wait_ms": cfg.CloudMint.WaitMS, "timeout_ms": cfg.CloudMint.TimeoutMS},
+			"ticket_length": cfg.CloudMint.TicketLength, "ttl_seconds": cfg.CloudMint.TTLSeconds, "wait_ms": cfg.CloudMint.WaitMS, "timeout_ms": cfg.CloudMint.TimeoutMS,
+			"pool_fill": cfg.CloudMint.PoolFill, "pool_fill_interval_ms": cfg.CloudMint.poolFillIntervalMS()},
 		"rows": rows, "logs": logs, "worker_limit": cloudWorkersMax,
+		"pool": map[string]any{
+			"total": pool.Total, "usable": pool.Usable, "gateways": pool.Gateways, "rows": pool.Rows,
+			"ttl_seconds": cfg.TTLSeconds, "fill": fill,
+		},
 	})
 }

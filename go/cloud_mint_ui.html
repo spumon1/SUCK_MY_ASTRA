@@ -29,12 +29,16 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </head>
 <body>
 <main class="shell">
-<div class="demo"><b>cloud-mint-ui-20260924-ws-chain</b><span id="connectionState" role="status">尚未连接管理接口</span></div>
+<div class="demo"><b>cloud-mint-ui-20260925-pool-view</b><span id="connectionState" role="status">尚未连接管理接口</span></div>
 <section class="card" style="margin-top:16px"><div class="settings-body"><label class="field" for="managementKey">CPA 管理密钥（不是 RELAY_KEY）<input id="managementKey" type="password" autocomplete="off" placeholder="只在当前页面内存使用，不保存到浏览器"></label><div class="settings-actions"><button class="button primary" id="connect" type="button">连接管理接口</button><button class="button" id="disconnect" type="button">断开</button></div><p class="help">只读取脱敏任务和日志；配置保存由 CPA 管理接口鉴权并写入配置文件。</p></div></section>
 <header class="top"><div class="brand"><div class="logo" aria-hidden="true"><svg width="23" height="23" viewBox="0 0 24 24" fill="none"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4z" fill="currentColor"/><path d="M14 17h6M17 14v6" stroke="currentColor" stroke-width="2"/></svg></div><div><h1>云端打票</h1><p>CLOUD MINT · CPA NATIVE PLUGIN</p></div></div><div class="actions"><span class="pill" id="enabledStatus">状态未知</span><a class="button" href="#settings">打票设置</a><button class="button" id="reset" type="button">刷新状态</button></div></header>
 <section class="card" id="capabilityScope" aria-label="能力边界"><div class="settings-body"><strong>有限取票＋路由复用＋协议校验</strong><p class="help">取票受总次数与总时限约束；复用云端缓存中仍有效的目标路由 Cookie；校验格式、有效期及上游模型声明。</p><p class="help">780 仅是预期格式长度，节点编号和模型名称不证明模型实际能力。缓存就绪不代表质量评测通过。</p></div></section>
-<section class="stats" aria-label="云端打票实时状态"><div class="stat"><label>协议合格缓存票</label><strong id="readyCount">—</strong><p>账号 × 模型 × 协议隔离</p></div><div class="stat"><label>正在打票</label><strong id="workingCount">—</strong><p>同账号串行 · 上限 4 个工作任务</p></div><div class="stat"><label>失败冷却</label><strong id="cooldownCount">—</strong><p>插件侧冷却；FC 轮间进度见云日志</p></div><div class="stat"><label>脱敏日志</label><strong id="logCount">—</strong><p>内存保留最近 80 条</p></div></section>
-<div class="layout"><div><section class="card"><div class="card-head"><h3>票与任务</h3><small>实时数据 · 内存缓存</small></div><div class="toolbar"><div class="search"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.3" stroke="currentColor"/><path d="m10 10 3 3" stroke="currentColor"/></svg><input id="search" aria-label="搜索账号、模型或票指纹" placeholder="搜索账号、模型、票指纹…"></div><select id="status" aria-label="筛选任务状态"><option value="all">全部状态</option><option value="ready">已就绪</option><option value="minting">打票中</option><option value="cooldown">冷却中</option></select><select id="transport" aria-label="筛选协议"><option value="all">全部协议</option><option>SSE</option><option>WS</option></select></div><div class="tiny mobile-only" style="padding:0 12px 8px">左右滑动查看网关、票指纹与有效期 →</div><div class="table-wrap"><table><thead><tr><th>账号 / 模型</th><th>协议</th><th>状态</th><th>目标网关</th><th>票摘要</th><th>剩余有效期</th></tr></thead><tbody id="rows"></tbody></table></div><div class="card-foot"><span id="rowCount">尚未读取</span><span>已有客户端状态不覆盖 · 票与 pair 双重验期</span></div></section>
+<section class="stats" aria-label="全局池与灌池实时状态"><div class="stat"><label>池内有效 pair</label><strong id="poolUsable">—</strong><p id="poolTotalNote">随窗口起伏，并非固定库存</p></div><div class="stat"><label>覆盖网关数</label><strong id="poolGateways">—</strong><p>可用 pair 覆盖的 unified-N 数</p></div><div class="stat"><label>上轮灌池入池</label><strong id="fillPooled">—</strong><p id="fillAttemptNote">FC 逐账号逐模型打票</p></div><div class="stat"><label>灌池间隔</label><strong id="fillInterval">—</strong><p id="fillStateNote">灌池循环状态</p></div></section>
+<div class="layout"><div><section class="card"><div class="card-head"><h3>全局路由池</h3><small id="poolHead">尚未读取</small></div>
+<p class="help" id="fillLine" style="padding:0 18px">FC 灌池：后台用探测账号逐个打票，把合格的 __cflb/__oailb 灌进全局池，供所有账号业务请求复用。可用与否随窗口起伏，就绪不等于满血鉴定。</p>
+<div class="table-wrap"><table><thead><tr><th>目标网关</th><th>来源</th><th>状态</th><th>剩余有效期</th><th>已存活</th></tr></thead><tbody id="poolRows"></tbody></table></div>
+<div class="card-foot"><span id="poolRowCount">尚未读取</span><span>池账号无关 · 可跨账号跨模型复用</span></div></section>
+<section class="card"><div class="card-head"><h3>票与任务</h3><small>实时数据 · 内存缓存</small></div><div class="toolbar"><div class="search"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.3" stroke="currentColor"/><path d="m10 10 3 3" stroke="currentColor"/></svg><input id="search" aria-label="搜索账号、模型或票指纹" placeholder="搜索账号、模型、票指纹…"></div><select id="status" aria-label="筛选任务状态"><option value="all">全部状态</option><option value="ready">已就绪</option><option value="minting">打票中</option><option value="cooldown">冷却中</option></select><select id="transport" aria-label="筛选协议"><option value="all">全部协议</option><option>SSE</option><option>WS</option></select></div><div class="tiny mobile-only" style="padding:0 12px 8px">左右滑动查看网关、票指纹与有效期 →</div><div class="table-wrap"><table><thead><tr><th>账号 / 模型</th><th>协议</th><th>状态</th><th>目标网关</th><th>票摘要</th><th>剩余有效期</th></tr></thead><tbody id="rows"></tbody></table></div><div class="card-foot"><span id="rowCount">尚未读取</span><span>已有客户端状态不覆盖 · 票与 pair 双重验期</span></div></section>
 <section class="card"><div class="card-head"><h3>请求日志</h3><div class="feed-head"><small>脱敏记录 · 本地时间</small><button class="toggle" id="follow" aria-pressed="true">● 跟随最新</button></div></div><p class="help" id="logsHelp" style="padding:0 18px">最近 80 条请求与取票记录。票指纹不是原文。未返回新票不等于已接受旧票，也不代表请求失败。faster-model 是缓冲后备声明，不是响应 model；tier 仅展示响应声明。WS 的 previous/response 只显示指纹；created 不等于 completed，续链 ID 不能跨连接当票复用。</p><div class="logs" id="logs"></div><div class="card-foot"><span>未知不等于失败，更不等于成功。</span><span>只记录实际发生的事件</span></div></section>
 </div><aside class="card" id="settings" aria-labelledby="settingsTitle">
 <div class="card-head"><h2 id="settingsTitle">打票设置</h2><span class="pill neutral" id="settingsState">尚未读取</span></div>
@@ -43,6 +47,9 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 <span class="help">启用后在业务请求缺票时触发云端预热。</span>
 <label class="switchline" style="margin-top:12px" for="dryRun">仅观测，不注入<input id="dryRun" type="checkbox" role="switch"></label>
 <p class="help" id="runtimeWarning"></p>
+<label class="switchline" style="margin-top:12px" for="poolFill">FC 灌池（后台罐池）<input id="poolFill" type="checkbox" role="switch"></label>
+<span class="help">后台用探测账号定期向 FC 打票，灌入全局池；业务侧靠池引导复用，可与上面的按请求注入分开使用。</span>
+<label class="field" for="poolFillIntervalMs">灌池间隔 / 毫秒<input id="poolFillIntervalMs" type="number" min="1000" max="3600000" step="1000" value="90000"><small>两轮灌池之间的等待；过小会加速烧号，建议不低于账号标记拉取周期（约 250 秒）。</small></label>
 <label class="field" for="endpoint">云函数地址<input id="endpoint" type="url" value="https://HOST/" autocomplete="off" spellcheck="false" required><small>HTTPS 地址，不含账号密码、查询参数或片段。</small></label>
 <label class="field" for="proxyURL">云函数前置代理<input id="proxyURL" type="url" placeholder="http://HOST:PORT 或 socks5h://HOST:PORT" autocomplete="off" spellcheck="false"><small>只代理“插件 → 云函数”；留空直连，失败不回退直连。</small></label>
 <div class="field-row">
@@ -66,7 +73,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </fieldset></form>
 <div class="note">总次数、总时限和轮间冷却由 FC 配置，不在此处修改；插件任务超时不替代云端限制。</div>
 </aside></div>
-<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260924-ws-chain</span><span>仅保留云端打票与相关设置</span></footer>
+<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260925-pool-view</span><span>仅保留云端打票与相关设置</span></footer>
 </main>
 <script>
 'use strict';
@@ -74,10 +81,11 @@ const PLUGIN_ID=document.querySelector('meta[name="cpa-plugin-id"]').content;
 const STATUS='/v0/management/'+encodeURIComponent(PLUGIN_ID)+'/cloud-status';
 const CONFIG='/v0/management/plugins/'+encodeURIComponent(PLUGIN_ID)+'/config';
 const $=id=>document.getElementById(id);
-const fields={enabled:'enabled',endpoint:'url',proxyURL:'proxy_url',proxyEnv:'proxy_env',mintTransport:'transport',gateway:'gateway',ticketLength:'ticket_length',ttlSeconds:'ttl_seconds',keyEnv:'key_env',waitMs:'wait_ms',timeoutMs:'timeout_ms'};
-const defaults={enabled:false,url:'',proxy_url:'',proxy_env:'',transport:'sse',gateway:'unified-88',ticket_length:780,ttl_seconds:240,key_env:'CPA_RELAY_KEY',wait_ms:2000,timeout_ms:90000};
-const numeric=['ticketLength','ttlSeconds','waitMs','timeoutMs'];
-let credential='',connected=false,busy=false,polling=false,generation=0,dirty=false,saved={},rows=[],logs=[],follow=true;
+const fields={enabled:'enabled',poolFill:'pool_fill',endpoint:'url',proxyURL:'proxy_url',proxyEnv:'proxy_env',mintTransport:'transport',gateway:'gateway',ticketLength:'ticket_length',ttlSeconds:'ttl_seconds',poolFillIntervalMs:'pool_fill_interval_ms',keyEnv:'key_env',waitMs:'wait_ms',timeoutMs:'timeout_ms'};
+const defaults={enabled:false,pool_fill:false,url:'',proxy_url:'',proxy_env:'',transport:'sse',gateway:'unified-88',ticket_length:780,ttl_seconds:240,pool_fill_interval_ms:90000,key_env:'CPA_RELAY_KEY',wait_ms:2000,timeout_ms:90000};
+const checkboxes=new Set(['enabled','poolFill']);
+const numeric=['ticketLength','ttlSeconds','poolFillIntervalMs','waitMs','timeoutMs'];
+let credential='',connected=false,busy=false,polling=false,generation=0,dirty=false,saved={},rows=[],logs=[],follow=true,pool={};
 const text=(tag,value,cls)=>{const el=document.createElement(tag);el.textContent=String(value??'');if(cls)el.className=cls;return el;};
 function message(value,error=false){$('settingsMessage').textContent=value;$('settingsMessage').dataset.kind=error?'error':'info';}
 async function api(path,method='GET',body,token=credential){
@@ -91,16 +99,16 @@ async function api(path,method='GET',body,token=credential){
 }
 function readForm(){
  const cfg={};
- for(const [id,name] of Object.entries(fields))cfg[name]=id==='enabled'?$(id).checked:numeric.includes(id)?Number($(id).value):$(id).value.trim();
+ for(const [id,name] of Object.entries(fields))cfg[name]=checkboxes.has(id)?$(id).checked:numeric.includes(id)?Number($(id).value):$(id).value.trim();
  return {cloud_mint:cfg,dry_run:$('dryRun').checked};
 }
 function fillForm(config){
  saved={...config,cloud_mint:{...defaults,...config.cloud_mint}};
- for(const [id,name] of Object.entries(fields)){if(id==='enabled')$(id).checked=!!saved.cloud_mint[name];else $(id).value=saved.cloud_mint[name]??'';}
+ for(const [id,name] of Object.entries(fields)){if(checkboxes.has(id))$(id).checked=!!saved.cloud_mint[name];else $(id).value=saved.cloud_mint[name]??'';}
  $('dryRun').checked=!!saved.dry_run;dirty=false;$('settingsState').textContent='已读取配置';
 }
 function validate(cfg){
- if(!cfg.enabled)return '';
+ if(!cfg.enabled&&!cfg.pool_fill)return '';
  let url;try{url=new URL(cfg.url);}catch{return '请填写有效的云函数地址。';}
  const local=['localhost','[::1]'].includes(url.hostname)||/^127(?:\.[0-9]{1,3}){3}$/.test(url.hostname);
  if(url.username||url.password||url.search||url.hash||(url.protocol!=='https:'&&!(url.protocol==='http:'&&local)))return '云函数地址要求 HTTPS，不含账号密码、查询参数或片段。';
@@ -109,7 +117,7 @@ function validate(cfg){
   if(!['http:','https:','socks5:','socks5h:'].includes(p.protocol)||!p.hostname||p.search||p.hash||(p.pathname&&p.pathname!=='/')||(p.port&&(+p.port<1||+p.port>65535)))return '前置代理协议、端口或路径无效。';}
  if(!['sse','websocket'].includes(cfg.transport)||!/^unified-[0-9]+$/.test(cfg.gateway))return '打票协议或目标网关无效。';
  if(!/^[A-Za-z0-9_.-]{1,96}$/.test(cfg.key_env)||(cfg.proxy_env&&!/^[A-Za-z0-9_.-]{1,96}$/.test(cfg.proxy_env)))return '请填写环境变量名，不要输入密钥。';
- for(const [key,min,max] of [['ticket_length',1,4096],['ttl_seconds',1,3600],['wait_ms',1,10000],['timeout_ms',1,180000]])if(!Number.isInteger(cfg[key])||cfg[key]<min||cfg[key]>max)return `${key} 必须在 ${min}–${max} 之间。`;
+ for(const [key,min,max] of [['ticket_length',1,4096],['ttl_seconds',1,3600],['pool_fill_interval_ms',1000,3600000],['wait_ms',1,10000],['timeout_ms',1,180000]])if(!Number.isInteger(cfg[key])||cfg[key]<min||cfg[key]>max)return `${key} 必须在 ${min}–${max} 之间。`;
  if(cfg.timeout_ms<cfg.wait_ms)return '任务超时不能小于业务等待。';return '';
 }
 function renderRows(){
@@ -139,17 +147,37 @@ function renderLogs(){
 function showStatus(data){
  rows=Array.isArray(data.rows)?data.rows:[];
  if(follow)logs=Array.isArray(data.logs)?data.logs:[];
- $('readyCount').textContent=rows.filter(r=>r.state==='ready').length;
- $('workingCount').textContent=rows.filter(r=>r.state==='minting').length;
- $('cooldownCount').textContent=rows.filter(r=>r.state==='cooldown').length;
- $('logCount').textContent=Array.isArray(data.logs)?Math.min(80,data.logs.length):0;
- $('enabledStatus').textContent=data.enabled?'云端打票已启用':'云端打票未启用';
+ pool=data.pool&&typeof data.pool==='object'?data.pool:{};
+ const fill=pool.fill&&typeof pool.fill==='object'?pool.fill:{};
+ $('poolUsable').textContent=Number(pool.usable||0);
+ $('poolTotalNote').textContent=`共 ${Number(pool.total||0)} 个 · 随窗口起伏`;
+ $('poolGateways').textContent=pool.gateways?Object.keys(pool.gateways).length:0;
+ $('fillPooled').textContent=Number(fill.last_pooled||0);
+ $('fillAttemptNote').textContent=fill.last_attempt?`上轮 ${fill.last_attempt} 次尝试`:'尚无灌池轮次';
+ $('fillInterval').innerHTML=fill.interval_ms?Math.round(fill.interval_ms/1000)+'<small>s</small>':'—';
+ $('fillStateNote').textContent=fill.enabled?(fill.running?'灌池循环运行中':'已启用未运行'):'灌池未启用';
+ const modeText=fill.enabled?(data.enabled?'灌池 + 按请求注入':'灌池模式'):(data.enabled?'按请求注入':'均未启用');
+ $('enabledStatus').textContent=modeText;
  $('runtimeWarning').textContent=data.role==='probe'?'当前 role=probe，不注入业务请求；请在 CPA 配置中改为 business。':data.dry_run?'当前仅观测模式：不会请求 FC 或注入票。':'';
  const expected=saved.cloud_mint||{};
  const matching=Object.entries(data.effective||{}).every(([key,value])=>!(key in expected)||expected[key]===value)&&!!data.dry_run===!!saved.dry_run;
  $('connectionState').textContent=`已连接 · ${data.build||'未知版本'} · ${new Date().toLocaleTimeString()}`;
  if(!dirty)$('settingsState').textContent=matching?'运行参数已同步':'运行参数待同步';
- renderRows();if(follow)renderLogs();
+ renderRows();renderPool();if(follow)renderLogs();
+}
+function renderPool(){
+ const list=Array.isArray(pool.rows)?pool.rows:[];
+ $('poolRows').replaceChildren();
+ const label={usable:'可用',penalized:'降权',expired:'过期'};
+ for(const r of list){
+  const tr=document.createElement('tr');
+  const vals=[r.gateway||'未知',r.via||'—',label[r.state]||r.state||'—',r.state==='expired'?'已过期':(r.seconds_left||0)+'s',(r.age_seconds||0)+'s'];
+  vals.forEach(v=>tr.appendChild(text('td',v)));$('poolRows').appendChild(tr);
+ }
+ if(!list.length){const tr=document.createElement('tr');const cell=text('td',connected?'池中暂无路由 cookie；等待灌池或业务响应写入。':'连接管理接口后显示全局池。','empty');cell.colSpan=5;tr.appendChild(cell);$('poolRows').appendChild(tr);}
+ $('poolRowCount').textContent=`可用 ${Number(pool.usable||0)} / 共 ${Number(pool.total||0)}`;
+ const fill=pool.fill||{};
+ $('poolHead').textContent=fill.interval_ms?`每 ${Math.round(fill.interval_ms/1000)}s 灌一轮 · ${fill.running?'运行中':'未运行'}`:'仅业务响应写入';
 }
 async function refresh(){
  if(!connected||polling||busy)return;polling=true;const version=generation;
@@ -170,9 +198,9 @@ $('connect').addEventListener('click',async()=>{
  finally{busy=false;$('settingsFields').disabled=!connected;}
 });
 $('disconnect').addEventListener('click',()=>{
- generation++;credential='';connected=false;rows=[];logs=[];saved={};dirty=false;$('managementKey').value='';
+ generation++;credential='';connected=false;rows=[];logs=[];pool={};saved={};dirty=false;$('managementKey').value='';
  $('settingsFields').disabled=true;$('settingsForm').reset();$('connectionState').textContent='已断开';$('enabledStatus').textContent='状态未知';$('settingsState').textContent='尚未读取';
- ['readyCount','workingCount','cooldownCount','logCount'].forEach(id=>$(id).textContent='—');renderRows();renderLogs();message('管理密钥及页面配置已从本页清除。');
+ ['poolUsable','poolGateways','fillPooled','fillInterval'].forEach(id=>$(id).textContent='—');renderRows();renderPool();renderLogs();message('管理密钥及页面配置已从本页清除。');
 });
 $('settingsForm').addEventListener('input',()=>{dirty=true;$('settingsState').textContent='未保存';});
 $('settingsForm').addEventListener('submit',async event=>{
@@ -192,7 +220,7 @@ $('discardSettings').addEventListener('click',()=>{fillForm(saved);message('已�
 ['search','status','transport'].forEach(id=>$(id).addEventListener(id==='search'?'input':'change',renderRows));
 $('follow').addEventListener('click',()=>{follow=!follow;$('follow').setAttribute('aria-pressed',String(follow));$('follow').textContent=follow?'● 跟随最新':'○ 已暂停跟随';if(follow)refresh();});
 $('reset').addEventListener('click',refresh);
-renderRows();renderLogs();setInterval(refresh,3000);
+renderRows();renderPool();renderLogs();setInterval(refresh,3000);
 </script>
 </body>
 </html>
