@@ -29,7 +29,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </head>
 <body>
 <main class="shell">
-<div class="demo"><b>cloud-mint-ui-20260925-pool-view</b><span id="connectionState" role="status">尚未连接管理接口</span></div>
+<div class="demo"><b>cloud-mint-ui-20260925-dual-source</b><span id="connectionState" role="status">尚未连接管理接口</span></div>
 <section class="card" style="margin-top:16px"><div class="settings-body"><label class="field" for="managementKey">CPA 管理密钥（不是 RELAY_KEY）<input id="managementKey" type="password" autocomplete="off" placeholder="只在当前页面内存使用，不保存到浏览器"></label><div class="settings-actions"><button class="button primary" id="connect" type="button">连接管理接口</button><button class="button" id="disconnect" type="button">断开</button></div><p class="help">只读取脱敏任务和日志；配置保存由 CPA 管理接口鉴权并写入配置文件。</p></div></section>
 <header class="top"><div class="brand"><div class="logo" aria-hidden="true"><svg width="23" height="23" viewBox="0 0 24 24" fill="none"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4z" fill="currentColor"/><path d="M14 17h6M17 14v6" stroke="currentColor" stroke-width="2"/></svg></div><div><h1>云端打票</h1><p>CLOUD MINT · CPA NATIVE PLUGIN</p></div></div><div class="actions"><span class="pill" id="enabledStatus">状态未知</span><a class="button" href="#settings">打票设置</a><button class="button" id="reset" type="button">刷新状态</button></div></header>
 <section class="card" id="capabilityScope" aria-label="能力边界"><div class="settings-body"><strong>有限取票＋路由复用＋协议校验</strong><p class="help">取票受总次数与总时限约束；复用云端缓存中仍有效的目标路由 Cookie；校验格式、有效期及上游模型声明。</p><p class="help">780 仅是预期格式长度，节点编号和模型名称不证明模型实际能力。缓存就绪不代表质量评测通过。</p></div></section>
@@ -47,10 +47,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 <span class="help">启用后在业务请求缺票时触发云端预热。</span>
 <label class="switchline" style="margin-top:12px" for="dryRun">仅观测，不注入<input id="dryRun" type="checkbox" role="switch"></label>
 <p class="help" id="runtimeWarning"></p>
-<label class="switchline" style="margin-top:12px" for="poolFill">FC 灌池（后台罐池）<input id="poolFill" type="checkbox" role="switch"></label>
-<span class="help">后台用探测账号定期向 FC 打票，灌入全局池；业务侧靠池引导复用，可与上面的按请求注入分开使用。</span>
-<label class="field" for="poolFillIntervalMs">灌池间隔 / 毫秒<input id="poolFillIntervalMs" type="number" min="1000" max="3600000" step="1000" value="90000"><small>两轮灌池之间的等待；过小会加速烧号，建议不低于账号标记拉取周期（约 250 秒）。</small></label>
-<label class="field" for="endpoint">云函数地址<input id="endpoint" type="url" value="https://HOST/" autocomplete="off" spellcheck="false" required><small>HTTPS 地址，不含账号密码、查询参数或片段。</small></label>
+<label class="field" for="endpoint">云函数地址（按请求注入 / 旧版灌池）<input id="endpoint" type="url" value="https://HOST/" autocomplete="off" spellcheck="false" required><small>HTTPS 地址，不含账号密码、查询参数或片段。按请求注入与“旧版单源灌池”用它;新版灌池请用下面的两个源。</small></label>
 <label class="field" for="proxyURL">云函数前置代理<input id="proxyURL" type="url" placeholder="http://HOST:PORT 或 socks5h://HOST:PORT" autocomplete="off" spellcheck="false"><small>只代理“插件 → 云函数”；留空直连，失败不回退直连。</small></label>
 <div class="field-row">
 <label class="field" for="mintTransport">打票协议<select id="mintTransport"><option value="sse">SSE</option><option value="websocket">WebSocket</option></select></label>
@@ -60,6 +57,16 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 <label class="field" for="ticketLength">预期票长（格式）<input id="ticketLength" type="number" min="1" max="4096" step="1" value="780" required></label>
 <label class="field" for="ttlSeconds">票有效期 / 秒<input id="ttlSeconds" type="number" min="1" max="3600" step="1" value="240" required></label>
 </div>
+<div style="margin-top:18px;border-top:1px solid var(--line);padding-top:14px"><strong style="font-size:12px;color:#516648">灌池源（都灌进同一个全局池）</strong><span class="help">两个源各自独立开关、各自地址与前置代理，可同时开并行灌池。打到的 pair 都进全局池，供所有账号业务请求复用。协议/网关/票长/有效期等沿用上面的共享设置。</span></div>
+<label class="switchline" style="margin-top:14px" for="fcEnabled">阿里云 FC 灌池 <span class="pill neutral" id="fcState" style="font-size:9px">—</span><input id="fcEnabled" type="checkbox" role="switch"></label>
+<label class="field" for="fcUrl">阿里云函数地址<input id="fcUrl" type="url" placeholder="https://<fc-host>/" autocomplete="off" spellcheck="false"><small>公网 HTTPS 云函数端点，不含账号密码、查询或片段。</small></label>
+<label class="field" for="fcProxyUrl">FC 前置代理 / 可选<input id="fcProxyUrl" type="url" placeholder="http://HOST:PORT 或 socks5h://HOST:PORT" autocomplete="off" spellcheck="false"><small>只代理“插件 → 云函数”，一般留空。</small></label>
+<label class="switchline" style="margin-top:16px" for="relayEnabled">本地住宅代理灌池 <span class="pill neutral" id="relayState" style="font-size:9px">—</span><input id="relayEnabled" type="checkbox" role="switch"></label>
+<label class="field" for="relayUrl">本机 relay 地址<input id="relayUrl" type="url" placeholder="http://127.0.0.1:9101/" autocomplete="off" spellcheck="false"><small>本机打票 relay 入口；住宅动态代理出口在 relay 内部配置（MINT_UPSTREAM_PROXY），不在这里填。</small></label>
+<label class="field" for="relayProxyUrl">relay 前置代理 / 可选<input id="relayProxyUrl" type="url" placeholder="一般留空" autocomplete="off" spellcheck="false"><small>只代理“插件 → 本机 relay”，通常留空。</small></label>
+<label class="field" for="poolFillIntervalMs">灌池间隔 / 毫秒<input id="poolFillIntervalMs" type="number" min="1000" max="3600000" step="1000" value="90000"><small>两轮灌池之间的等待；过小会加速烧号，建议不低于账号标记拉取周期（约 250 秒）。</small></label>
+<label class="switchline" style="margin-top:14px" for="poolFill">灌池（旧版单源）<input id="poolFill" type="checkbox" role="switch"></label>
+<span class="help">兼容旧配置：仅当上面两个源都关闭时，才用“云函数地址”作为单一灌池源。新配置请用上面两个源。</span>
 <details id="advancedSettings"><summary>高级设置 · 环境变量与等待上限</summary>
 <label class="field" for="keyEnv">密钥环境变量名<input id="keyEnv" value="CPA_RELAY_KEY" spellcheck="false" autocomplete="off" required><small>这里只填变量名，不输入或展示密钥内容。</small></label>
 <label class="field" for="proxyEnv">代理环境变量名 / 可选<input id="proxyEnv" placeholder="CPA_MINT_PROXY" autocomplete="off" spellcheck="false"><small>与上方代理地址二选一；代理带账号密码时推荐此方式。</small></label>
@@ -73,7 +80,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </fieldset></form>
 <div class="note">总次数、总时限和轮间冷却由 FC 配置，不在此处修改；插件任务超时不替代云端限制。</div>
 </aside></div>
-<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260925-pool-view</span><span>仅保留云端打票与相关设置</span></footer>
+<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260925-dual-source</span><span>云端打票 · 双源灌池</span></footer>
 </main>
 <script>
 'use strict';
@@ -82,7 +89,8 @@ const STATUS='/v0/management/'+encodeURIComponent(PLUGIN_ID)+'/cloud-status';
 const CONFIG='/v0/management/plugins/'+encodeURIComponent(PLUGIN_ID)+'/config';
 const $=id=>document.getElementById(id);
 const fields={enabled:'enabled',poolFill:'pool_fill',endpoint:'url',proxyURL:'proxy_url',proxyEnv:'proxy_env',mintTransport:'transport',gateway:'gateway',ticketLength:'ticket_length',ttlSeconds:'ttl_seconds',poolFillIntervalMs:'pool_fill_interval_ms',keyEnv:'key_env',waitMs:'wait_ms',timeoutMs:'timeout_ms'};
-const defaults={enabled:false,pool_fill:false,url:'',proxy_url:'',proxy_env:'',transport:'sse',gateway:'unified-88',ticket_length:780,ttl_seconds:240,pool_fill_interval_ms:90000,key_env:'CPA_RELAY_KEY',wait_ms:2000,timeout_ms:90000};
+const defaults={enabled:false,pool_fill:false,url:'',proxy_url:'',proxy_env:'',transport:'sse',gateway:'unified-88',ticket_length:780,ttl_seconds:240,pool_fill_interval_ms:90000,key_env:'CPA_RELAY_KEY',wait_ms:2000,timeout_ms:90000,fc:{enabled:false,url:'',proxy_url:'',proxy_env:''},relay:{enabled:false,url:'',proxy_url:'',proxy_env:''}};
+const sourceIds={fc:{en:'fcEnabled',url:'fcUrl',proxy:'fcProxyUrl'},relay:{en:'relayEnabled',url:'relayUrl',proxy:'relayProxyUrl'}};
 const checkboxes=new Set(['enabled','poolFill']);
 const numeric=['ticketLength','ttlSeconds','poolFillIntervalMs','waitMs','timeoutMs'];
 let credential='',connected=false,busy=false,polling=false,generation=0,dirty=false,saved={},rows=[],logs=[],follow=true,pool={};
@@ -100,23 +108,35 @@ async function api(path,method='GET',body,token=credential){
 function readForm(){
  const cfg={};
  for(const [id,name] of Object.entries(fields))cfg[name]=checkboxes.has(id)?$(id).checked:numeric.includes(id)?Number($(id).value):$(id).value.trim();
+ for(const [name,ids] of Object.entries(sourceIds))cfg[name]={enabled:$(ids.en).checked,url:$(ids.url).value.trim(),proxy_url:$(ids.proxy).value.trim(),proxy_env:''};
  return {cloud_mint:cfg,dry_run:$('dryRun').checked};
 }
 function fillForm(config){
  saved={...config,cloud_mint:{...defaults,...config.cloud_mint}};
  for(const [id,name] of Object.entries(fields)){if(checkboxes.has(id))$(id).checked=!!saved.cloud_mint[name];else $(id).value=saved.cloud_mint[name]??'';}
+ for(const [name,ids] of Object.entries(sourceIds)){const s={...defaults[name],...(saved.cloud_mint[name]||{})};$(ids.en).checked=!!s.enabled;$(ids.url).value=s.url??'';$(ids.proxy).value=s.proxy_url??'';}
  $('dryRun').checked=!!saved.dry_run;dirty=false;$('settingsState').textContent='已读取配置';
 }
-function validate(cfg){
- if(!cfg.enabled&&!cfg.pool_fill)return '';
- let url;try{url=new URL(cfg.url);}catch{return '请填写有效的云函数地址。';}
+function validateEndpoint(label,src){
+ let url;try{url=new URL(src.url);}catch{return label+'地址无效。';}
  const local=['localhost','[::1]'].includes(url.hostname)||/^127(?:\.[0-9]{1,3}){3}$/.test(url.hostname);
- if(url.username||url.password||url.search||url.hash||(url.protocol!=='https:'&&!(url.protocol==='http:'&&local)))return '云函数地址要求 HTTPS，不含账号密码、查询参数或片段。';
- if(cfg.proxy_url&&cfg.proxy_env)return '前置代理地址和代理环境变量只能设置一个。';
- if(cfg.proxy_url){let p;try{p=new URL(cfg.proxy_url);}catch{return '前置代理地址无效。';}
-  if(!['http:','https:','socks5:','socks5h:'].includes(p.protocol)||!p.hostname||p.search||p.hash||(p.pathname&&p.pathname!=='/')||(p.port&&(+p.port<1||+p.port>65535)))return '前置代理协议、端口或路径无效。';}
+ if(url.username||url.password||url.search||url.hash||(url.protocol!=='https:'&&!(url.protocol==='http:'&&local)))return label+'地址要求 HTTPS，不含账号密码、查询参数或片段。';
+ const pu=(src.proxy_url||'').trim(),pe=(src.proxy_env||'').trim();
+ if(pu&&pe)return label+'前置代理地址和代理环境变量只能设置一个。';
+ if(pu){let p;try{p=new URL(pu);}catch{return label+'前置代理地址无效。';}
+  if(!['http:','https:','socks5:','socks5h:'].includes(p.protocol)||!p.hostname||p.search||p.hash||(p.pathname&&p.pathname!=='/')||(p.port&&(+p.port<1||+p.port>65535)))return label+'前置代理协议、端口或路径无效。';}
+ if(pe&&!/^[A-Za-z0-9_.-]{1,96}$/.test(pe))return label+'代理环境变量名无效。';
+ return '';
+}
+function validate(cfg){
+ const fc=cfg.fc||{},relay=cfg.relay||{};
+ const poolActive=cfg.pool_fill||fc.enabled||relay.enabled;
+ if(fc.enabled){const e=validateEndpoint('阿里云 FC ',fc);if(e)return e;}
+ if(relay.enabled){const e=validateEndpoint('本地 relay ',relay);if(e)return e;}
+ if(!cfg.enabled&&!poolActive)return '';
+ if(cfg.enabled||(cfg.pool_fill&&!fc.enabled&&!relay.enabled)){const e=validateEndpoint('云函数',{url:cfg.url,proxy_url:cfg.proxy_url,proxy_env:cfg.proxy_env});if(e)return e;}
  if(!['sse','websocket'].includes(cfg.transport)||!/^unified-[0-9]+$/.test(cfg.gateway))return '打票协议或目标网关无效。';
- if(!/^[A-Za-z0-9_.-]{1,96}$/.test(cfg.key_env)||(cfg.proxy_env&&!/^[A-Za-z0-9_.-]{1,96}$/.test(cfg.proxy_env)))return '请填写环境变量名，不要输入密钥。';
+ if(!/^[A-Za-z0-9_.-]{1,96}$/.test(cfg.key_env))return '请填写密钥环境变量名，不要输入密钥。';
  for(const [key,min,max] of [['ticket_length',1,4096],['ttl_seconds',1,3600],['pool_fill_interval_ms',1000,3600000],['wait_ms',1,10000],['timeout_ms',1,180000]])if(!Number.isInteger(cfg[key])||cfg[key]<min||cfg[key]>max)return `${key} 必须在 ${min}–${max} 之间。`;
  if(cfg.timeout_ms<cfg.wait_ms)return '任务超时不能小于业务等待。';return '';
 }
@@ -149,15 +169,21 @@ function showStatus(data){
  if(follow)logs=Array.isArray(data.logs)?data.logs:[];
  pool=data.pool&&typeof data.pool==='object'?data.pool:{};
  const fill=pool.fill&&typeof pool.fill==='object'?pool.fill:{};
- const fillEnabled=!!(data.effective&&data.effective.pool_fill);
+ const fillOn=!!fill.running;
  $('poolUsable').textContent=Number(pool.usable||0);
  $('poolTotalNote').textContent=`共 ${Number(pool.total||0)} 个 · 随窗口起伏`;
  $('poolGateways').textContent=pool.gateways?Object.keys(pool.gateways).length:0;
  $('fillPooled').textContent=Number(fill.last_pooled||0);
  $('fillAttemptNote').textContent=fill.last_attempt?`上轮 ${fill.last_attempt} 次尝试`:'尚无灌池轮次';
  $('fillInterval').innerHTML=fill.interval_ms?Math.round(fill.interval_ms/1000)+'<small>s</small>':'—';
- $('fillStateNote').textContent=fillEnabled?(fill.running?'灌池循环运行中':'已启用未运行'):'灌池未启用';
- const modeText=fillEnabled?(data.enabled?'灌池 + 按请求注入':'灌池模式'):(data.enabled?'按请求注入':'均未启用');
+ $('fillStateNote').textContent=fillOn?'灌池循环运行中':'灌池未启用';
+ const src=fill.sources&&typeof fill.sources==='object'?fill.sources:{};
+ for(const [name,pid] of Object.entries({fc:'fcState',relay:'relayState'})){
+  const s=src[name]||{},el=$(pid);
+  el.textContent=s.enabled?`本轮 ${Number(s.last_pooled||0)}/${Number(s.last_attempt||0)}`:'未启用';
+  el.className='pill '+(s.enabled?(Number(s.last_pooled||0)>0?'':'amber'):'neutral');
+ }
+ const modeText=fillOn?(data.enabled?'灌池 + 按请求注入':'灌池模式'):(data.enabled?'按请求注入':'均未启用');
  $('enabledStatus').textContent=modeText;
  $('readyCount').textContent=rows.filter(r=>r.state==='ready').length;
  $('workingCount').textContent=rows.filter(r=>r.state==='minting').length;
@@ -205,7 +231,8 @@ $('connect').addEventListener('click',async()=>{
 $('disconnect').addEventListener('click',()=>{
  generation++;credential='';connected=false;rows=[];logs=[];pool={};saved={};dirty=false;$('managementKey').value='';
  $('settingsFields').disabled=true;$('settingsForm').reset();$('connectionState').textContent='已断开';$('enabledStatus').textContent='状态未知';$('settingsState').textContent='尚未读取';
- ['poolUsable','poolGateways','fillPooled','fillInterval','readyCount','workingCount','cooldownCount','logCount'].forEach(id=>$(id).textContent='—');renderRows();renderPool();renderLogs();message('管理密钥及页面配置已从本页清除。');
+ ['poolUsable','poolGateways','fillPooled','fillInterval','readyCount','workingCount','cooldownCount','logCount'].forEach(id=>$(id).textContent='—');
+ ['fcState','relayState'].forEach(id=>{$(id).textContent='—';$(id).className='pill neutral';});renderRows();renderPool();renderLogs();message('管理密钥及页面配置已从本页清除。');
 });
 $('settingsForm').addEventListener('input',()=>{dirty=true;$('settingsState').textContent='未保存';});
 $('settingsForm').addEventListener('submit',async event=>{

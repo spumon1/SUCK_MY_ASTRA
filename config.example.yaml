@@ -64,3 +64,26 @@ plugins:
 
         # 云端任务整体时限毫秒数。建议大于 FC MINT_TOTAL_TIMEOUT_MS。
         timeout_ms: 90000
+
+        # ---- 后台灌池:定期用 probe_accounts 打票,把 __cflb/__oailb 灌进全局池,
+        # 供所有账号业务请求复用。两个具名源各自独立开关、各自地址与前置代理,
+        # 可同时启用并行灌池,打到的 pair 都进【同一个】全局池。
+        pool_fill_interval_ms: 90000
+
+        # 源一:公网阿里云函数(FC)。填自己的 FC HTTPS 地址后置 enabled: true。
+        fc:
+          enabled: false
+          url: ""
+          proxy_url: ""     # 插件→FC 前置代理,一般留空
+          proxy_env: ""
+
+        # 源二:本机住宅代理 relay。住宅动态代理出口在 relay 内部(MINT_UPSTREAM_PROXY),
+        # 这里只填 relay 的本机入口。
+        relay:
+          enabled: true
+          url: http://127.0.0.1:9101/
+          proxy_url: ""
+          proxy_env: ""
+
+        # 旧版单源灌池(兼容):仅当上面 fc/relay 都关闭时,才用顶层 url 作为单一灌池源。
+        pool_fill: false

@@ -12,7 +12,7 @@ import (
 )
 
 const routeCloudDashboardStatus = "/codex-turn-state/cloud-status"
-const cloudDashboardBuild = "cloud-mint-ui-20260925-pool-view"
+const cloudDashboardBuild = "cloud-mint-ui-20260925-dual-source"
 const cloudDashboardLogLimit = 80
 
 type cloudDashboardLog struct {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 
@@ -26,8 +27,77 @@ type cloudMintConfig struct {
 	TimeoutMS    int    `yaml:"timeout_ms"`
 	// PoolFill 开启后台灌池循环:用 probe_accounts 的账号定期调 FC 打票,把满血
 	// __cflb/__oailb 灌进全局池,供所有账号复用(池模式下 enabled 可为 false)。
+	// 旧字段:当 FC / Relay 两个源都未启用时,退回用它 + 上面的 url/proxy 作为
+	// 单一灌池源(向后兼容)。新部署应改用下面的两个具名源。
 	PoolFill           bool `yaml:"pool_fill"`
 	PoolFillIntervalMS int  `yaml:"pool_fill_interval_ms"`
+	// FC 与 Relay 是两个各自独立开关、各自地址与前置代理的灌池源,都把打到的
+	// pair 灌进同一个全局池。FC 指公网阿里云函数;Relay 指本机住宅代理 relay。
+	// 两者可同时启用并行灌池,也可各自单开。
+	FC    cloudFillSource `yaml:"fc"`
+	Relay cloudFillSource `yaml:"relay"`
+}
+
+// cloudFillSource 是一个灌池源:自己的启用开关、打票端点与前置代理。端点与
+// 校验规则同 cloud_mint.url(HTTPS,回环可 HTTP,不含凭据/查询/片段)。
+type cloudFillSource struct {
+	Enabled  bool   `yaml:"enabled"`
+	URL      string `yaml:"url"`
+	ProxyURL string `yaml:"proxy_url"`
+	ProxyEnv string `yaml:"proxy_env"`
+}
+
+// resolvedProxy 解析该源的前置代理,规则同 cloudMintConfig.resolvedProxy。
+func (s cloudFillSource) resolvedProxy() (string, error) {
+	raw := strings.TrimSpace(s.ProxyURL)
+	if s.ProxyEnv != "" {
+		raw = strings.TrimSpace(os.Getenv(s.ProxyEnv))
+		if raw == "" {
+			return "", errors.New("fill source proxy environment variable is unset")
+		}
+	}
+	proxy, err := parseCloudMintProxy(raw)
+	if err != nil {
+		return "", err
+	}
+	if proxy == nil {
+		return "", nil
+	}
+	return proxy.String(), nil
+}
+
+// cloudFillTarget 是灌池循环解析后的一个可执行源:名字 + 端点 + 前置代理。
+type cloudFillTarget struct {
+	Name     string
+	URL      string
+	ProxyURL string
+	ProxyEnv string
+}
+
+// poolFillActive 报告后台灌池循环是否应该运行:任一具名源启用,或旧的 pool_fill 开。
+func (c cloudMintConfig) poolFillActive() bool {
+	return c.FC.Enabled || c.Relay.Enabled || c.PoolFill
+}
+
+// fillTargets 列出本轮要执行的灌池源。优先用两个具名源(启用的);两者都没
+// 启用而旧 pool_fill 开着时,退回单一 legacy 源(用 cloud_mint 顶层 url/proxy)。
+func (c cloudMintConfig) fillTargets() []cloudFillTarget {
+	var out []cloudFillTarget
+	if c.FC.Enabled {
+		out = append(out, cloudFillTarget{Name: "fc", URL: c.FC.URL, ProxyURL: c.FC.ProxyURL, ProxyEnv: c.FC.ProxyEnv})
+	}
+	if c.Relay.Enabled {
+		out = append(out, cloudFillTarget{Name: "relay", URL: c.Relay.URL, ProxyURL: c.Relay.ProxyURL, ProxyEnv: c.Relay.ProxyEnv})
+	}
+	if len(out) == 0 && c.PoolFill {
+		out = append(out, cloudFillTarget{Name: "legacy", URL: c.URL, ProxyURL: c.ProxyURL, ProxyEnv: c.ProxyEnv})
+	}
+	return out
+}
+
+// resolvedProxy 解析某个灌池源(fillTargets 产物)的前置代理。
+func (t cloudFillTarget) resolvedProxy() (string, error) {
+	return cloudFillSource{ProxyURL: t.ProxyURL, ProxyEnv: t.ProxyEnv}.resolvedProxy()
 }
 
 // 灌池间隔,过小则钳到 30s。
@@ -46,21 +116,57 @@ func defaultCloudMintConfig() cloudMintConfig {
 var cloudGatewayPattern = regexp.MustCompile(`^unified-[0-9]+$`)
 var cloudNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,96}$`)
 
-func (c cloudMintConfig) validate() error {
-	if !c.Enabled && !c.PoolFill {
-		return nil
-	}
-	u, err := url.Parse(c.URL)
+// validateMintEndpoint 校验一个打票端点:HTTPS(回环可 HTTP),不含凭据、查询或片段。
+func validateMintEndpoint(field, raw string) error {
+	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
-		return errors.New("cloud_mint.url must be an HTTPS URL without credentials/query/fragment")
+		return errors.New(field + " must be an HTTPS URL without credentials/query/fragment")
 	}
 	ip := net.ParseIP(u.Hostname())
 	local := u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback())
 	if u.Scheme != "https" && !(u.Scheme == "http" && local) {
-		return errors.New("cloud_mint.url requires HTTPS (HTTP only on loopback)")
+		return errors.New(field + " requires HTTPS (HTTP only on loopback)")
 	}
-	if err := c.validateProxy(); err != nil {
+	return nil
+}
+
+// validate 校验源:启用则地址与前置代理都要合法。
+func (s cloudFillSource) validate(field string) error {
+	if !s.Enabled {
+		return nil
+	}
+	if err := validateMintEndpoint(field+".url", s.URL); err != nil {
 		return err
+	}
+	if strings.TrimSpace(s.ProxyURL) != "" && s.ProxyEnv != "" {
+		return errors.New("set only one of " + field + ".proxy_url and proxy_env")
+	}
+	if s.ProxyEnv != "" && !cloudNamePattern.MatchString(s.ProxyEnv) {
+		return errors.New("invalid " + field + ".proxy_env")
+	}
+	_, err := parseCloudMintProxy(s.ProxyURL)
+	return err
+}
+
+func (c cloudMintConfig) validate() error {
+	// 两个具名灌池源各自独立校验(启用才校验)。
+	if err := c.FC.validate("cloud_mint.fc"); err != nil {
+		return err
+	}
+	if err := c.Relay.validate("cloud_mint.relay"); err != nil {
+		return err
+	}
+	if !c.Enabled && !c.poolFillActive() {
+		return nil
+	}
+	// 按请求注入(enabled)或旧 legacy 灌池仍读顶层 url/proxy,需要时才校验。
+	if c.Enabled || (c.PoolFill && !c.FC.Enabled && !c.Relay.Enabled) {
+		if err := validateMintEndpoint("cloud_mint.url", c.URL); err != nil {
+			return err
+		}
+		if err := c.validateProxy(); err != nil {
+			return err
+		}
 	}
 	if !cloudNamePattern.MatchString(c.KeyEnv) || !(c.Gateway == "any" || cloudGatewayPattern.MatchString(c.Gateway)) {
 		return errors.New("invalid cloud_mint key_env or gateway")
