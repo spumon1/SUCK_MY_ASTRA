@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="cpa-plugin-id" content="codex-turn-state">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>云端打票 · CPA 原生插件</title>
+<style>
+:root{--bg:#f8f9f6;--paper:#fff;--ink:#26362b;--muted:#788277;--line:#e5e9e1;--green:#466546;--wash:#eef3e9;--amber:#a47a32;--amber-bg:#fbf5e8;--radius:13px}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--bg);font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","Microsoft YaHei",sans-serif}
+button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--green);outline-offset:3px}
+.shell{max-width:1400px;margin:auto;padding:24px 42px 28px}.demo{display:flex;justify-content:space-between;gap:12px;align-items:center;font-size:11px;color:#7c806f;border-bottom:1px dashed #d8ddcf;padding-bottom:14px}.demo b{color:#657a55;font-size:10px;letter-spacing:1.4px}
+.top{display:flex;align-items:center;justify-content:space-between;padding:27px 0;gap:16px}.brand{display:flex;align-items:center;gap:13px}.logo{width:41px;height:41px;border-radius:11px;background:var(--ink);display:grid;place-items:center;color:#d5e4c7}.brand h1{font-size:24px;margin:0;font-weight:650}.brand p{font-size:10px;letter-spacing:1.4px;color:var(--muted);margin:1px 0 0}.actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;padding:4px 10px;background:var(--wash);color:var(--green);border-radius:6px;font-size:11px;white-space:nowrap}.pill.amber{background:var(--amber-bg);color:var(--amber)}.pill.neutral{color:#767f72;background:#f0f2ed}
+.button{border:1px solid #dbe1d4;border-radius:7px;background:white;color:#53634b;padding:8px 12px;font-size:12px;text-decoration:none}.button.primary{color:white;background:var(--green);border-color:var(--green)}.button:disabled{opacity:.5;cursor:default}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:21px}.stat{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:17px 20px}.stat label{color:var(--muted);font-size:11px;display:flex;justify-content:space-between}.stat strong{font-size:31px;font-weight:600;line-height:1.4;letter-spacing:-1px}.stat strong small{font-size:15px;letter-spacing:0;font-weight:400;color:#9ca493}.stat p{margin:4px 0 0;color:#8a9285;font-size:10px}.stat .positive{color:var(--green)}.stat .warm{color:var(--amber)}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:20px;align-items:start}.layout>div{min-width:0}.card{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-bottom:18px}.card-head{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}.card-head h2,.card-head h3{font-size:13px;margin:0;font-weight:600}.card-head small{font-size:10px;color:var(--muted)}
+.toolbar{display:flex;gap:9px;align-items:center;padding:12px 16px;background:#fdfefb}.search{position:relative;flex:1;min-width:80px}.search svg{position:absolute;top:11px;left:10px;color:#9ba392}.search input{border:1px solid var(--line);width:100%;padding:7px 10px 7px 30px;border-radius:6px;background:#fff;font-size:11px;color:var(--ink)}select{border:1px solid var(--line);border-radius:6px;color:#68755e;background:#fff;padding:7px 9px;font-size:11px}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap;text-align:left}th{font-size:10px;color:#929a89;background:#f8faf5;font-weight:400;padding:9px 13px}td{padding:14px 13px;border-bottom:1px solid #eff1eb;font-size:11px}tr:last-child td{border-bottom:0}.account{font-size:10px;color:#929a8a}.model{font-weight:550;margin-top:2px;font-size:11px}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}.muted{color:var(--muted)}.tiny{font-size:10px;color:#929c89}.bar{height:3px;background:#eef2e8;border-radius:10px;margin-top:5px;min-width:62px}.bar i{display:block;height:100%;background:#809a6b;border-radius:10px}
+.card-foot{padding:10px 16px;border-top:1px solid var(--line);color:#919888;font-size:10px;display:flex;justify-content:space-between;gap:8px}.feed-head{display:flex;gap:12px;align-items:center}.toggle{border:0;background:none;color:#67775c;font-size:10px;padding:3px}.toggle[aria-pressed=false]{color:#91998b}.logs{padding:0 18px}.entry{padding:16px 0;border-bottom:1px solid #eef1e8}.entry:last-child{border:0}.entry-title{display:flex;gap:8px;align-items:center;font-size:12px;font-weight:550;flex-wrap:wrap}.entry-title time{margin-left:auto;font-size:10px;color:#97a08f;font-weight:400;font-family:monospace}.event-dot{width:7px;height:7px;background:#7c946b;border-radius:50%;flex:none}.entry.wait .event-dot{background:#caa360}
+.entry-body{white-space:pre-wrap;font-size:11px;color:#7e8875;line-height:1.95;padding:8px 0 0 15px;overflow-wrap:anywhere}.entry details{margin-top:8px;font-size:10px;color:var(--muted)}.entry pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px}.entry-body .finger{color:#576b4f;font-family:monospace;background:#f1f5ec;padding:1px 4px;border-radius:3px}.entry-body strong{font-weight:500;color:#516648}.entry-body .unknown{color:#a17f40}.entry-body .separator{color:#bdc6b3;padding:0 4px}.entry-label{font-size:9px;color:#9ba590;font-weight:400}.empty{padding:30px;text-align:center;color:var(--muted);font-size:12px}
+.settings-body{padding:16px 18px}.switchline{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:550;gap:10px}.switchline input{appearance:none;width:34px;height:20px;border-radius:20px;background:#d9e0d3;position:relative;margin:0;cursor:pointer;flex:none}.switchline input:checked{background:var(--green)}.switchline input:after{content:"";width:14px;height:14px;position:absolute;top:3px;left:3px;border-radius:50%;background:white}.switchline input:checked:after{left:17px}
+.field{display:block;margin-top:17px;font-size:11px;color:#596b52}.field input,.field select{display:block;margin-top:6px;width:100%;min-width:0;padding:8px 10px;border:1px solid #dfe5d8;border-radius:6px;color:var(--ink);background:white;font-size:12px}.field input[aria-invalid=true]{border-color:#b35449}.field small,.help{display:block;color:#909b86;font-size:10px;line-height:1.8;margin-top:5px}.field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}details{border-top:1px solid var(--line);margin-top:19px;padding-top:13px}summary{cursor:pointer;color:#647958;font-size:11px}.settings-actions{display:flex;gap:8px;margin-top:21px}.settings-actions .primary{flex:1}.message{font-size:10px;margin:11px 0 0;color:#7a886f;line-height:1.9;min-height:38px;overflow-wrap:anywhere}.message[data-kind=error]{color:#b35449}.message[data-kind=success]{color:var(--green)}.note{padding:11px 18px;border-top:1px solid var(--line);background:#f9fbf6;font-size:10px;color:#919b87;line-height:1.9}.foot{display:flex;justify-content:space-between;gap:12px;color:#9aa38f;font-size:10px;padding-top:8px}.mobile-only{display:none}
+@media(max-width:1100px){.shell{padding:20px 24px}.layout{grid-template-columns:minmax(0,1fr) 285px}th,td{padding-left:10px;padding-right:10px}.stat{padding:15px}.toolbar{flex-wrap:wrap}.search{flex-basis:100%}}
+@media(max-width:850px){.layout{grid-template-columns:minmax(0,1fr)}.stats{gap:10px}.table-wrap table{min-width:670px}.settings-body{max-width:650px}.mobile-only{display:block}}
+@media(max-width:520px){.shell{padding:17px 16px}.demo{align-items:flex-start;font-size:9px}.demo span{max-width:210px;text-align:right}.top{align-items:flex-start;padding:22px 0;flex-wrap:wrap}.brand h1{font-size:23px}.actions{width:100%;justify-content:flex-end}.actions .pill{margin-right:auto}.stats{grid-template-columns:1fr 1fr}.stat strong{font-size:28px}.stat{padding:13px 15px}.card-head{padding:14px}.toolbar{padding:11px}.logs{padding:0 14px}.entry-title{font-size:11px}.entry-title time{font-size:9px}.entry-body{padding-left:0}.foot{display:block;line-height:2}.card-foot{font-size:9px}.feed-head{gap:5px}}
+</style>
+</head>
+<body>
+<main class="shell">
+<div class="demo"><b>cloud-mint-ui-20260924-ws-chain</b><span id="connectionState" role="status">尚未连接管理接口</span></div>
+<section class="card" style="margin-top:16px"><div class="settings-body"><label class="field" for="managementKey">CPA 管理密钥（不是 RELAY_KEY）<input id="managementKey" type="password" autocomplete="off" placeholder="只在当前页面内存使用，不保存到浏览器"></label><div class="settings-actions"><button class="button primary" id="connect" type="button">连接管理接口</button><button class="button" id="disconnect" type="button">断开</button></div><p class="help">只读取脱敏任务和日志；配置保存由 CPA 管理接口鉴权并写入配置文件。</p></div></section>
+<header class="top"><div class="brand"><div class="logo" aria-hidden="true"><svg width="23" height="23" viewBox="0 0 24 24" fill="none"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4z" fill="currentColor"/><path d="M14 17h6M17 14v6" stroke="currentColor" stroke-width="2"/></svg></div><div><h1>云端打票</h1><p>CLOUD MINT · CPA NATIVE PLUGIN</p></div></div><div class="actions"><span class="pill" id="enabledStatus">状态未知</span><a class="button" href="#settings">打票设置</a><button class="button" id="reset" type="button">刷新状态</button></div></header>
+<section class="card" id="capabilityScope" aria-label="能力边界"><div class="settings-body"><strong>有限取票＋路由复用＋协议校验</strong><p class="help">取票受总次数与总时限约束；复用云端缓存中仍有效的目标路由 Cookie；校验格式、有效期及上游模型声明。</p><p class="help">780 仅是预期格式长度，节点编号和模型名称不证明模型实际能力。缓存就绪不代表质量评测通过。</p></div></section>
+<section class="stats" aria-label="云端打票实时状态"><div class="stat"><label>协议合格缓存票</label><strong id="readyCount">—</strong><p>账号 × 模型 × 协议隔离</p></div><div class="stat"><label>正在打票</label><strong id="workingCount">—</strong><p>同账号串行 · 上限 4 个工作任务</p></div><div class="stat"><label>失败冷却</label><strong id="cooldownCount">—</strong><p>插件侧冷却；FC 轮间进度见云日志</p></div><div class="stat"><label>脱敏日志</label><strong id="logCount">—</strong><p>内存保留最近 80 条</p></div></section>
+<div class="layout"><div><section class="card"><div class="card-head"><h3>票与任务</h3><small>实时数据 · 内存缓存</small></div><div class="toolbar"><div class="search"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.3" stroke="currentColor"/><path d="m10 10 3 3" stroke="currentColor"/></svg><input id="search" aria-label="搜索账号、模型或票指纹" placeholder="搜索账号、模型、票指纹…"></div><select id="status" aria-label="筛选任务状态"><option value="all">全部状态</option><option value="ready">已就绪</option><option value="minting">打票中</option><option value="cooldown">冷却中</option></select><select id="transport" aria-label="筛选协议"><option value="all">全部协议</option><option>SSE</option><option>WS</option></select></div><div class="tiny mobile-only" style="padding:0 12px 8px">左右滑动查看网关、票指纹与有效期 →</div><div class="table-wrap"><table><thead><tr><th>账号 / 模型</th><th>协议</th><th>状态</th><th>目标网关</th><th>票摘要</th><th>剩余有效期</th></tr></thead><tbody id="rows"></tbody></table></div><div class="card-foot"><span id="rowCount">尚未读取</span><span>已有客户端状态不覆盖 · 票与 pair 双重验期</span></div></section>
+<section class="card"><div class="card-head"><h3>请求日志</h3><div class="feed-head"><small>脱敏记录 · 本地时间</small><button class="toggle" id="follow" aria-pressed="true">● 跟随最新</button></div></div><p class="help" id="logsHelp" style="padding:0 18px">最近 80 条请求与取票记录。票指纹不是原文。未返回新票不等于已接受旧票，也不代表请求失败。faster-model 是缓冲后备声明，不是响应 model；tier 仅展示响应声明。WS 的 previous/response 只显示指纹；created 不等于 completed，续链 ID 不能跨连接当票复用。</p><div class="logs" id="logs"></div><div class="card-foot"><span>未知不等于失败，更不等于成功。</span><span>只记录实际发生的事件</span></div></section>
+</div><aside class="card" id="settings" aria-labelledby="settingsTitle">
+<div class="card-head"><h2 id="settingsTitle">打票设置</h2><span class="pill neutral" id="settingsState">尚未读取</span></div>
+<form id="settingsForm" class="settings-body" novalidate><fieldset id="settingsFields" disabled style="border:0;padding:0;margin:0;min-width:0">
+<label class="switchline" for="enabled">启用云端打票<input id="enabled" type="checkbox" role="switch" checked></label>
+<span class="help">启用后在业务请求缺票时触发云端预热。</span>
+<label class="switchline" style="margin-top:12px" for="dryRun">仅观测，不注入<input id="dryRun" type="checkbox" role="switch"></label>
+<p class="help" id="runtimeWarning"></p>
+<label class="field" for="endpoint">云函数地址<input id="endpoint" type="url" value="https://HOST/" autocomplete="off" spellcheck="false" required><small>HTTPS 地址，不含账号密码、查询参数或片段。</small></label>
+<label class="field" for="proxyURL">云函数前置代理<input id="proxyURL" type="url" placeholder="http://HOST:PORT 或 socks5h://HOST:PORT" autocomplete="off" spellcheck="false"><small>只代理“插件 → 云函数”；留空直连，失败不回退直连。</small></label>
+<div class="field-row">
+<label class="field" for="mintTransport">打票协议<select id="mintTransport"><option value="sse">SSE</option><option value="websocket">WebSocket</option></select></label>
+<label class="field" for="gateway">目标网关（路由）<input id="gateway" value="unified-88" spellcheck="false" required></label>
+</div>
+<div class="field-row">
+<label class="field" for="ticketLength">预期票长（格式）<input id="ticketLength" type="number" min="1" max="4096" step="1" value="780" required></label>
+<label class="field" for="ttlSeconds">票有效期 / 秒<input id="ttlSeconds" type="number" min="1" max="3600" step="1" value="240" required></label>
+</div>
+<details id="advancedSettings"><summary>高级设置 · 环境变量与等待上限</summary>
+<label class="field" for="keyEnv">密钥环境变量名<input id="keyEnv" value="CPA_RELAY_KEY" spellcheck="false" autocomplete="off" required><small>这里只填变量名，不输入或展示密钥内容。</small></label>
+<label class="field" for="proxyEnv">代理环境变量名 / 可选<input id="proxyEnv" placeholder="CPA_MINT_PROXY" autocomplete="off" spellcheck="false"><small>与上方代理地址二选一；代理带账号密码时推荐此方式。</small></label>
+<div class="field-row">
+<label class="field" for="waitMs">业务等待 / 毫秒<input id="waitMs" type="number" min="1" max="10000" value="2000" required></label>
+<label class="field" for="timeoutMs">任务超时 / 毫秒<input id="timeoutMs" type="number" min="1" max="180000" value="90000" required></label>
+</div>
+</details>
+<div class="settings-actions"><button class="button primary" id="saveSettings" type="submit">保存到 CPA</button><button class="button" id="discardSettings" type="button">放弃改动</button></div>
+<p id="settingsMessage" class="message" role="status" aria-live="polite">连接管理接口后可编辑。保存只更新 cloud_mint 与 dry_run，不覆盖其他插件配置。</p>
+</fieldset></form>
+<div class="note">总次数、总时限和轮间冷却由 FC 配置，不在此处修改；插件任务超时不替代云端限制。</div>
+</aside></div>
+<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260924-ws-chain</span><span>仅保留云端打票与相关设置</span></footer>
+</main>
+<script>
+'use strict';
+const PLUGIN_ID=document.querySelector('meta[name="cpa-plugin-id"]').content;
+const STATUS='/v0/management/'+encodeURIComponent(PLUGIN_ID)+'/cloud-status';
+const CONFIG='/v0/management/plugins/'+encodeURIComponent(PLUGIN_ID)+'/config';
+const $=id=>document.getElementById(id);
+const fields={enabled:'enabled',endpoint:'url',proxyURL:'proxy_url',proxyEnv:'proxy_env',mintTransport:'transport',gateway:'gateway',ticketLength:'ticket_length',ttlSeconds:'ttl_seconds',keyEnv:'key_env',waitMs:'wait_ms',timeoutMs:'timeout_ms'};
+const defaults={enabled:false,url:'',proxy_url:'',proxy_env:'',transport:'sse',gateway:'unified-88',ticket_length:780,ttl_seconds:240,key_env:'CPA_RELAY_KEY',wait_ms:2000,timeout_ms:90000};
+const numeric=['ticketLength','ttlSeconds','waitMs','timeoutMs'];
+let credential='',connected=false,busy=false,polling=false,generation=0,dirty=false,saved={},rows=[],logs=[],follow=true;
+const text=(tag,value,cls)=>{const el=document.createElement(tag);el.textContent=String(value??'');if(cls)el.className=cls;return el;};
+function message(value,error=false){$('settingsMessage').textContent=value;$('settingsMessage').dataset.kind=error?'error':'info';}
+async function api(path,method='GET',body,token=credential){
+ const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);
+ try{
+  const response=await fetch(path,{method,signal:controller.signal,cache:'no-store',headers:{Authorization:'Bearer '+token,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
+  if(!response.ok)throw new Error(response.status===401||response.status===403?'管理鉴权失败，请检查 CPA 管理密钥。':`管理请求失败（HTTP ${response.status}）`);
+  return await response.json();
+ }catch(error){if(error.name==='AbortError')throw new Error('管理请求超时，请稍后重试。');throw error;}
+ finally{clearTimeout(timer);}
+}
+function readForm(){
+ const cfg={};
+ for(const [id,name] of Object.entries(fields))cfg[name]=id==='enabled'?$(id).checked:numeric.includes(id)?Number($(id).value):$(id).value.trim();
+ return {cloud_mint:cfg,dry_run:$('dryRun').checked};
+}
+function fillForm(config){
+ saved={...config,cloud_mint:{...defaults,...config.cloud_mint}};
+ for(const [id,name] of Object.entries(fields)){if(id==='enabled')$(id).checked=!!saved.cloud_mint[name];else $(id).value=saved.cloud_mint[name]??'';}
+ $('dryRun').checked=!!saved.dry_run;dirty=false;$('settingsState').textContent='已读取配置';
+}
+function validate(cfg){
+ if(!cfg.enabled)return '';
+ let url;try{url=new URL(cfg.url);}catch{return '请填写有效的云函数地址。';}
+ const local=['localhost','[::1]'].includes(url.hostname)||/^127(?:\.[0-9]{1,3}){3}$/.test(url.hostname);
+ if(url.username||url.password||url.search||url.hash||(url.protocol!=='https:'&&!(url.protocol==='http:'&&local)))return '云函数地址要求 HTTPS，不含账号密码、查询参数或片段。';
+ if(cfg.proxy_url&&cfg.proxy_env)return '前置代理地址和代理环境变量只能设置一个。';
+ if(cfg.proxy_url){let p;try{p=new URL(cfg.proxy_url);}catch{return '前置代理地址无效。';}
+  if(!['http:','https:','socks5:','socks5h:'].includes(p.protocol)||!p.hostname||p.search||p.hash||(p.pathname&&p.pathname!=='/')||(p.port&&(+p.port<1||+p.port>65535)))return '前置代理协议、端口或路径无效。';}
+ if(!['sse','websocket'].includes(cfg.transport)||!/^unified-[0-9]+$/.test(cfg.gateway))return '打票协议或目标网关无效。';
+ if(!/^[A-Za-z0-9_.-]{1,96}$/.test(cfg.key_env)||(cfg.proxy_env&&!/^[A-Za-z0-9_.-]{1,96}$/.test(cfg.proxy_env)))return '请填写环境变量名，不要输入密钥。';
+ for(const [key,min,max] of [['ticket_length',1,4096],['ttl_seconds',1,3600],['wait_ms',1,10000],['timeout_ms',1,180000]])if(!Number.isInteger(cfg[key])||cfg[key]<min||cfg[key]>max)return `${key} 必须在 ${min}–${max} 之间。`;
+ if(cfg.timeout_ms<cfg.wait_ms)return '任务超时不能小于业务等待。';return '';
+}
+function renderRows(){
+ const query=$('search').value.trim().toLowerCase();
+ const visible=rows.filter(r=>($('status').value==='all'||r.state===$('status').value)&&($('transport').value==='all'||(r.transport==='websocket'?'WS':'SSE')===$('transport').value)&&[r.account,r.model,r.fingerprint].join(' ').toLowerCase().includes(query));
+ $('rows').replaceChildren();
+ for(const row of visible){
+  const tr=document.createElement('tr');
+  const state={ready:'已就绪',minting:'打票中',cooldown:'失败冷却'}[row.state]||'未知';
+  const values=['#'+row.account+' / '+row.model,row.transport==='websocket'?'WS':'SSE',state,row.gateway,row.fingerprint?'#'+row.fingerprint+' · 票长 '+row.length:'尚无有效票',row.state==='minting'?'—':row.seconds_left+'s'];
+  values.forEach(value=>tr.appendChild(text('td',value)));$('rows').appendChild(tr);
+ }
+ if(!visible.length){const tr=document.createElement('tr');const cell=text('td',connected?'当前没有符合条件的任务或有效票。':'连接管理接口后显示真实任务。','empty');cell.colSpan=6;tr.appendChild(cell);$('rows').appendChild(tr);}
+ $('rowCount').textContent=`显示 ${visible.length} / ${rows.length} 条`;
+}
+function renderLogs(){
+ $('logs').replaceChildren();
+ if(!logs.length){$('logs').appendChild(text('p',connected?'尚无云端打票记录；业务缺票时才会按需启动。':'尚未读取日志。','empty'));return;}
+ const recent=[...logs].reverse().sort((a,b)=>(Date.parse(b.at)||0)-(Date.parse(a.at)||0)).slice(0,80);
+ for(const item of recent){
+  const article=text('article','','entry');const heading=text('div','','entry-title');
+  heading.append(text('span',item.kind),text('time',new Date(item.at).toLocaleTimeString()));
+  const details=document.createElement('details');details.append(text('summary','原始（脱敏）'),text('pre',JSON.stringify({at:item.at,kind:item.kind,message:item.message},null,2)));
+  article.append(heading,text('div',item.message,'entry-body'),details);$('logs').appendChild(article);
+ }
+}
+function showStatus(data){
+ rows=Array.isArray(data.rows)?data.rows:[];
+ if(follow)logs=Array.isArray(data.logs)?data.logs:[];
+ $('readyCount').textContent=rows.filter(r=>r.state==='ready').length;
+ $('workingCount').textContent=rows.filter(r=>r.state==='minting').length;
+ $('cooldownCount').textContent=rows.filter(r=>r.state==='cooldown').length;
+ $('logCount').textContent=Array.isArray(data.logs)?Math.min(80,data.logs.length):0;
+ $('enabledStatus').textContent=data.enabled?'云端打票已启用':'云端打票未启用';
+ $('runtimeWarning').textContent=data.role==='probe'?'当前 role=probe，不注入业务请求；请在 CPA 配置中改为 business。':data.dry_run?'当前仅观测模式：不会请求 FC 或注入票。':'';
+ const expected=saved.cloud_mint||{};
+ const matching=Object.entries(data.effective||{}).every(([key,value])=>!(key in expected)||expected[key]===value)&&!!data.dry_run===!!saved.dry_run;
+ $('connectionState').textContent=`已连接 · ${data.build||'未知版本'} · ${new Date().toLocaleTimeString()}`;
+ if(!dirty)$('settingsState').textContent=matching?'运行参数已同步':'运行参数待同步';
+ renderRows();if(follow)renderLogs();
+}
+async function refresh(){
+ if(!connected||polling||busy)return;polling=true;const version=generation;
+ try{const data=await api(STATUS);if(version===generation)showStatus(data);}
+ catch(error){if(version===generation)$('connectionState').textContent=error.message+' 当前显示最后一次数据。';}
+ finally{polling=false;}
+}
+$('connect').addEventListener('click',async()=>{
+ if(busy)return;const token=$('managementKey').value.trim();if(!token){message('请先输入 CPA 管理密钥。',true);return;}
+ const version=++generation;busy=true;connected=false;$('settingsFields').disabled=true;
+ try{const config=await api(CONFIG,'GET',undefined,token);const data=await api(STATUS,'GET',undefined,token);
+  if(version!==generation)return;credential=token;connected=true;$('managementKey').value='';
+  // CPA 某些版本的插件配置回读只返回宿主字段；运行态 effective 才是云取票真实值。
+  const runtimeCloud=data.effective&&typeof data.effective==='object'?data.effective:{};
+  const mergedConfig={...config,cloud_mint:{...runtimeCloud,...(config.cloud_mint||{})}};
+  fillForm(mergedConfig);showStatus(data);message('已连接。保存会更新 CPA 的插件配置，历史票和日志不会伪造为新配置结果。');}
+ catch(error){if(version===generation){credential='';$('connectionState').textContent='未连接';message(error.message,true);}}
+ finally{busy=false;$('settingsFields').disabled=!connected;}
+});
+$('disconnect').addEventListener('click',()=>{
+ generation++;credential='';connected=false;rows=[];logs=[];saved={};dirty=false;$('managementKey').value='';
+ $('settingsFields').disabled=true;$('settingsForm').reset();$('connectionState').textContent='已断开';$('enabledStatus').textContent='状态未知';$('settingsState').textContent='尚未读取';
+ ['readyCount','workingCount','cooldownCount','logCount'].forEach(id=>$(id).textContent='—');renderRows();renderLogs();message('管理密钥及页面配置已从本页清除。');
+});
+$('settingsForm').addEventListener('input',()=>{dirty=true;$('settingsState').textContent='未保存';});
+$('settingsForm').addEventListener('submit',async event=>{
+ event.preventDefault();if(!connected||busy)return;const patch=readForm();const error=validate(patch.cloud_mint);if(error){message(error,true);return;}
+ if(!window.confirm('保存云端打票设置到 CPA？配置生效时旧的打票任务和缓存可能被取消；业务出口不变。'))return;
+ busy=true;$('settingsFields').disabled=true;const version=generation;
+ try{
+  // 宿主为浅合并：先取最新 cloud_mint，保留当前版本未知的嵌套配置。
+  const latest=await api(CONFIG);const merged={cloud_mint:{...latest.cloud_mint,...patch.cloud_mint},dry_run:patch.dry_run};
+  await api(CONFIG,'PATCH',merged);const stored=await api(CONFIG);
+  if(version!==generation)return;fillForm(stored);message('CPA 已保存配置；正在核对运行参数。若未同步，请检查插件重载日志或重启 CPA。');
+ }
+ catch(error){if(version===generation)message(error.message+' 未确认生效，请刷新核对。',true);}
+ finally{busy=false;$('settingsFields').disabled=!connected;refresh();}
+});
+$('discardSettings').addEventListener('click',()=>{fillForm(saved);message('已恢复到上次读取的配置。');});
+['search','status','transport'].forEach(id=>$(id).addEventListener(id==='search'?'input':'change',renderRows));
+$('follow').addEventListener('click',()=>{follow=!follow;$('follow').setAttribute('aria-pressed',String(follow));$('follow').textContent=follow?'● 跟随最新':'○ 已暂停跟随';if(follow)refresh();});
+$('reset').addEventListener('click',refresh);
+renderRows();renderLogs();setInterval(refresh,3000);
+</script>
+</body>
+</html>

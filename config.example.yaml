@@ -1,0 +1,66 @@
+# 示例插件配置，合并进 CPA config.yaml 的 plugins.configs 下面。
+# 配置键名必须等于插件 .so 文件名派生的 ID：codex-turn-state-cloud-mint。
+#
+# 云端打票协议与环境变量见 relay/CPA.md；FC 端配置见 relay/README.md。
+plugins:
+  enabled: true
+  configs:
+    codex-turn-state-cloud-mint:
+      enabled: true
+      priority: 100
+
+      # ── 角色 ────────────────────────────────────────────────────────────
+      # business = 业务端：云端打票注入 + 路由 Cookie 引导。
+      # probe    = 只采集不改写（云端模式下同样不碰请求）。
+      # 缺失时按 business 处理；非法值拒绝启动。
+      role: business
+
+      # 逻辑照走、照打日志，但不真改请求。上线先 true 确认归属判定，
+      # 再改 false。cloud_mint.enabled 下 dry_run 也不会请求 FC。
+      dry_run: true
+
+      # 每个决定打一行：steer|pass|skip|harvest + auth + model + len + reason。
+      # 票、Cookie、token 的值永远不进日志。
+      log_decisions: true
+
+      # 池化路由 Cookie 的可用时长（秒），从 Set-Cookie 最后出现起算，
+      # 并被 __oailb JWT 内嵌 exp 截短。仅池化模式使用。
+      ttl_seconds: 3900
+
+      # 本地模板/路由池落盘目录。空字符串 = 不落盘也不读盘。
+      store_dir: ""
+
+      # ── 云端打票 ────────────────────────────────────────────────────────
+      # enabled: true 后云端模式独占注入决策；false 回到路由 Cookie 池模式。
+      cloud_mint:
+        enabled: true
+
+        # FC 函数地址。必须 HTTPS（HTTP 只允许回环测试地址），
+        # 不带凭据、query、fragment，不跟随重定向。
+        url: https://<函数地址>/
+
+        # 密钥不进配置文件：这里写的是【环境变量名】，值注入 CPA 进程环境，
+        # 与 FC 的 RELAY_KEY 相同。
+        key_env: CPA_RELAY_KEY
+
+        # 插件到 FC 的前置代理，二选一，都为空则明确直连（不继承系统代理）。
+        # proxy_url: socks5h://user:pass@gw.example:1080
+        # proxy_env: CPA_MINT_PROXY
+
+        # FC 到上游的打票传输：sse 或 websocket，需与业务通道匹配。
+        transport: sse
+
+        # 目标网关（__oailb JWT 内嵌节点名），any 不查。
+        gateway: unified-88
+
+        # 票长验收（字符数），仅是格式预期不是健康信号；0 不查。
+        ticket_length: 780
+
+        # 票有效期（秒），自 Fernet 内嵌签发时刻起算。
+        ttl_seconds: 240
+
+        # 业务线程最多等票毫秒数；超时返回 503，后台任务继续到完成。
+        wait_ms: 2000
+
+        # 云端任务整体时限毫秒数。建议大于 FC MINT_TOTAL_TIMEOUT_MS。
+        timeout_ms: 90000

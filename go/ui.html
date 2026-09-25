@@ -1,0 +1,3297 @@
+<!DOCTYPE html>
+
+<!--
+  codex-turn-state 看板。
+
+  这个文件由 go:embed 嵌进插件二进制（见 go/management.go），改完必须重新跑
+  scripts/build.sh 编出新的 .so 并重启 CPA 才会生效 —— 它不是从磁盘读的，
+  编辑服务器上的 ui.html 不会有任何效果。
+
+  ── 鉴权模型（读之前先看这段）──────────────────────────────────────────
+
+  用户明确要求：页面上的操作不弹密钥。界线现在是「碰不碰机密」，不再是「看还是动」：
+
+    不鉴权 GET   ── dashboard（页面本身）/ status（数据）
+                    + 四个操作：dry_run / role / 清桶 / 连通性自检
+                    全挂在 /v0/resource/plugins/<id>/ 下，那个前缀不鉴权且只接受
+                    GET（ServeResourceHTTP 第一行就挡掉非 GET）。四个操作走
+                    .../ops/*，改状态或烧额度，所以固定带 confirm=1 —— 那不是
+                    鉴权，只挡浏览器预取 / 爬虫 / 误打开 URL 触发。
+    保存探测范围 ── 也在 .../ops/scope，同样不鉴权。插件把范围写进【自己的】
+                    scope 文件，不经过 CPA 那条鉴权的 config PATCH —— 宿主没给
+                    插件保存配置的接口，那条 PATCH 是唯一替代，而它要密钥。
+    可选清单 ───── .../ops/choices，也不鉴权。它是【读】不是动作，所以不带
+                    confirm=1。账号和模型的勾选清单从它来：名字打错在任何一层
+                    都不会被拒，只会变成一条永远探不到东西的范围。
+    代理 ──────── 明文回传（走 status），框里显示的就是真值。这是操作员明确
+                    要求的：显示掩码的代价是改一条代理就得把整个池子重打一遍，
+                    那个编辑框基本没法用。【不要再把它「改进」成掩码。】
+
+  ⚠ 代理明文可匿名读，是在知情下选的：CPA 只绑 127.0.0.1，够得到这个端口就等于
+  已经在这台机器上。哪天这个端口不再只在隧道里，这一条要第一个回来重估。
+
+  【这是用户在知情下选的】：CPA 只绑 127.0.0.1、要走 SSH 隧道才够得到，所以
+  「不鉴权」实际等于「能进隧道的人（就是用户自己）」。四个操作因此不设任何门。
+
+  ⚠ 两个必须记住的后果：
+    1. status 不鉴权可读，它返回的 auth_id 就是账号文件名【含客户邮箱】。
+    2. 四个操作也不鉴权：能打开这个页面的人，无需密码就能清库、切真实流量、
+       烧额度。哪天想把 8317 暴露到公网或挂反代，先回来看这两行 —— 那时这些就
+       不再只是「隧道里的自己」够得到了。
+
+  不要往这个文件里写任何密钥、账号名或 token。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<meta content="noindex, nofollow" name="robots"/>
+<title>Codex Turn-State · 状态管理控制台</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #16181d;
+  --muted: #6b7280;
+  --faint: #9aa1ab;
+  --border: #e0e3e8;
+  --card: #f7f8fa;
+  --raised: #ffffff;
+  --ok: #0a7d33;
+  --ok-bg: #e7f5ec;
+  --warn: #8a5a00;
+  --warn-bg: #fff3df;
+  --bad: #b3261e;
+  --bad-bg: #fdecea;
+  --accent: #1a56db;
+  --accent-bg: #e8f0fe;
+  --shadow: 0 2px 8px rgba(0,0,0,.09);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --fg: #e6e8ec;
+    --muted: #9aa1ab;
+    --faint: #6b7280;
+    --border: #2b2f36;
+    --card: #1a1d22;
+    --raised: #1f232a;
+    --ok: #4ade80;
+    --ok-bg: #12291b;
+    --warn: #fbbf24;
+    --warn-bg: #2e2410;
+    --bad: #f87171;
+    --bad-bg: #2e1615;
+    --accent: #7ba7ff;
+    --accent-bg: #16233d;
+    --shadow: 0 2px 10px rgba(0,0,0,.5);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  padding: 18px;
+}
+code, .mono, td.cell, th.model, .kv b {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+h2 { font-size: 13px; margin: 0 0 8px; font-weight: 650; color: var(--muted);
+     text-transform: uppercase; letter-spacing: .6px; }
+.wrap { max-width: 1100px; margin: 0 auto; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1 1 auto; }
+section { margin-bottom: 18px; }
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 14px;
+}
+
+/* ---------- 模态里的文本输入（确认对话框用，不是登录门） ---------- */
+#modalInput {
+  width: 100%; padding: 9px 11px; font-family: inherit; font-size: 14px;
+  margin-top: 4px;
+  background: var(--raised); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+#modalInput:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* ---------- 顶栏 ---------- */
+header.bar { margin-bottom: 14px; }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.badge {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--raised); font-size: 12px;
+}
+.badge span { color: var(--muted); }
+.badge b { font-weight: 650; font-size: 12px; }
+.badge.role-probe { background: var(--accent-bg); border-color: var(--accent); }
+.badge.role-probe b { color: var(--accent); }
+.badge.role-business { background: var(--ok-bg); border-color: var(--ok); }
+.badge.role-business b { color: var(--ok); }
+.badge.dry-on { background: var(--warn-bg); border-color: var(--warn); }
+.badge.dry-on b { color: var(--warn); }
+.badge.dry-off { background: var(--bad-bg); border-color: var(--bad); }
+.badge.dry-off b { color: var(--bad); }
+/* 访问性质标识。中性呈现：陈述事实，不做告警 —— 不鉴权是用户明确选的配置，
+   不是异常状态。虚线边框区别于其它「运行参数」类徽章。 */
+.badge.open { border-style: dashed; }
+.badge.open b { color: var(--muted); font-weight: 600; }
+.freshness { font-size: 12px; color: var(--muted); text-align: right; }
+.freshness.stale { color: var(--bad); }
+
+/* ---------- 桶矩阵 ---------- */
+.summary { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+.summary b { color: var(--fg); font-size: 15px; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; }
+th { background: var(--raised); font-weight: 600; white-space: nowrap; }
+th.model { font-size: 12px; text-align: center; }
+td.acct { white-space: nowrap; color: var(--muted); max-width: 260px;
+          overflow: hidden; text-overflow: ellipsis; }
+td.cell { text-align: center; padding: 0; position: relative; }
+/* 自检入口。做成角标而不是改格子的点击语义：左键点格子仍然是「清空此桶」，
+   而且缺桶的格子主按钮是 disabled 的 —— 但那正是最需要自检的格子
+   （「这个桶为什么一直采不到」的第一步），所以角标在任何状态下都可点。
+   平时不显示，hover 或键盘聚焦时才出现，免得把矩阵刷成一片图标。 */
+.cellprobe {
+  position: absolute; top: 1px; right: 1px;
+  font-size: 10px; line-height: 1.1; padding: 1px 3px;
+  border: 1px solid var(--border); border-radius: 3px;
+  background: var(--raised); color: var(--muted);
+  cursor: pointer; opacity: 0; transition: opacity .1s;
+}
+td.cell:hover .cellprobe, .cellprobe:focus { opacity: 1; }
+.cellprobe:hover { color: var(--accent); border-color: var(--accent); }
+td.cell button {
+  width: 100%; height: 100%; min-height: 30px;
+  border: 0; background: transparent; cursor: pointer;
+  font: inherit; font-family: ui-monospace, Menlo, Consolas, monospace;
+  padding: 5px 4px; color: inherit;
+}
+td.cell button:hover { outline: 2px solid var(--accent); outline-offset: -2px; }
+td.cell button:disabled { cursor: default; }
+td.cell button:disabled:hover { outline: 0; }
+.st-ok { background: var(--ok-bg); color: var(--ok); }
+.st-warn { background: var(--warn-bg); color: var(--warn); }
+.st-miss { background: transparent; color: var(--faint); }
+.legend { margin-top: 8px; font-size: 12px; color: var(--muted);
+          display: flex; gap: 16px; flex-wrap: wrap; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+          margin-right: 5px; vertical-align: -1px; border: 1px solid var(--border); }
+/* 范围外的行 / 列：store 里有桶，但它不在 probe_accounts × models 里。压低而不
+   隐藏 —— 「多出来的桶」正是配置漂移的信号，藏了就再也没人发现。 */
+td.acct.outscope, th.model.outscope, em.outscope { font-style: italic; color: var(--faint); }
+
+/* ---------- 服务态观测 ---------- */
+/* 每格底下一条细带，回答的问题和上面的 TTL 不一样：TTL 说「我们手上的模板还
+   能用多久」，这条说「上游最近一次到底给了什么」。两个都正常才是真的正常。 */
+.obs { display: block; margin-top: 3px; font-size: 10.5px; line-height: 1.25;
+       font-family: ui-monospace, Menlo, Consolas, monospace; }
+.obs-ok    { color: var(--ok); }
+.obs-bad   { color: var(--bad); }
+.obs-alarm { color: var(--bad); font-weight: 700; }
+.obs-blind { color: var(--faint); }
+.obs-none  { color: var(--faint); opacity: .55; }
+.obs-n     { color: var(--muted); }
+
+/* 流水。定高滚动，理由同 #probeLines：一天几千条，让它把页面抻长就没法看了。 */
+#obsFeed:empty { display: none; }
+#obsFeed {
+  margin-top: 10px; max-height: 240px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.obsrow {
+  display: grid; grid-template-columns: 64px minmax(0, 1fr) 118px 96px 62px;
+  gap: 8px; align-items: baseline; padding: 3px 9px;
+  font-size: 11.5px; font-family: ui-monospace, Menlo, Consolas, monospace;
+  border-bottom: 1px solid var(--border);
+}
+.obsrow:last-child { border-bottom: 0; }
+.obsrow .t { color: var(--faint); }
+.obsrow .who, .obsrow .mdl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.obsrow .tag { color: var(--faint); }
+.obsrow.is-ok .verdict { color: var(--ok); }
+.obsrow.is-bad .verdict { color: var(--bad); }
+.obsrow.is-alarm { background: var(--bad-bg); }
+.obsrow.is-alarm .verdict { color: var(--bad); font-weight: 700; }
+
+/* ---------- 探测范围编辑器 ---------- */
+.lead { font-size: 12.5px; color: var(--muted); margin: 0 0 11px; }
+.scopegrid { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start; }
+.scopecol { flex: 1 1 230px; min-width: 200px; }
+.scopecol.wide { flex: 1.4 1 290px; }
+.scopehead { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; flex-wrap: wrap; }
+.scopehead .hint { margin-top: 0; }
+.checks {
+  max-height: 170px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--raised); padding: 5px 8px;
+}
+/* 停用态只压低对比度，不隐藏 ——「看得见但改不了」和「压根没这一项」是两回事，
+   后者会让人以为插件不支持，然后跑去翻代码。 */
+.checks.disabled { opacity: .55; }
+.check { display: flex; gap: 7px; align-items: baseline; padding: 2px 0; font-size: 12.5px; }
+.check input { flex: 0 0 auto; margin: 0; }
+.check span {
+  flex: 1 1 auto; min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 条目上的两个状态标。都只是标注，【不】影响能不能勾：
+     .off  —— 这个凭据在 CPA 里是停用的。停用只是 CPA 不给它派业务流量，
+              探测是点名探的，照样探得到，所以勾选框保持可用。
+     .gone —— 配置里选着它，但服务端的清单里没有这一项。必须看得见：默默
+              把它从清单里漏掉，等于无声地把探测范围缩小了。 */
+.check .tag {
+  flex: 0 0 auto; font-style: normal; font-size: 10.5px; line-height: 1.6;
+  padding: 0 6px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--card); color: var(--muted);
+}
+.check .tag.off { border-color: var(--warn); background: var(--warn-bg); color: var(--warn); }
+.check .tag.gone { border-color: var(--bad); background: var(--bad-bg); color: var(--bad); }
+.check.isoff span { color: var(--muted); }
+.checks .empty { color: var(--faint); font-size: 12.5px; padding: 3px 0; }
+.addrow { margin-top: 7px; }
+#scopeModelAdd, #scopeProxyAdd, #scopeRotAdd, #scopeProxies, #scopeRotating {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px; padding: 6px 9px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--raised); color: var(--fg);
+}
+#scopeModelAdd { flex: 1 1 140px; min-width: 110px; }
+#scopeProxyAdd, #scopeRotAdd { flex: 1 1 200px; min-width: 140px; }
+#scopeProxies, #scopeRotating { width: 100%; min-height: 96px; resize: vertical; line-height: 1.45; }
+#scopeModelAdd:focus, #scopeProxyAdd:focus, #scopeRotAdd:focus, #scopeProxies:focus, #scopeRotating:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+#scopeProxies[readonly] { background: var(--card); color: var(--muted); }
+#scopeErrors { margin-top: 12px; }
+#scopeErrors .notice { margin-bottom: 8px; }
+#scopeErrors .mono { font-size: 12px; word-break: break-all; }
+
+/* ---------- 代理连通性测试结果 ----------
+   一行一条出口，顺序就是 probe_proxies 的顺序，也就是探测的尝试顺序。#N 是唯一
+   可靠的身份：整池代理常常共用一个网关、只有用户名不同，掩码之后二十条长得一模
+   一样，位置才分得开它们。 */
+#proxyCheck:empty { display: none; }
+#proxyCheck { margin-top: 10px; }
+.pcsum { font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+.pcsum b { color: var(--fg); font-weight: 650; }
+.pcsum .warntext { font-weight: 650; }
+.pclist { border: 1px solid var(--border); border-radius: 6px;
+          background: var(--raised); overflow: hidden; }
+.pcrow { padding: 5px 9px; border-top: 1px solid var(--border); }
+.pcrow:first-child { border-top: 0; }
+.pcline { display: flex; gap: 10px; align-items: baseline; font-size: 12px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.pcline .idx { flex: 0 0 2.6em; color: var(--faint); }
+.pcline .vd { flex: 0 0 3.2em; font-weight: 650; }
+.pcline .pool { flex: 0 0 4.4em; color: var(--faint); font-size: 11px; }
+.pcrow .why.bad { color: var(--bad); font-weight: 600; }
+.pcline .meta { flex: 1 1 auto; min-width: 0; color: var(--muted);
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pcrow .why { margin-top: 2px; font-size: 11.5px; color: var(--faint); }
+.pcrow.v-ok   .vd { color: var(--ok); }
+.pcrow.v-warn .vd { color: var(--warn); }
+.pcrow.v-bad  .vd { color: var(--bad); }
+.pcrow.v-bad  { background: var(--bad-bg); }
+.pcrow.v-warn { background: var(--warn-bg); }
+
+/* ---------- 计数 ---------- */
+.counters { display: flex; gap: 10px; flex-wrap: wrap; }
+.counter { flex: 1 1 110px; background: var(--raised); border: 1px solid var(--border);
+           border-radius: 7px; padding: 9px 11px; }
+.counter .n { font-size: 20px; font-weight: 650;
+              font-family: ui-monospace, Menlo, Consolas, monospace; }
+.counter .l { font-size: 11.5px; color: var(--muted); text-transform: uppercase;
+              letter-spacing: .5px; }
+.since { font-size: 12px; color: var(--muted); margin-top: 8px; }
+
+/* ---------- 按钮 ---------- */
+button.btn {
+  font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--raised); color: var(--fg);
+}
+button.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button.btn:disabled { opacity: .5; cursor: default; }
+button.btn.danger { border-color: var(--bad); color: var(--bad); background: var(--bad-bg); }
+button.btn.primary { border-color: var(--accent); color: #fff; background: var(--accent); }
+button.btn.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.1); }
+/* ghost 是诊断类操作的视觉权重：比主操作轻一档，但不能藏 —— 单号试跑时
+   第一个要点的就是它。 */
+button.btn.ghost { background: transparent; color: var(--muted); }
+button.btn.ghost:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.subtle { margin-top: 12px; padding-top: 11px; border-top: 1px dashed var(--border); }
+.sublabel { font-size: 11.5px; color: var(--faint); text-transform: uppercase;
+            letter-spacing: .6px; font-weight: 650; }
+select {
+  font: inherit; padding: 6px 9px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--raised); color: var(--fg);
+}
+.hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.hint.warn { color: var(--warn); }
+.warntext { color: var(--warn); }
+.hint code { font-size: 11.5px; padding: 1px 4px; border-radius: 3px;
+             background: var(--raised); border: 1px solid var(--border); }
+
+/* ---------- 探测进度 ---------- */
+/* 固定高度而不是随内容长高：一轮探测会滚出几十行，让整页跟着抻长会把下面的
+   桶矩阵一直推出视口。空的时候整块收起来，不留一条空边框。 */
+#probeLines:empty { display: none; }
+#probeLines {
+  margin-top: 10px; max-height: 190px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--raised);
+  padding: 8px 10px;
+}
+#probeLines p {
+  margin: 0 0 4px; font-size: 12px; line-height: 1.5; color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap; word-break: break-word;
+}
+#probeLines p:last-child { margin-bottom: 0; color: var(--fg); }
+
+/* ---------- 通知 ---------- */
+.notice {
+  border-radius: 7px; padding: 9px 12px; margin-bottom: 10px; font-size: 13px;
+  border: 1px solid var(--border); background: var(--raised);
+  display: flex; gap: 10px; align-items: flex-start;
+}
+.notice.err { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+.notice.ok { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); }
+.notice.info { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+/* warn 专门给「链路通了但上游拒绝」这种组合。它既不是成功也不是失败，
+   压成红或绿都会让人看错方向。 */
+.notice.warn { background: var(--warn-bg); border-color: var(--warn); color: var(--warn); }
+.notice .msg { flex: 1 1 auto; white-space: pre-wrap; word-break: break-word; }
+.notice button {
+  border: 0; background: transparent; color: inherit; cursor: pointer;
+  font: inherit; opacity: .65; padding: 0 2px;
+}
+/* 带动作的通知（目前只有「复制命令」）。做成有边框的小按钮，和右上角那个关闭
+   ✕ 明确区分开 —— 它们一个是操作、一个是丢弃。 */
+.notice .act {
+  border: 1px solid currentColor; border-radius: 5px; padding: 2px 8px;
+  font-size: 12px; opacity: .85; flex: 0 0 auto; align-self: flex-start;
+}
+.notice .cmd {
+  margin-top: 6px; font-size: 12px; opacity: .95; word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ---------- 模态确认 ---------- */
+#modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  z-index: 50;
+}
+#modal .box {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--shadow); max-width: 520px; width: 100%; padding: 18px 20px;
+}
+#modal h3 { margin: 0 0 10px; font-size: 15px; }
+#modal .lines p { margin: 0 0 8px; font-size: 13.5px; color: var(--fg); }
+#modal .lines p.em { color: var(--bad); font-weight: 600; }
+#modal .acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+[hidden] { display: none !important; }
+</style>
+<style>/* Dashboard presentation. Original state/error classes remain supported. */
+:root {
+  --bg:#fff;
+  --fg:#28302a;
+  --muted:#707a70;
+  --faint:#899285;
+  --border:#e3e7e1;
+  --card:#f7f8f5;
+  --raised:#fff;
+  --ok:#3e654d;
+  --ok-bg:#edf4ee;
+  --warn:#947536;
+  --warn-bg:#faf4e7;
+  --bad:#b35449;
+  --bad-bg:#fcf0ee;
+  --accent:#3b523a;
+  --accent-bg:#edf2e9
+}
+body {
+  padding:32px 44px;
+  font-size:14px;
+  line-height:1.6
+}
+.wrap {
+  max-width:1320px
+}
+h1 {
+  font-size:28px;
+  line-height:1.3;
+  letter-spacing:-.5px;
+  font-weight:650
+}
+h2 {
+  font-size:15px;
+  color:var(--fg);
+  margin:0;
+  letter-spacing:0;
+  text-transform:none
+}
+h3 {
+  font-size:13px;
+  margin:0;
+  font-weight:600
+}
+.dashboard-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:24px
+}
+.eyebrow {
+  font-size:10px;
+  font-weight:650;
+  letter-spacing:1.6px;
+  color:var(--muted);
+  margin-bottom:8px
+}
+.subtitle {
+  font-size:12px;
+  color:var(--muted);
+  margin:8px 0 0
+}
+.header-status,#headerRefresh {
+  display:flex;
+  align-items:center;
+  gap:16px
+}
+.header-status {
+  min-width:0
+}
+.freshness {
+  max-width:320px;
+  overflow-wrap:anywhere;
+  font-size:11px
+}
+.status-pill {
+  display:inline-block;
+  border-radius:4px;
+  padding:4px 9px;
+  background:var(--card);
+  font-size:11px;
+  white-space:nowrap
+}
+.status-pill.is-ok {
+  color:var(--ok);
+  background:var(--ok-bg)
+}
+.dashboard-tabs {
+  display:flex;
+  gap:30px;
+  border-bottom:1px solid var(--border);
+  margin:30px 0 24px
+}
+.tab {
+  display:flex;
+  gap:8px;
+  align-items:center;
+  background:none;
+  border:0;
+  border-bottom:2px solid transparent;
+  color:var(--muted);
+  padding:13px 0;
+  font:inherit;
+  font-size:13px;
+  cursor:pointer
+}
+.tab[aria-selected=true] {
+  color:var(--fg);
+  border-bottom-color:var(--accent);
+  font-weight:600
+}
+.tab:hover {
+  color:var(--fg)
+}
+.tab svg {
+  width:16px;
+  height:16px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:1.5
+}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible {
+  outline:2px solid var(--accent);
+  outline-offset:3px
+}
+.overview-stats {
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:23px 0;
+  margin-bottom:24px
+}
+.overview-stat {
+  padding:0 24px;
+  border-right:1px solid var(--border)
+}
+.overview-stat:last-child {
+  border:0
+}
+.stat-label {
+  color:var(--muted);
+  font-size:12px;
+  margin-bottom:7px
+}
+.stat-value {
+  font-size:28px;
+  font-weight:620;
+  line-height:1.3;
+  letter-spacing:-.6px
+}
+.stat-value.text {
+  font-size:21px
+}
+.stat-note {
+  font-size:11px;
+  color:var(--muted);
+  margin-top:7px;
+  overflow-wrap:anywhere
+}
+.panel-card {
+  border:1px solid var(--border);
+  border-radius:10px;
+  margin-bottom:22px;
+  overflow:hidden;
+  background:var(--raised)
+}
+.panel-head {
+  padding:22px 24px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:20px
+}
+.panel-title {
+  display:flex;
+  align-items:center;
+  gap:12px
+}
+.title-rule {
+  width:60px;
+  height:1px;
+  background:var(--border)
+}
+.panel-head .hint {
+  margin:0
+}
+.panel-content {
+  padding:0 24px 24px
+}
+.summary {
+  padding:0 24px 14px;
+  margin:0;
+  font-size:11px;
+  line-height:1.9
+}
+.summary b {
+  font-size:12px
+}
+table {
+  font-size:12px
+}
+th,td {
+  border:0;
+  border-bottom:1px solid var(--border);
+  padding:18px 22px
+}
+th {
+  background:var(--card);
+  border-top:1px solid var(--border);
+  font-weight:500;
+  color:var(--muted);
+  padding:12px 22px
+}
+th.model {
+  text-align:left;
+  font-family:inherit;
+  font-size:12px
+}
+tbody tr:last-child td {
+  border-bottom:0
+}
+td.acct {
+  max-width:270px;
+  font-size:12px;
+  color:var(--fg)
+}
+td.cell {
+  text-align:left;
+  min-width:154px;
+  padding:0 22px;
+  height:83px
+}
+td.cell>button:not(.cellprobe) {
+  height:auto;
+  min-height:63px;
+  padding:12px 0;
+  text-align:left;
+  font-family:inherit;
+  font-size:12px;
+  background:transparent
+}
+td.cell .st-ok {
+  color:var(--ok)
+}
+td.cell .st-warn {
+  color:var(--warn)
+}
+td.cell .st-miss {
+  color:var(--faint)
+}
+td.cell button:hover {
+  outline:0;
+  text-decoration:underline
+}
+td.cell button:focus-visible {
+  outline:2px solid var(--accent)
+}
+.ttl-track {
+  display:block;
+  width:116px;
+  max-width:100%;
+  height:3px;
+  background:var(--border);
+  margin-top:9px;
+  border-radius:2px;
+  overflow:hidden
+}
+.ttl-track i {
+  display:block;
+  height:100%;
+  background:var(--ok);
+  border-radius:2px
+}
+.st-warn .ttl-track i {
+  background:var(--warn)
+}
+td.cell button.cellprobe {
+  width:auto;
+  min-height:0;
+  height:auto;
+  top:5px;
+  right:5px;
+  padding:3px 5px;
+  font-size:10px;
+  border:1px solid var(--border);
+  border-radius:4px;
+  background:var(--raised)
+}
+.legend {
+  border-top:1px solid var(--border);
+  background:var(--card);
+  padding:12px 24px;
+  margin:0;
+  font-size:11px;
+  gap:14px
+}
+.legend span {
+  line-height:1.7
+}
+.counters {
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:14px
+}
+.counter {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  flex-direction:row-reverse;
+  padding:16px 20px;
+  border-radius:8px;
+  gap:10px
+}
+.counter .n {
+  font-size:22px;
+  line-height:1.3;
+  font-family:inherit
+}
+.counter .l {
+  font-size:11px;
+  letter-spacing:0
+}
+.since {
+  font-size:11px;
+  margin:8px 0 22px
+}
+#probeProgress {
+  margin:0 24px 14px;
+  overflow-wrap:anywhere
+}
+#probeLines {
+  border:0;
+  border-top:1px solid var(--border);
+  border-radius:0;
+  margin:0;
+  padding:8px 24px 16px;
+  max-height:260px
+}
+#probeLines p {
+  padding:10px 0;
+  border-bottom:1px solid var(--border);
+  margin:0;
+  font-size:11px
+}
+#probeLines p:last-child {
+  border:0
+}
+.help-details {
+  font-size:12px;
+  color:var(--muted);
+  margin:8px 0 20px
+}
+.help-details summary {
+  cursor:pointer;
+  padding:8px 0
+}
+.help-details p {
+  margin:6px 0 0;
+  line-height:1.9
+}
+.editor-columns {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  gap:28px;
+  padding:24px;
+  border-top:1px solid var(--border)
+}
+.scopecol {
+  min-width:0
+}
+.scopehead {
+  margin:0 0 14px;
+  flex-wrap:wrap;
+  gap:8px
+}
+.scopehead .hint {
+  margin:0
+}
+.sublabel {
+  color:var(--fg);
+  font-size:13px;
+  letter-spacing:0;
+  text-transform:none
+}
+.checks {
+  border:0;
+  background:var(--raised);
+  padding:0;
+  max-height:360px
+}
+.checks label {
+  padding:12px 0;
+  border-bottom:1px solid var(--border);
+  font-size:12px
+}
+.checks label:last-child {
+  border:0
+}
+input[type=checkbox] {
+  accent-color:var(--accent)
+}
+#scopeProxies,#scopeRotating {
+  min-height:170px;
+  line-height:1.9;
+  padding:12px;
+  font-size:12px
+}
+.addrow {
+  margin-top:16px
+}
+#staticEditor,#rotatingEditor {
+  min-width:0
+}
+#rotatingEditor .scopehead {
+  margin-top:0!important
+}
+#proxyCheck {
+  margin-bottom:22px
+}
+.pcline {
+  flex-wrap:wrap;
+  gap:8px
+}
+.pcrow {
+  padding:12px 16px
+}
+.pcrow .why {
+  overflow-wrap:anywhere
+}
+.scope-savebar {
+  padding:18px 24px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--raised);
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px 18px;
+  margin:16px 0 24px
+}
+.scope-savebar>p {
+  flex-basis:100%;
+  margin:0
+}
+.scope-savebar .hint {
+  margin:0
+}
+#scopeErrors:empty {
+  display:none
+}
+.settings-row {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:20px;
+  padding:20px 24px;
+  border-top:1px solid var(--border)
+}
+.settings-row p {
+  font-size:12px;
+  color:var(--muted);
+  margin:5px 0 0
+}
+#settingsBadges {
+  padding:0 24px 22px
+}
+.badges {
+  margin:0;
+  gap:10px
+}
+.badge {
+  background:var(--card);
+  border-color:var(--border);
+  padding:6px 10px;
+  overflow-wrap:anywhere;
+  min-width:0
+}
+.badge b {
+  overflow-wrap:anywhere;
+  min-width:0
+}
+.badge.dry-off {
+  border-color:var(--border);
+  background:var(--bad-bg)
+}
+.badge.role-business {
+  border-color:var(--border)
+}
+#diagnosticActions select {
+  max-width:100%;
+  min-width:0
+}
+button.btn {
+  font-size:12px;
+  padding:8px 13px
+}
+button.btn.danger {
+  border-color:var(--border);
+  background:var(--raised)
+}
+.dashboard-footer {
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  flex-wrap:wrap;
+  margin-top:26px;
+  font-size:10px;
+  color:var(--muted)
+}
+#modal .box {
+  border-radius:12px;
+  padding:26px
+}
+#modal .lines {
+  max-height:55vh;
+  overflow-y:auto
+}
+.notice {
+  overflow-wrap:anywhere
+}
+.counter .n {
+  font-size:22px;
+  font-weight:600
+}
+@media(prefers-color-scheme:dark) {
+  :root {
+    --bg:#171c18;
+    --fg:#e1e7df;
+    --muted:#a4afa0;
+    --faint:#86927f;
+    --border:#343e32;
+    --card:#20281f;
+    --raised:#1b231b;
+    --ok:#9bc6a3;
+    --ok-bg:#223c29;
+    --warn:#d3b56b;
+    --warn-bg:#3b321e;
+    --bad:#e2998f;
+    --bad-bg:#3b2623;
+    --accent:#749875;
+    --accent-bg:#243b27
+  }
+  button.btn.primary {
+    background:#486449;
+    border-color:#486449;
+    color:#fff
+  }
+}
+@media(max-width:1000px) {
+  body {
+    padding:24px
+  }
+  .overview-stat {
+    padding:0 18px
+  }
+  .title-rule {
+    display:none
+  }
+  .counter {
+    padding:14px
+  }
+  .header-status {
+    gap:10px
+  }
+  td,th {
+    padding-left:16px;
+    padding-right:16px
+  }
+}
+@media(max-width:700px) {
+  body {
+    padding:20px 16px
+  }
+  .dashboard-header {
+    flex-direction:column;
+    align-items:flex-start;
+    gap:16px
+  }
+  .header-status {
+    width:100%;
+    justify-content:space-between;
+    align-items:flex-start
+  }
+  #headerRefresh {
+    gap:8px;
+    flex-wrap:wrap;
+    justify-content:flex-end
+  }
+  .freshness {
+    max-width:190px
+  }
+  .dashboard-tabs {
+    gap:0;
+    justify-content:space-between;
+    margin-top:22px
+  }
+  .tab {
+    font-size:12px;
+    gap:6px
+  }
+  .overview-stats {
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    padding:0
+  }
+  .overview-stat {
+    padding:18px;
+    border-bottom:1px solid var(--border)
+  }
+  .overview-stat:nth-child(2) {
+    border-right:0
+  }
+  .overview-stat:nth-child(3),.overview-stat:nth-child(4) {
+    border-bottom:0
+  }
+  .stat-value {
+    font-size:24px
+  }
+  .stat-value.text {
+    font-size:18px
+  }
+  .panel-head {
+    padding:18px;
+    flex-wrap:wrap
+  }
+  .counters {
+    grid-template-columns:repeat(2,minmax(0,1fr))
+  }
+  .editor-columns {
+    grid-template-columns:minmax(0,1fr);
+    padding:18px;
+    gap:24px
+  }
+  .summary {
+    padding:0 18px 12px
+  }
+  .legend {
+    padding:12px 18px
+  }
+  .settings-row {
+    padding:18px;
+    flex-wrap:wrap
+  }
+  .panel-content {
+    padding:0 18px 18px
+  }
+  #settingsBadges {
+    padding:0 18px 18px
+  }
+  .scope-savebar {
+    padding:18px
+  }
+  .help-details {
+    line-height:1.9
+  }
+  #probeLines {
+    padding:8px 18px
+  }
+  #probeProgress {
+    margin-left:18px;
+    margin-right:18px
+  }
+  .badge {
+    max-width:100%
+  }
+  .badge b {
+    font-size:11px
+  }
+  .scope-savebar .row {
+    flex-wrap:wrap
+  }
+}
+@media(hover:none) {
+  td.cell button.cellprobe {
+    opacity:1;
+    position:static;
+    margin:0 0 9px;
+    min-height:28px
+  }
+  td.cell>button:not(.cellprobe) {
+    min-height:48px
+  }
+  .checks label {
+    min-height:44px
+  }
+}
+</style></head>
+<body>
+<div class="wrap" id="app">
+<header class="dashboard-header">
+<div><div class="eyebrow">CPA / CODEX TURN-STATE</div><h1>状态管理控制台</h1><p class="subtitle">查看模板健康状态，管理探测范围与代理出口。</p></div>
+<div class="header-status"><span class="status-pill" id="headerRole">等待状态</span><div id="headerRefresh"><div class="freshness" id="freshness"></div><button class="btn" id="btnPause" type="button">暂停刷新</button></div></div>
+</header>
+<nav aria-label="控制台导航" class="dashboard-tabs" role="tablist">
+<button aria-controls="panel-overview" aria-selected="true" class="tab" data-panel="overview" id="tab-overview" role="tab" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><path d="M3 11h4V3H3zm0 6h4v-3H3zm7 0h7V9h-7zm0-11h7V3h-7z"></path></svg> <span>概览</span></button>
+<button aria-controls="panel-scope" aria-selected="false" class="tab" data-panel="scope" id="tab-scope" role="tab" tabindex="-1" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><path d="M3 5h14M3 10h14M3 15h14M7 3v4m6 1v4m-5 1v4"></path></svg> <span>探测范围</span></button>
+<button aria-controls="panel-proxies" aria-selected="false" class="tab" data-panel="proxies" id="tab-proxies" role="tab" tabindex="-1" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><path d="M7 2h6v5H7zM2 13h6v5H2zm10 0h6v5h-6zM10 7v3M5 13v-3h10v3"></path></svg> <span>代理池</span></button>
+<button aria-controls="panel-settings" aria-selected="false" class="tab" data-panel="settings" id="tab-settings" role="tab" tabindex="-1" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><circle cx="10" cy="10" r="3"></circle><path d="m8 2 4 0 1 3 3 1 2 4-2 4-3 1-1 3H8l-1-3-3-1-2-4 2-4 3-1z"></path></svg> <span>运行设置</span></button>
+</nav>
+<div id="globalNotices"><div id="notices"></div></div>
+<section aria-labelledby="tab-overview" id="panel-overview" role="tabpanel">
+<div class="overview-stats">
+<div class="overview-stat"><div class="stat-label">模板就绪</div><div class="stat-value" id="overviewReady">—</div><div class="stat-note" id="overviewScope">等待状态数据</div></div>
+<div class="overview-stat"><div class="stat-label">探测状态</div><div class="stat-value text" id="overviewProbe">等待状态</div><div class="stat-note" id="overviewProbeNote">—</div></div>
+<div class="overview-stat"><div class="stat-label">注入策略</div><div class="stat-value text" id="overviewMode">—</div><div class="stat-note" id="overviewModeNote">—</div></div>
+<div class="overview-stat"><div class="stat-label">探测出口</div><div class="stat-value" id="overviewExits">—</div><div class="stat-note" id="overviewExitNote">等待代理配置</div></div>
+</div>
+<div class="panel-card" id="matrixCard"><div class="panel-head"><div class="panel-title"><h2>账号与模型模板</h2><span class="title-rule"></span></div><div class="row" id="probeActions"><button class="btn primary" id="btnProbeStart" type="button">开始探测</button><button class="btn danger" id="btnProbeCancel" type="button">停止探测</button></div></div><div class="summary" id="summary"></div><div class="tablewrap"><table id="matrix"></table></div><div class="legend">
+<span><i class="swatch st-ok"></i>就绪（显示剩余时长）</span>
+<span><i class="swatch st-warn"></i>剩余不足 10 分钟</span>
+<span><i class="swatch st-miss"></i>缺失或已过期</span>
+<span><em class="outscope">斜体灰</em> 的行 / 列在探测范围之外：store 里有它的桶，下一轮不会去采</span>
+<span>点格子可清空该桶</span>
+</div></div>
+<div id="counterSection"><div class="counters" id="counters"></div><div class="since" id="since"></div></div>
+<div class="panel-card" id="observeCard"><div class="panel-head"><div class="panel-title"><h2>服务态流水</h2><span class="title-rule"></span></div><span class="hint" id="obsSince"></span></div><p class="subtitle">上游每次签发的状态。<b>未注入</b>的是自然观测，能说明上游此刻怎么对待这个账号；<b>已注入</b>的不能 —— 那时上游多半不再签发，沉默即被接受。</p><div id="obsFeed"></div><div class="hint" id="obsEmpty"></div></div>
+<div class="panel-card" id="activityCard"><div class="panel-head"><div class="panel-title"><h2>探测活动</h2><span class="title-rule"></span></div><span class="hint">保留原始探测日志</span></div><span class="hint" id="probeProgress"></span><div id="probeLines"></div></div>
+<details class="help-details"><summary>探测与业务处理说明</summary><p>主动探测直接请求上游，不修改 CPA 账号启用状态或代理配置，可与业务并行。首次采集后进入续期检查。探测会消耗账号额度；停止探测会停止主动续期，不影响已有模板的使用。</p></details>
+</section>
+<section aria-labelledby="tab-scope" hidden="" id="panel-scope" role="tabpanel">
+<div class="panel-card"><div class="panel-head"><div><h2>探测范围</h2><p class="subtitle">选择主动采集的账号与模型。范围变更不会清除已有模板。</p></div></div><div class="editor-columns" id="scopeColumns"><div class="scopecol">
+<div class="scopehead">
+<span class="sublabel">账号</span>
+<span class="hint" id="scopeAcctNote"></span>
+</div>
+<div class="checks" id="scopeAccounts"></div>
+</div><div class="scopecol">
+<div class="scopehead">
+<span class="sublabel">模型</span>
+<span class="hint" id="scopeModelNote"></span>
+</div>
+<div class="checks" id="scopeModels"></div>
+<div class="row addrow">
+<input aria-label="补充一个模型 id" autocomplete="off" id="scopeModelAdd" placeholder="输入其他模型 ID" spellcheck="false" type="text"/>
+<button class="btn ghost" id="btnAddModel" type="button">添加模型</button>
+</div>
+<div class="hint">
+            原样提交：不改大小写、不动横线。<code>gpt-5.6-sol</code> 里的横线是 id
+            的一部分，写成 <code>gpt5.6sol</code> 是另一个（不存在的）模型。
+          </div>
+</div></div></div>
+<details class="help-details"><summary>范围与业务注入的关系</summary><p>范围只决定主动探测的目标。业务请求按账号与模型查询有效模板；移出范围不会立即停止已有模板的使用。模型 ID 按原值提交，请保留大小写与横线。</p></details>
+</section>
+<section aria-labelledby="tab-proxies" hidden="" id="panel-proxies" role="tabpanel">
+<div class="panel-card"><div class="panel-head"><div><h2>代理池</h2><p class="subtitle">静态与轮换入口分别管理。连通性检查使用已保存的配置。</p></div><div id="proxyAction"><button class="btn ghost" id="btnProxyCheck" type="button">测试连通性</button></div></div><div class="editor-columns"><div id="staticEditor">
+<div class="scopehead">
+<span class="sublabel">代理（一行一个）</span>
+<span class="hint" id="scopeProxyNote"></span>
+<span class="spacer"></span>
+
+</div>
+<textarea aria-label="探测代理清单，一行一个 URL" autocomplete="off" id="scopeProxies" placeholder="一行一个 URL，空行忽略；顺序就是探测的尝试顺序" rows="6" spellcheck="false"></textarea>
+<div class="row addrow">
+<input aria-label="追加代理到清单" autocomplete="off" id="scopeProxyAdd" placeholder="贴一条或多条，追加到上面（空格/逗号/换行分隔）" spellcheck="false" type="text"/>
+<button class="btn ghost" id="btnAddProxy" type="button">追加</button>
+</div>
+<div class="hint" id="scopeProxyHint"></div>
+</div><div id="rotatingEditor"><div class="scopehead" style="margin-top:12px">
+<span class="sublabel">轮换代理（IP 每次都变）</span>
+<span class="hint" id="scopeRotNote"></span>
+</div>
+<textarea aria-label="轮换代理清单，一行一个 URL" autocomplete="off" id="scopeRotating" placeholder="住宅轮换网关放这里，一行一个" rows="6" spellcheck="false"></textarea>
+<div class="row addrow">
+<input aria-label="追加轮换代理到清单" autocomplete="off" id="scopeRotAdd" placeholder="贴一条或多条轮换代理，追加到上面" spellcheck="false" type="text"/>
+<button class="btn ghost" id="btnAddRot" type="button">追加</button>
+</div>
+
+
+</div></div></div>
+<div id="proxyResults"><div id="proxyCheck"></div></div>
+<details class="help-details"><summary>查看尝试与冷却规则</summary><p>静态池按出口、账号和模型组合冷却：失败后歇 55 分钟，采到则只歇到续期点（ttl 减 120 秒）。轮换池每桶一轮最多 10 次，失败后冷却 10 分钟。轮换能力由代理服务提供。两个池均为空时使用服务器出口。代理地址保持明文可编辑。</p></details>
+</section>
+<div hidden="" id="sharedScopeEditor"><div id="sharedScopeErrors"><div id="scopeErrors"></div></div><div class="scope-savebar"><div class="row" id="saveActions"><button class="btn primary" id="btnScopeSave" type="button">保存全部改动</button><button class="btn" id="btnScopeReset" type="button">放弃改动</button></div><div id="sharedDirty"><span class="hint" id="scopeDirty"></span></div><p class="hint">统一保存探测范围和代理池的所有未保存改动，不会自动启动探测。</p></div></div>
+<section aria-labelledby="tab-settings" hidden="" id="panel-settings" role="tabpanel">
+<div class="panel-card"><div class="panel-head"><h2>运行参数</h2></div><div id="settingsBadges"><div class="badges" id="badges"></div></div>
+<div class="settings-row"><div><h3>请求改写</h3><p>开启模拟运行后仅记录决策，不实际改写请求。</p></div><div id="dryAction"><button class="btn" id="btnDryRun" type="button">翻 dry_run</button></div></div>
+<div class="settings-row"><div><h3>运行角色</h3><p>业务模式执行请求头改写，探测模式不改写请求。</p></div><div id="roleAction"><button class="btn" id="btnRole" type="button">切 role</button></div></div>
+</div>
+<div class="panel-card"><div class="panel-head"><div><h2>连通性自检</h2><p class="subtitle">验证上游可达性，不采集模板。会消耗账号额度。</p></div></div><div class="row panel-content" id="diagnosticActions"><select aria-label="自检账号" id="selftestAuth"></select><select aria-label="自检模型" id="selftestModel"></select><button class="btn ghost" id="btnSelftest" type="button">连通性自检</button></div></div>
+<div class="panel-card"><div class="settings-row"><div><h3>清空全部模板</h3><p>删除所有已存储模板，后续请求将等待重新采集。</p></div><div id="clearAction"><button class="btn danger" id="btnClearAll" type="button">清空全部桶</button></div></div></div>
+</section>
+<footer class="dashboard-footer"><span>Codex Turn-State</span><span>免密钥管理入口 · 请通过受控网络访问</span></footer>
+</div>
+<div hidden="" id="modal">
+<div aria-labelledby="modalTitle" aria-modal="true" class="box" role="dialog">
+<h3 id="modalTitle"></h3>
+<div class="lines" id="modalLines"></div>
+<input autocomplete="off" hidden="" id="modalInput" spellcheck="false" type="password"/>
+<div class="acts">
+<button class="btn" id="modalCancel" type="button">取消</button>
+<button class="btn" id="modalOk" type="button"></button>
+</div>
+</div>
+</div>
+<script>
+"use strict";
+
+var POLL_MS = 10000;
+// /ops/choices 比 status 冷得多（CPA 手里的凭据一天也未必变一次），所以它不跟着
+// status 每 10 秒刷一次，最快 60 秒一次。另外两种情况干脆不读：
+//   · 表单被动过     —— 清单一换，勾选框就要重建，会打断正在点的人。
+//   · 探测跑着的时候 —— 范围已定死、表单是锁的（见 renderProbe），此时重建勾选框
+//                      既没意义又会打断，索性不读。
+var CHOICES_MS = 60000;
+
+// 不鉴权、GET-only。这个页面【只】用这一个前缀：status、四个操作、保存范围。
+// 鉴权的 management 路由（.../config 回明文代理，POST .../buckets/clear、
+// .../selftest）都还在，作为带密钥的脚本 API，但页面一条都不调。
+var RES = "/v0/resource/plugins/codex-turn-state";
+
+var state = {
+  data: null,         // 最后一次成功的 status
+  lastGood: null,     // 最后一次成功刷新的时刻
+  lastError: null,    // 最近一次刷新失败的原因
+  paused: false,
+  timer: null,
+  pollMs: 0,          // 当前轮询间隔。探测进行中会自动收紧，见 retunePolling
+  busy: false
+};
+
+/* ---------------- DOM 小工具（一律 textContent，不拼 innerHTML） -------------- */
+
+function $(id) { return document.getElementById(id); }
+
+function el(tag, opts, kids) {
+  var n = document.createElement(tag);
+  opts = opts || {};
+  if (opts.cls) { n.className = opts.cls; }
+  if (opts.text !== undefined && opts.text !== null) { n.textContent = String(opts.text); }
+  if (opts.attrs) {
+    Object.keys(opts.attrs).forEach(function (k) { n.setAttribute(k, opts.attrs[k]); });
+  }
+  if (opts.on) {
+    Object.keys(opts.on).forEach(function (k) { n.addEventListener(k, opts.on[k]); });
+  }
+  (kids || []).forEach(function (c) { if (c) { n.appendChild(c); } });
+  return n;
+}
+
+function clear(n) { while (n.firstChild) { n.removeChild(n.firstChild); } }
+
+/* ---------------------------- 格式化 ---------------------------- */
+
+// 路由 Cookie 剩余寿命只在矩阵格子里显示，宽度有限，所以取最短可读形式。
+function fmtLeft(sec) {
+  if (sec === null || sec === undefined || !isFinite(sec) || sec <= 0) { return "—"; }
+  var s = Math.floor(sec);
+  if (s < 60) { return "<1m"; }
+  if (s < 3600) { return Math.floor(s / 60) + "m"; }
+  var h = Math.floor(s / 3600);
+  var m = Math.floor((s % 3600) / 60);
+  return h + "h" + (m < 10 ? "0" : "") + m + "m";
+}
+
+function fmtTime(iso) {
+  if (!iso) { return "—"; }
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) { return String(iso); }
+  return d.toLocaleString();
+}
+
+// 流水一行只有 64px 放时间，而且同一屏的行都是最近几分钟的 —— 日期是噪音。
+function fmtClock(iso) {
+  if (!iso) { return "—"; }
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) { return "—"; }
+  function two(n) { return (n < 10 ? "0" : "") + n; }
+  return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
+}
+
+function fmtAgo(d) {
+  if (!d) { return "从未"; }
+  var s = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+  if (s < 60) { return s + " 秒前"; }
+  if (s < 3600) { return Math.floor(s / 60) + " 分钟前"; }
+  return d.toLocaleTimeString();
+}
+
+/* ---------------------------- 通知条 ---------------------------- */
+
+// opts.copy = {text, label} 时多挂一个复制按钮，并且这条通知不自动消失 ——
+// 一条要人照着敲的命令，6 秒后自己跑掉是最气人的。
+function notify(kind, message, opts) {
+  opts = opts || {};
+  var box = $("notices");
+  var line = el("div", { cls: "notice " + kind });
+  var msg = el("div", { cls: "msg", text: message });
+  line.appendChild(msg);
+  if (opts.copy) {
+    msg.appendChild(el("div", { cls: "cmd", text: opts.copy.text }));
+    var label = opts.copy.label || "复制";
+    var act = el("button", { cls: "act", text: label, attrs: { type: "button" } });
+    act.addEventListener("click", function () {
+      copyToClipboard(opts.copy.text).then(function (ok) {
+        act.textContent = ok ? "已复制" : "复制失败，请手动选中";
+        setTimeout(function () { act.textContent = label; }, 2500);
+      });
+    });
+    line.appendChild(act);
+  }
+  var close = el("button", { text: "✕", attrs: { type: "button", "aria-label": "关闭" } });
+  close.addEventListener("click", function () { line.remove(); });
+  line.appendChild(close);
+  box.appendChild(line);
+  // 成功类提示会话性地自己消失；错误留着，等人看。
+  if (kind === "ok" && !opts.copy) { setTimeout(function () { line.remove(); }, 6000); }
+  return line;
+}
+
+// navigator.clipboard 在非安全上下文里根本不存在（http:// + 非 localhost 就是），
+// 而这个看板经常是通过隧道或内网 IP 打开的，所以必须有退路：失败就返回 false，
+// 让调用方老实说「复制失败」，而不是假装成功。
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(
+      function () { return true; },
+      function () { return legacyCopy(text); }
+    );
+  }
+  return Promise.resolve(legacyCopy(text));
+}
+
+function legacyCopy(text) {
+  var ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "-1000px";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  var ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+/* ---------------------------- 模态确认 ---------------------------- */
+
+// opts.input 为 true 时是取值对话框：确认后 resolve 输入的字符串，取消 resolve
+// null。否则是确认对话框：resolve 布尔。
+function confirmDialog(opts) {
+  return new Promise(function (resolve) {
+    var modal = $("modal");
+    $("modalTitle").textContent = opts.title;
+    var lines = $("modalLines");
+    clear(lines);
+    (opts.lines || []).forEach(function (l) {
+      lines.appendChild(el("p", { cls: l.em ? "em" : "", text: l.text }));
+    });
+    var ok = $("modalOk");
+    var cancel = $("modalCancel");
+    var input = $("modalInput");
+    ok.textContent = opts.confirmText || "确认";
+    ok.className = "btn " + (opts.danger ? "danger" : "primary");
+
+    input.hidden = !opts.input;
+    input.value = "";
+    if (opts.input) { input.placeholder = opts.placeholder || ""; }
+
+    function done(v) {
+      modal.hidden = true;
+      input.value = "";           // 不把输入内容留在 DOM 里
+      input.hidden = true;
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      input.removeEventListener("keydown", onEnter);
+      document.removeEventListener("keydown", onKey);
+      resolve(v);
+    }
+    function onOk() {
+      if (opts.input) {
+        var v = input.value.trim();
+        done(v ? v : null);
+      } else {
+        done(true);
+      }
+    }
+    function onCancel() { done(opts.input ? null : false); }
+    function onKey(e) { if (e.key === "Escape") { onCancel(); } }
+    function onEnter(e) { if (e.key === "Enter") { e.preventDefault(); onOk(); } }
+
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKey);
+    modal.hidden = false;
+    if (opts.input) { input.addEventListener("keydown", onEnter); input.focus(); }
+    else { cancel.focus(); }
+  });
+}
+
+/* ---------------------------- 请求 ---------------------------- */
+
+// 这个页面不持有、不索取、也不发送任何管理密钥。每一条它调用的路由都在
+// /v0/resource/plugins/codex-turn-state/ 下面，宿主对那个前缀不做鉴权：
+//
+//   status                只读数据
+//   ops/choices           勾选清单的候选项（读，所以走 resGet，不带 confirm=1）
+//   ops/dry-run           ops/role          ops/clear       ops/selftest
+//   ops/scope             保存探测范围
+//   ops/probe/start       ops/probe/cancel  插件内探测
+//
+// 这就是为什么这里没有 ensureKey / setKey / mgmtSend 之类的东西：不是忘了写，
+// 是不能有。任何在这里重新引入密钥输入的改动，都请先回去看 management.go 顶部。
+//
+// 代理明文现在【也走 status】，是操作员明确要求的：之前显示掩码，代价是改一条
+// 代理就得把整个池子重打一遍，那个编辑框基本没法用。所以这份清单现在对任何够得
+// 到本插件的东西都是可读的 —— CPA 只绑 127.0.0.1，能读到的前提是已经在这台机器
+// 上。探测自己要用的两把钥匙放在插件配置里，页面既不显示也不经手。
+
+// ApiError 携带服务端原话。403 的原因有好几种（远程管理关闭、IP 被封 30 分钟），
+// 自己改写成「失败」会把排障线索丢掉，所以一律原样透出。
+function ApiError(status, message) {
+  this.status = status;
+  this.message = message;
+}
+ApiError.prototype = Object.create(Error.prototype);
+
+function readResponse(res) {
+  return res.text().then(function (raw) {
+    var parsed = null;
+    if (raw) { try { parsed = JSON.parse(raw); } catch (e) { parsed = null; } }
+    if (res.ok) { return parsed === null ? {} : parsed; }
+    var msg = (parsed && (parsed.error || parsed.message)) || raw || ("HTTP " + res.status);
+    throw new ApiError(res.status, String(msg));
+  });
+}
+
+function qs(params) {
+  var parts = [];
+  Object.keys(params || {}).forEach(function (k) {
+    var v = params[k];
+    if (v === undefined || v === null || v === "") { return; }
+    // An array becomes repeated parameters (a=1&a=2), which is how the scope
+    // save receives a list. Joining with a comma instead would break on any
+    // value that can contain one -- and a proxy URL can.
+    if (Object.prototype.toString.call(v) === "[object Array]") {
+      v.forEach(function (item) {
+        if (item === undefined || item === null || item === "") { return; }
+        parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(item)));
+      });
+      return;
+    }
+    parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(v)));
+  });
+  return parts.length ? ("?" + parts.join("&")) : "";
+}
+
+// 不鉴权的 resource 接口：GET-only，不带任何鉴权头。status 和四个操作都走这里。
+function resGet(path, params) {
+  return fetch(RES + path + qs(params), { method: "GET", cache: "no-store" })
+    .then(readResponse);
+}
+
+// 不鉴权的【动作】接口：GET + confirm=1，同样不带任何鉴权头。四个操作
+// （dry_run / role / clear / selftest）走这里 —— 用户明确要求页面上这几个操作不
+// 弹密钥。它们改状态或烧额度，所以固定带 confirm=1：那不是鉴权（这台机器只绑
+// 127.0.0.1、要走 SSH 隧道才够得到），只是挡住浏览器预取 / 爬虫 / 误打开 URL 触发。
+// 探测范围（尤其代理明文）不在此列，仍走鉴权接口。
+function resAction(path, params) {
+  var p = {};
+  Object.keys(params || {}).forEach(function (k) { p[k] = params[k]; });
+  p.confirm = "1";
+  return fetch(RES + path + qs(p), { method: "GET", cache: "no-store" }).then(readResponse);
+}
+
+
+/* ---------------------------- 渲染 ---------------------------- */
+
+function renderBadges(d) {
+  var box = $("badges");
+  clear(box);
+
+  function badge(label, value, cls) {
+    box.appendChild(el("div", { cls: "badge " + (cls || "") }, [
+      el("span", { text: label }),
+      el("b", { text: value })
+    ]));
+  }
+
+  badge("role", d.role || "—", d.role === "probe" ? "role-probe" : "role-business");
+  // dry_run=true 是安全态（只打日志不改流量），false 才是在动真流量 —— 所以
+  // OFF 用告警色，别让人扫一眼以为「绿灯=没事」。
+  badge("dry_run", d.dry_run ? "ON（只记录，不改流量）" : "OFF（正在改写真实流量）",
+        d.dry_run ? "dry-on" : "dry-off");
+  badge("inject_mode", d.inject_mode || "—");
+  badge("ttl", (d.ttl_seconds || 0) + "s");
+  badge("长度", (d.template_length || 0) + " → 换 " + (d.replace_length || 0));
+  badge("store_dir", d.store_dir || "—");
+  // 陈述访问性质：这个页面上的每一个动作都不鉴权 —— 看数据、四个操作、保存
+  // 探测范围。谁打开页面都该知道这条边界在哪：能摸到这个端口就能改这些。
+  badge("访问", "全程免密钥（本机 127.0.0.1）", "open");
+}
+
+function renderFreshness() {
+  var n = $("freshness");
+  clear(n);
+  n.className = "freshness" + (state.lastError ? " stale" : "");
+  if (state.lastError) {
+    // 降级态：保留旧数据，但明确告诉人这份数据是什么时候的、为什么没更新。
+    n.appendChild(el("div", { text: "刷新失败：" + state.lastError }));
+    n.appendChild(el("div", { text: "上次成功刷新于 " + fmtAgo(state.lastGood) }));
+  } else {
+    n.appendChild(el("div", { text: "刷新于 " + fmtAgo(state.lastGood) + (state.paused ? "（已暂停）" : "") }));
+  }
+}
+
+// 账号清单没有专门的接口，就从 buckets 里去重得出 —— 矩阵的行和自检的账号
+// 下拉必须是同一份，否则会出现「矩阵里有的号，下拉里选不到」。
+function uniqueAuthIds(buckets) {
+  var out = [];
+  var seen = Object.create(null);
+  (buckets || []).forEach(function (b) {
+    if (b && b.auth_id && !seen[b.auth_id]) { seen[b.auth_id] = true; out.push(b.auth_id); }
+  });
+  out.sort();
+  return out;
+}
+
+// 去重但保留原顺序。模型列用它：models 在 config.yaml 里是人排过的顺序，
+// 排序会让矩阵的列跟配置文件对不上号。
+function uniqKeep(list) {
+  var seen = Object.create(null);
+  var out = [];
+  (list || []).forEach(function (x) {
+    if (x && !seen[x]) { seen[x] = true; out.push(x); }
+  });
+  return out;
+}
+
+/* ---------------------------- 服务态 ---------------------------- */
+
+// 超过这么久没有任何观测 —— 这个桶最近没有流量，说不上正常也说不上受限。
+var OBS_UNKNOWN_MS = 2 * 3600 * 1000;
+// 自然观测超过这么久就不能再当现状用。上游签发的状态有效期是一小时量级，
+// 十五分钟前的那次「正常」不足以说明此刻。
+var OBS_STALE_MS = 15 * 60 * 1000;
+
+function fmtAgo(ms) {
+  if (!isFinite(ms) || ms < 0) { return "—"; }
+  var s = Math.floor(ms / 1000);
+  if (s < 60) { return s + "秒"; }
+  if (s < 3600) { return Math.floor(s / 60) + "分钟"; }
+  return Math.floor(s / 3600) + "小时" + (Math.floor((s % 3600) / 60) || "") + (Math.floor((s % 3600) / 60) ? "分钟" : "");
+}
+
+// obsKindName 把服务端那组封闭的 kind 串转成中文。other 单独成一类而不是并进
+// 「正常」：我们只认识 292 和 312 两个长度，上游哪天换了格式，每个响应都会变成
+// other，那时候把它显示成正常是这个面板能犯的最严重的错误 —— 全线降智，满屏绿灯。
+function obsKindName(kind) {
+  if (kind === "limited") { return "受限"; }
+  if (kind === "normal") { return "正常"; }
+  if (kind === "silent") { return "无状态"; }
+  return "未知格式";
+}
+
+// obs24h 把近 24 小时的自然观测拼成一行。终身计数只能回答「从某时起一共多少」，
+// 回答不了「今天是不是比昨天糟」，而后者才是看这一格的人真正想知道的。
+function obs24h(o) {
+  var r = o && o.recent_24h;
+  if (!r) { return ""; }
+  var n = (r.natural_normal || 0) + (r.natural_limited || 0) + (r.natural_other || 0);
+  if (!n) { return "\n近 24h 无自然观测。"; }
+  return "\n近 24h 自然观测：正常 " + (r.natural_normal || 0)
+       + " · 受限 " + (r.natural_limited || 0)
+       + (r.natural_other ? (" · 未知格式 " + r.natural_other) : "");
+}
+
+// observedState 把一格的观测化成「此刻该显示什么」。
+//
+// 它存在的全部理由是那个盲区：桶里有活模板的时候，每个请求都被注入、上游因此
+// 不再签发，这一侧什么都看不到 —— 最长一个 TTL。这段时间里沿用上一次「正常」
+// 就是拿一小时前的结论冒充现状，所以盲区必须自己占一个状态。
+//
+// 关键的一点：判新鲜度用的是 last_signed_*（上游签发过状态的最近一次，不论那
+// 次请求我们有没有注入），不是 last_natural_*。上游在一个被我们注入过的请求上
+// 仍然签了新的 292，这是「它正常服务这个账号」最直接的证据；只认自然观测就会
+// 把这份证据当成没有，让一个健康的桶在手握实证的时候显示盲区。
+//
+// dryRun 必须传进来。dry_run 下桶里有模板但我们从不注入，此时的沉默是上游自己
+// 的行为，不是我们造成的盲区 —— 而 dry_run 恰恰是运维用来「只看不碰」的模式。
+//
+// 判定顺序：无数据 → 无流量 → 新鲜读数（报警在其中）→ 盲区 → 陈旧。
+function observedState(b, dryRun) {
+  var o = b && b.observed;
+  if (!o || !o.last_at) {
+    return { cls: "obs-none", label: "— 无观测",
+             title: "这个桶还没有任何响应被观测到。不是「正常」，是「没数据」。" };
+  }
+
+  var now = Date.now();
+  var last = Date.parse(o.last_at);                                     // 有没有流量
+  var signed = o.last_signed_at ? Date.parse(o.last_signed_at) : NaN;   // 上游说过什么
+  var natN = (o.natural_normal || 0) + (o.natural_limited || 0) + (o.natural_other || 0);
+  var nSuffix = natN ? "  n=" + natN : "";
+
+  if (isFinite(last) && now - last > OBS_UNKNOWN_MS) {
+    return { cls: "obs-none", label: "— 未知",
+             title: "最近一次观测在 " + fmtAgo(now - last) + "前。这个桶近期没有流量。" + obs24h(o) };
+  }
+
+  var signedFresh = isFinite(signed) && (now - signed) <= OBS_STALE_MS;
+  if (signedFresh) {
+    var ageText = fmtAgo(now - signed) + "前";
+    var via = o.last_signed_wrote ? "在一个我们注入过的请求上" : "主动";
+
+    // 最重要的一条。我们给了有效模板，上游仍然发回受限态 —— 说明这个桶不是
+    // 「缺模板」，是真的被限；补模板救不了它。
+    if (o.last_signed_kind === "limited" && o.last_signed_wrote) {
+      return { cls: "obs-alarm", label: "▲ 受限 · 模板失效",
+               title: "我们注入了有效模板，上游仍然签发受限状态（312），" + ageText + "。\n"
+                    + "疑似降智：该状态下输出质量通常下降。\n"
+                    + "这个桶补模板没有用 —— 受限的是账号在这个模型上的服务，不是我们手上的状态。\n"
+                    + "累计 " + (o.injected_limited || 0) + " 次。" + obs24h(o) };
+    }
+    if (o.last_signed_kind === "limited") {
+      return { cls: "obs-bad", label: "● 受限 (312)" + nSuffix,
+               title: "上游" + via + "签发的是受限状态（312 字符），" + ageText + "。\n"
+                    + "疑似降智：该状态下输出质量通常下降。\n"
+                    + "注：长度本身只证明服务态，这一层是运维判断。" + obs24h(o) };
+    }
+    if (o.last_signed_kind === "normal") {
+      return { cls: "obs-ok", label: "● 正常 (292)" + nSuffix,
+               title: "上游" + via + "签发的是正常状态（292 字符），" + ageText + "。" + obs24h(o) };
+    }
+    // 既不是 292 也不是 312。可能是上游改了格式，也可能是 template_length /
+    // replace_length 配错了。两种都不能说成正常。
+    return { cls: "obs-bad", label: "? 未知格式 (" + (o.last_len || 0) + ")" + nSuffix,
+             title: "上游" + via + "签发了 " + (o.last_len || 0) + " 字符的状态，" + ageText + "，\n"
+                  + "既不是正常态（292）也不是受限态（312）。\n"
+                  + "要么上游换了格式，要么配置里的 template_length / replace_length 对不上了 ——\n"
+                  + "在弄清楚之前，这一格的正常与否无法判断。" + obs24h(o) };
+  }
+
+  // 上游最近没签发过任何状态。为什么，取决于流量还在不在、我们有没有在注入。
+  var trafficFresh = isFinite(last) && (now - last) <= OBS_STALE_MS;
+  var blindFor = isFinite(signed) ? fmtAgo(now - signed) : "开始以来";
+
+  if (b.ready && !dryRun && trafficFresh) {
+    return { cls: "obs-blind", label: "◌ 注入中 · 盲区 " + blindFor,
+             title: "桶里有活模板，每个请求都被注入，上游因此不再签发新状态 —— 这段时间看不到真实服务态。\n"
+                  + "不是「正常」，是「不知道」。\n"
+                  + (isFinite(signed) ? ("上次签发：" + blindFor + "前（" + obsKindName(o.last_signed_kind) + "）\n") : "")
+                  + "注入后上游未再签发 " + (o.injected_silent || 0) + " 次。\n"
+                  + "通常意味着模板被接受了，但这是推断 —— 沉默本身不是证据。" + obs24h(o) };
+  }
+
+  if (b.ready && dryRun && trafficFresh) {
+    return { cls: "obs-blind", label: "◌ 有模板 · 未注入 " + blindFor,
+             title: "dry_run 开着，桶里的模板没有被用出去，所以这段沉默是上游自己的行为，不是我们造成的盲区。\n"
+                  + "上游就是没有签发新状态。\n"
+                  + (isFinite(signed) ? ("上次签发：" + blindFor + "前（" + obsKindName(o.last_signed_kind) + "）") : "") + obs24h(o) };
+  }
+
+  if (!trafficFresh) {
+    var quiet = fmtAgo(now - last);
+    return { cls: "obs-blind", label: "· 无流量 " + quiet + nSuffix,
+             title: "这个桶 " + quiet + "没有请求经过，所以没有新读数 —— 和服务态好坏无关。\n"
+                  + (isFinite(signed) ? ("上次签发：" + fmtAgo(now - signed) + "前（" + obsKindName(o.last_signed_kind) + "）") : "从未观测到上游签发状态。")
+                  + obs24h(o) };
+  }
+
+  // 有流量、桶是空的、上游也不签发。只能报最后看到的，并说清它已经旧了。
+  var stale = isFinite(signed) ? obsKindName(o.last_signed_kind) : "—";
+  return { cls: "obs-blind", label: "· " + stale + "（陈旧）" + nSuffix,
+           title: "最后一次签发是" + (isFinite(signed) ? (fmtAgo(now - signed) + "前") : "很久以前")
+                + "的「" + stale + "」，已经不能代表此刻。\n桶是空的，所以也不在注入盲区里。" + obs24h(o) };
+}
+
+function renderMatrix(d) {
+  var buckets = d.buckets || [];
+
+  // 矩阵就是探测范围：行 = probe_accounts，列 = models。配了范围就按范围画，
+  // 哪怕某个账号一个桶都没有 —— 「点了名却一个都没采到」正是要看的东西。
+  // 范围没配（或 .so 旧到不报 probe_accounts）时退回老行为：按状态报的账号画。
+  var cfgAccts = uniqSorted(strList(d.probe_accounts));
+  var cfgModels = uniqKeep(strList(d.models));
+  var seenAccts = uniqueAuthIds(buckets);
+  var seenModels = uniqSorted(bucketModels(buckets));
+
+  var rows = cfgAccts.length ? cfgAccts : seenAccts;
+  var cols = cfgModels.length ? cfgModels : seenModels;
+  // 范围外的行 / 列：store 里有桶，但不在清单里。照样画出来 —— 这类漂移
+  // （模型改了名、账号被摘掉）只有在这里能被看见。
+  var extraRows = cfgAccts.length
+    ? seenAccts.filter(function (a) { return rows.indexOf(a) < 0; }) : [];
+  var extraCols = cfgModels.length
+    ? seenModels.filter(function (m) { return cols.indexOf(m) < 0; }) : [];
+  var allRows = rows.concat(extraRows);
+  var allCols = cols.concat(extraCols);
+
+  var byKey = Object.create(null);
+  buckets.forEach(function (b) {
+    if (b && b.auth_id && b.model) { byKey[b.auth_id + " " + b.model] = b; }
+  });
+
+  var ready = 0;                  // 范围内就绪
+  var total = rows.length * cols.length;
+  var outsideReady = 0;           // 范围外但 store 里有的
+  var outsideTotal = 0;
+  // 「临近过期」的告警线随 ttl 缩放：固定 600s 在 ttl=240 时会把每个就绪格都
+  // 打成黄色，告警就废了。取 min(600, ttl/3)，3600 时保持原样，240 时剩 ~80s。
+  var warnBelow = Number(d.ttl_seconds) > 0 ? Math.min(600, Number(d.ttl_seconds) / 3) : 600;
+
+  var table = $("matrix");
+  clear(table);
+
+  var thead = el("thead");
+  var hr = el("tr");
+  hr.appendChild(el("th", { text: "账号" }));
+  allCols.forEach(function (m) {
+    var outside = cols.indexOf(m) < 0;
+    hr.appendChild(el("th", {
+      cls: "model" + (outside ? " outscope" : ""),
+      text: m,
+      attrs: outside ? { title: m + "\n不在 models 清单里 —— store 里有它的桶，但下一轮不会去采" } : { title: m }
+    }));
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  var tbody = el("tbody");
+  allRows.forEach(function (acct) {
+    var rowOutside = rows.indexOf(acct) < 0;
+    var tr = el("tr");
+    tr.appendChild(el("td", {
+      cls: "acct" + (rowOutside ? " outscope" : ""),
+      text: acct,
+      attrs: {
+        title: rowOutside
+          ? (acct + "\n不在 probe_accounts 里 —— store 里有它的桶，但下一轮不会去采")
+          : acct
+      }
+    }));
+    allCols.forEach(function (m) {
+      var outside = rowOutside || cols.indexOf(m) < 0;
+      var b = byKey[acct + " " + m];
+      var isReady = !!(b && b.ready);
+      // 桶级模板已随 route-cookie 重构退役:seconds_left/issued_at/expires_at
+      // 不再下发。格子上还活着的倒计时只剩账号级路由 Cookie 池的寿命。
+      var left = b ? (Number(b.route_cookies_seconds_left) || 0) : 0;
+      // 范围外的桶单独计数，不混进「就绪 x/y」—— 那个分数回答的是「这一轮要采的
+      // 采齐了没有」，把范围外的算进去会让它永远也到不了满分。
+      if (outside) {
+        if (b) { outsideTotal++; }
+        if (isReady) { outsideReady++; }
+      } else if (isReady) {
+        ready++;
+      }
+      var cls = !isReady ? "st-miss" : (left < warnBelow ? "st-warn" : "st-ok");
+      var td = el("td", { cls: "cell" });
+      var label = isReady ? fmtLeft(left) : "—";
+      // 路由 Cookie 是账号级的（任何活的一对都能转向任何一个桶），所以同一账号的
+      // 每个格子看到的都是同一个池。上游在签正常态而 Cookie 已死，是「看着健康
+      // 但转向已断粮」的组合，必须在格子上能看出来。
+      var cookieText = left > 0
+        ? "\n路由 Cookie ~" + left + "s（__cflb/__oailb，账号级）"
+        : "\n路由 Cookie 无存活 —— 转向断粮，需等新 pair";
+      var title = (outside ? "【范围外】" : "") + (isReady
+        ? (acct + " / " + m + "\n上次签发 " + fmtTime(b.observed && b.observed.last_signed_at) + cookieText + "\n点击清空此桶")
+        : (acct + " / " + m + "\n缺失或已过期" + cookieText));
+      var btn = el("button", {
+        cls: cls, text: label,
+        attrs: { type: "button", title: title },
+        on: { click: function () { if (isReady) { doClearBucket(acct, m); } } }
+      });
+      btn.setAttribute("aria-label", title);
+      if (isReady && typeof left === "number" && Number(d.ttl_seconds) > 0) {
+        var track = el("span", { cls: "ttl-track", attrs: { "aria-hidden": "true" } });
+        var fill = el("i");
+        fill.style.width = Math.max(0, Math.min(100, left / Number(d.ttl_seconds) * 100)) + "%";
+        track.appendChild(fill);
+        btn.appendChild(track);
+      }
+      if (!isReady) { btn.disabled = true; }
+      td.appendChild(btn);
+      // 服务态，独立于 TTL。桶还有二十分钟寿命、上游却已经在发受限态，是完全
+      // 可能的 —— 那正是最该看见的一格，而只看 TTL 会把它显示成绿色。
+      if (b) {
+        var obs = observedState(b, !!d.dry_run);
+        td.appendChild(el("span", { cls: "obs " + obs.cls, text: obs.label, attrs: { title: obs.title } }));
+      }
+      // 角标对缺桶的格子同样可用 —— 主按钮 disabled，它不受影响。
+      td.appendChild(el("button", {
+        cls: "cellprobe", text: "自检",
+        attrs: { type: "button", title: "自检 " + acct + " / " + m + "（不落盘，耗额度）" },
+        on: {
+          click: function (ev) {
+            ev.stopPropagation();
+            doSelfTest({ auth: acct, model: m });
+          }
+        }
+      }));
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+
+  // 目标桶数严格按 len(probe_accounts) × len(models) 算 —— 探测要采的就是这个
+  // 叉积。任何一边没配就给不出这个数，那时宁可写「—」并说清缺什么，也不要拿
+  // 别的数（比如 store 里已有的账号数）顶上去冒充目标。
+  var targetWhy = "";
+  if (!hasField(d, "probe_accounts")) {
+    targetWhy = "当前 .so 的 status 不报 probe_accounts";
+  } else if (!cfgAccts.length) {
+    targetWhy = "probe_accounts 是空的";
+  } else if (!cfgModels.length) {
+    targetWhy = "models 是空的";
+  }
+  var targetCount = targetWhy ? null : (cfgAccts.length * cfgModels.length);
+
+  $("overviewReady").textContent = targetCount === null ? "—" : ready + " / " + targetCount;
+  $("overviewScope").textContent = targetCount === null ? "请先配置探测范围" : cfgAccts.length + " 个账号 · " + cfgModels.length + " 个模型";
+  var s = $("summary");
+  clear(s);
+  if (allRows.length === 0 && allCols.length === 0) {
+    s.appendChild(el("span", { text: "既没有配探测范围，store 里也还没有任何桶 —— 探测尚未跑过，或 store_dir 为空。" }));
+  } else {
+    s.appendChild(el("span", { text: "就绪 " }));
+    s.appendChild(el("b", { text: ready + "/" + total }));
+    s.appendChild(el("span", { text: "　目标桶数 " }));
+    s.appendChild(el("b", { text: targetCount === null ? "—" : String(targetCount) }));
+    s.appendChild(el("span", {
+      text: targetCount === null
+        ? ("（算不出来：" + targetWhy + "；矩阵按状态报的账号和模型画）")
+        : ("（" + cfgAccts.length + " 个账号 × " + cfgModels.length + " 个模型）")
+    }));
+    if (outsideTotal) {
+      s.appendChild(el("span", { text: "　另有 " }));
+      s.appendChild(el("b", { text: String(outsideTotal) }));
+      s.appendChild(el("span", { text: " 个范围外的桶（其中 " + outsideReady + " 个仍就绪），不计入上面的分数" }));
+    }
+  }
+}
+
+// 流水。一行一次上游响应，最新在上。
+//
+// 「已注入 / 未注入」这一列不是装饰：只有未注入的行才是自然观测。把两者混在
+// 一起算比率，得到的是插件自己造出来的采样分布，不是上游的降级率。
+function renderObservationFeed(d) {
+  var feed = Array.isArray(d.observation_feed) ? d.observation_feed : [];
+  var box = $("obsFeed");
+  clear(box);
+
+  var since = $("obsSince");
+  since.textContent = d.observations_since
+    ? ("统计自 " + fmtTime(d.observations_since) + "　共 " + feed.length + " 条（上限 100）")
+    : "";
+
+  var empty = $("obsEmpty");
+  clear(empty);
+  if (!feed.length) {
+    empty.textContent = hasField(d, "observation_feed")
+      ? "还没有观测到任何响应。插件只在上游签发状态、或我们注入过模板时才记一笔 —— 普通流量大多两样都不占。"
+      : "当前 .so 不报 observation_feed，先更新插件。";
+    return;
+  }
+
+  feed.forEach(function (e) {
+    if (!e) { return; }
+    var limited = e.kind === "limited";
+    var alarm = limited && e.wrote;
+    var cls = "obsrow" + (alarm ? " is-alarm" : (limited ? " is-bad" : (e.kind === "normal" ? " is-ok" : "")));
+    var row = el("div", { cls: cls });
+    row.appendChild(el("span", { cls: "t", text: fmtClock(e.at) }));
+    row.appendChild(el("span", { cls: "who", text: e.auth_id || "—", attrs: { title: e.auth_id || "" } }));
+    row.appendChild(el("span", { cls: "mdl", text: e.model || "—", attrs: { title: e.model || "" } }));
+
+    var verdict = "—";
+    if (limited && e.served) { verdict = "降级 → " + e.served; }
+    else if (e.kind === "normal") { verdict = "正常 (" + (e.len || "?") + ")"; }
+    else if (limited) { verdict = "受限 (" + (e.len || "?") + ")"; }
+    else if (e.kind === "silent") { verdict = "未签发"; }
+    else { verdict = "其他 (" + (e.len || 0) + ")"; }
+    row.appendChild(el("span", { cls: "verdict", text: verdict }));
+
+    row.appendChild(el("span", {
+      cls: "tag", text: e.wrote ? "已注入" : "未注入",
+      attrs: {
+        title: e.wrote
+          ? "这次请求带着我们注入的模板出去。上游此后签发的东西不算自然观测。"
+          : "这次请求没有被改写，上游签发的是它自己的判断 —— 这才是自然观测。"
+      }
+    }));
+    box.appendChild(row);
+  });
+}
+
+function renderCounters(d) {
+  var c = d.counters || {};
+  var box = $("counters");
+  clear(box);
+  [["harvest", "harvest"], ["substitute", "substitute"], ["pass", "pass"], ["skip", "skip"]]
+    .forEach(function (pair) {
+      box.appendChild(el("div", { cls: "counter" }, [
+        el("div", { cls: "n", text: (c[pair[0]] === undefined ? "—" : c[pair[0]]) }),
+        el("div", { cls: "l", text: pair[1] })
+      ]));
+    });
+  var since = $("since");
+  clear(since);
+  since.appendChild(el("span", { text: "统计自 " + fmtTime(c.since || d.counters_since) + "（进程内计数，重启 CPA 会归零）" }));
+}
+
+function renderSelftestAuths(d) {
+  var sel = $("selftestAuth");
+  var prev = sel.value;
+  var hadOptions = sel.options.length > 0;
+  var accounts = uniqueAuthIds(d.buckets);
+
+  clear(sel);
+  accounts.forEach(function (a) {
+    sel.appendChild(el("option", { text: a, attrs: { value: a } }));
+  });
+  // 「不指定」排在最后且不是默认值：定向才是这个按钮的正常用法，而且不定向
+  // 时连「实际用了哪个号」都拿不到，没什么诊断价值。
+  sel.appendChild(el("option", { text: "不指定（由 CPA 调度决定）", attrs: { value: "" } }));
+
+  if (!hadOptions) {
+    // 首次填充：落在第一个具体账号上。
+    sel.value = accounts.length ? accounts[0] : "";
+  } else if (prev === "" || accounts.indexOf(prev) >= 0) {
+    sel.value = prev;           // 用户的选择（含明确选的「不指定」）要保住
+  } else {
+    sel.value = accounts.length ? accounts[0] : "";
+  }
+}
+
+function renderSelftestModels(d) {
+  var sel = $("selftestModel");
+  var prev = sel.value;
+  clear(sel);
+  (d.models || []).forEach(function (m) {
+    sel.appendChild(el("option", { text: m, attrs: { value: m } }));
+  });
+  if (prev) { sel.value = prev; }
+}
+
+/* ---------------------------- 探测范围 ---------------------------- */
+
+// 这三项是【探测范围】，不是业务开关：只决定下一轮探测去采哪些桶。业务端替不
+// 替换只看 store 里有没有桶，跟这里无关。
+//
+// 值的来源分两条：
+//   账号 / 模型 —— 勾选，候选清单来自 /ops/choices（服务端问 CPA 要的真实凭据
+//                  清单 + 值得提供的模型 id）。那条路由不在就退回老办法：从
+//                  status 的 probe_accounts / models / buckets 推。
+//   代理       —— 明文，一行一个，status 直接回传原值。没动过时 diff 为空。
+//
+// 勾选清单里的每一项都有两个字符串，不能混：
+//   name —— 提交值。账号的 name 是凭据文件名，【含客户邮箱】。
+//   text —— 显示值。choices 给的 label（服务端已经把邮箱去掉了）。
+// 渲染只碰 text；name 只活在 JS 里，既不渲染也不写进 DOM 属性。
+
+var scope = {
+  // 规范化后的候选项：{name, text, disabled, missing}，顺序即提交顺序。
+  acctItems: [],
+  acctSelected: Object.create(null),
+  hasAccounts: false,       // status 里有没有 probe_accounts（旧 .so 没有）
+  modelItems: [],
+  modelSelected: Object.create(null),
+  extraModels: [],          // 手填进来、清单里还没有的模型 id
+  hasProxyFields: false,
+  // 明文。status 直接回传原值，所以这里就是真值，没动过时 diff 为空。
+  proxyText: "",
+  rotText: "",
+  hasRotField: false,
+  dirty: false,             // 人动过表单。动过之后轮询就不再覆盖它
+  acctSig: "",
+  modelSig: "",
+  // ---- /ops/choices 的读取结果。三者互斥地描述「清单能不能用」 ----
+  choices: null,            // {accounts:[…], models:[…]}；null = 还没拿到 / 拿不到
+  choicesErr: "",           // 非空 = 服务端够不到 CPA 的凭据清单，原话照抄
+  choicesMissing: false,    // 404：当前 .so 还没有这条路由
+  choicesAt: 0              // 上次【发起】读取的时刻，用来限速
+};
+
+function hasField(obj, k) {
+  return !!obj && Object.prototype.hasOwnProperty.call(obj, k);
+}
+
+// 服务端给的字符串列表原样取用：不 trim、不改大小写。这里的值是模型 id 和账号
+// 文件名，任何「顺手规范化」都会在保存时被当成一次真实改动写回配置。
+function strList(v) {
+  var out = [];
+  if (Array.isArray(v)) {
+    v.forEach(function (x) { if (typeof x === "string" && x !== "") { out.push(x); } });
+  }
+  return out;
+}
+
+function uniqSorted(list) {
+  var seen = Object.create(null);
+  var out = [];
+  (list || []).forEach(function (x) {
+    if (x && !seen[x]) { seen[x] = true; out.push(x); }
+  });
+  out.sort();
+  return out;
+}
+
+// 账号和模型是集合语义（勾选框排不出顺序），代理是序列语义（顺序就是尝试顺序）。
+function sameSet(a, b) {
+  if (a.length !== b.length) { return false; }
+  var x = a.slice().sort(), y = b.slice().sort();
+  for (var i = 0; i < x.length; i++) { if (x[i] !== y[i]) { return false; } }
+  return true;
+}
+
+function sameList(a, b) {
+  if (!a || !b || a.length !== b.length) { return false; }
+  for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) { return false; } }
+  return true;
+}
+
+// 一行一个，去掉空行和行首尾空白。不校验 URL、不补协议头 —— 合法性由插件判定并
+// 通过 config_errors 回报，前端擅自「修正」只会让人看不到真实的错。
+function parseLines(text) {
+  var out = [];
+  String(text === null || text === undefined ? "" : text).split(/\r?\n/).forEach(function (line) {
+    var s = line.trim();
+    if (s) { out.push(s); }
+  });
+  return out;
+}
+
+function looksMasked(s) { return String(s).indexOf("***") >= 0; }
+
+// 账号一侧能不能编辑，只取决于当前 .so 的 status 报不报 probe_accounts。
+// 旧 .so 不报时不要把复选框显示成「全都没勾」—— 那看着像人自己没选。
+function scopeAccountsEditable() { return scope.hasAccounts; }
+
+// 勾选顺序 = 清单顺序。提交的就是这个数组，服务端怎么列的就怎么发回去。
+function selectedNames(items, selected) {
+  var out = [];
+  items.forEach(function (it) { if (selected[it.name]) { out.push(it.name); } });
+  return out;
+}
+
+function selectedAccounts() { return selectedNames(scope.acctItems, scope.acctSelected); }
+
+function selectedModels() { return selectedNames(scope.modelItems, scope.modelSelected); }
+
+function hasItemNamed(items, name) {
+  for (var i = 0; i < items.length; i++) { if (items[i].name === name) { return true; } }
+  return false;
+}
+
+function countMissing(items) {
+  var n = 0;
+  items.forEach(function (it) { if (it.missing) { n++; } });
+  return n;
+}
+
+/* ------------------------- /ops/choices 与候选项 ------------------------- */
+
+// 只有「拿到了清单、路由存在、服务端没报错」才算可用。error 非空说明服务端够不
+// 到 CPA 的凭据清单，那时 accounts 多半是空的 —— 把一个空清单当真，会让所有已
+// 配的账号都显示成「清单里没有」，还不如整块退回旧来源，并把原话说出来。
+function usingChoices() {
+  return !!(scope.choices && !scope.choicesErr && !scope.choicesMissing);
+}
+
+// 服务端条目 → 规范形状。name 是唯一必需的字段（没有它就没有可提交的值）；
+// 其余缺了都能兜住，宁可少一个标签也不要因为形状没对上整块不显示。
+function choiceList(v) {
+  var out = [];
+  var seen = Object.create(null);
+  if (!Array.isArray(v)) { return out; }
+  v.forEach(function (x) {
+    if (!x || typeof x !== "object") { return; }
+    var name = (typeof x.name === "string") ? x.name : "";
+    if (!name || seen[name]) { return; }
+    seen[name] = true;
+    out.push({
+      name: name,
+      label: (typeof x.label === "string") ? x.label : "",
+      disabled: !!x.disabled,
+      selected: !!x.selected
+    });
+  });
+  return out;
+}
+
+// 只在没有 label 可用时才走这里：把 user@host 那一段换成省略号。账号名形如
+// codex-620f5a42-someone@example.com-pro.json，掐掉中段还剩得下前缀和后缀，
+// 够在矩阵里对上号，又不会把客户邮箱印在勾选清单上。
+function elideName(name) {
+  return String(name).replace(/[^\s\-@]+@[^\s\-@]+/, "…");
+}
+
+// choices 的条目 + 配置里选着、但清单里没有的条目。后者必须补进来并标出来：
+// 一个静悄悄消失的账号 = 探测范围被无声缩小，而页面上看不出发生过什么。
+// secret=true 的那一侧（账号）没有 label 就就地缩写，绝不整串显示。
+function itemsFromChoices(list, cfgNames, secret) {
+  var out = [];
+  var seen = Object.create(null);
+  (list || []).forEach(function (c) {
+    if (seen[c.name]) { return; }
+    seen[c.name] = true;
+    out.push({
+      name: c.name,
+      text: c.label || (secret ? elideName(c.name) : c.name),
+      disabled: !!c.disabled,
+      missing: false
+    });
+  });
+  (cfgNames || []).forEach(function (n) {
+    if (!n || seen[n]) { return; }
+    seen[n] = true;
+    out.push({
+      name: n,
+      text: secret ? elideName(n) : n,
+      disabled: false,
+      missing: true
+    });
+  });
+  return out;
+}
+
+// 退回路径的候选项。这一侧没有 label 可用 —— status 里就只有文件名，而矩阵那
+// 一列本来也印着同一个字符串，所以这里原样显示，不额外缩写：缩写会让两个只有
+// 邮箱段不同的账号在清单里长得一模一样。
+function itemsFromNames(names) {
+  var out = [];
+  (names || []).forEach(function (n) {
+    out.push({ name: n, text: n, disabled: false, missing: false });
+  });
+  return out;
+}
+
+// 永远 resolve：清单读不到不该把整次刷新拖成失败态 —— status 还在，页面照常能
+// 用，只是勾选清单退回旧来源。失败原因记在 scope 上，由 renderScopeMeta 说出来。
+function fetchChoices(force) {
+  var now = Date.now();
+  if (!force) {
+    if (scope.dirty) { return Promise.resolve(); }
+    if (scope.choicesAt && (now - scope.choicesAt) < CHOICES_MS) { return Promise.resolve(); }
+    var run = probeRunOf(state.data);
+    if (run && run.running) { return Promise.resolve(); }
+  }
+  scope.choicesAt = now;
+  // 读，不是动作，所以走 resGet 不带 confirm=1（见 management.go 的 routeOpsChoices）。
+  return resGet("/ops/choices").then(function (c) {
+    c = c || {};
+    scope.choices = { accounts: choiceList(c.accounts), models: choiceList(c.models) };
+    scope.choicesErr = (typeof c.error === "string") ? c.error : "";
+    scope.choicesMissing = false;
+  }).catch(function (err) {
+    // 404 和别的错必须分开说：前者是「这个 .so 还没有这个功能」，换 .so 才有；
+    // 后者是「有这个功能但这次没读到」，要去看服务端。糊成一句会让人找错方向。
+    var gone = (err instanceof ApiError) && err.status === 404;
+    scope.choices = null;
+    scope.choicesMissing = gone;
+    scope.choicesErr = gone ? "" : ((err && err.message) ? err.message : String(err));
+  });
+}
+
+// 清单读不到时那句解释。跟探测那一节「当前 .so 的 status 不返回 probe_run」
+// 是同一个套路：把降级说成一句人话，就地挂在相关控件旁边。
+function choicesWarning() {
+  if (scope.choicesMissing) {
+    return "当前 .so 没有 /ops/choices —— 账号和模型退回按 status 报的清单列（照旧能勾能存，只是名字是 CPA 报什么就是什么，没法核对哪个号还在）。换成新的 .so 并重启 CPA 才有。";
+  }
+  if (scope.choicesErr) {
+    return "服务端读不到可选清单，已退回按 status 报的清单列：" + scope.choicesErr;
+  }
+  return "";
+}
+
+function bucketModels(buckets) {
+  var out = [];
+  (buckets || []).forEach(function (b) { if (b && b.model) { out.push(b.model); } });
+  return out;
+}
+
+// 每次刷新都跑。候选清单跟着状态走，但【人动过之后就不再覆盖已勾选的值】——
+// 10 秒一次的轮询把正在填的表单刷掉，是最容易让人存错东西的做法。
+function syncScope(d) {
+  scope.hasAccounts = hasField(d, "probe_accounts");
+  var cfgAccts = strList(d.probe_accounts);
+  var cfgModels = strList(d.models);
+
+  if (usingChoices()) {
+    // 顺序就是服务端列出来的顺序，一个字都不重排 —— 保存时提交的就是它。
+    // 配置里选着但清单里没有的补在末尾（itemsFromChoices 里标 missing）。
+    scope.acctItems = itemsFromChoices(scope.choices.accounts, cfgAccts, true);
+    scope.modelItems = itemsFromChoices(scope.choices.models,
+      cfgModels.concat(scope.extraModels), false);
+  } else {
+    // 退回路径：/ops/choices 没有或读不到，清单只能从 status 推。这是它出现之
+    // 前的行为，原样保留 —— 旧 .so 上这个页面必须照常能用。
+    // 点了名但一个桶都没有的账号也要出现在清单里，否则「我明明选了它」没处看。
+    scope.acctItems = itemsFromNames(uniqSorted(uniqueAuthIds(d.buckets).concat(cfgAccts)));
+    scope.modelItems = itemsFromNames(
+      uniqSorted(cfgModels.concat(bucketModels(d.buckets), scope.extraModels)));
+  }
+
+  scope.hasProxyFields = hasField(d, "probe_proxies") || hasField(d, "probe_proxy_count");
+  // 旧 .so 不报这个字段。那时轮换栏要禁用，而不是显示成空的 —— 空的会被当成
+  // 「我没填」，然后一保存就把池子清掉。
+  scope.hasRotField = hasField(d, "probe_proxies_rotating");
+
+  if (scope.dirty) { return; }
+
+  var sel = Object.create(null);
+  cfgAccts.forEach(function (a) { sel[a] = true; });
+  // choices 里的 selected 只在 status 不报 probe_accounts 时才用得上。勾选状态
+  // 必须和 scopeDiff 的基线（status）同源：两边各说各的，会让一个没动过的表单
+  // 显示成「有未保存的改动」，然后被存回一次谁也没要的改动。
+  if (!scope.hasAccounts && usingChoices()) {
+    scope.choices.accounts.forEach(function (c) { if (c.selected) { sel[c.name] = true; } });
+  }
+  scope.acctSelected = sel;
+
+  var msel = Object.create(null);
+  cfgModels.forEach(function (m) { msel[m] = true; });
+  scope.modelSelected = msel;
+
+  // 明文回填。这里曾经显示掩码，代价是每次想改一条代理都得把整个池子重打一遍
+  // —— 操作员明确要求改掉。status 现在直接回传原值，所以框里就是真值：没动过
+  // 时 diff 为空，改一行也就只是改一行。
+  scope.proxyText = strList(d.probe_proxies).join("\n");
+  scope.rotText = strList(d.probe_proxies_rotating).join("\n");
+}
+
+// 签名覆盖每一个会改变这块 DOM 的东西：清单、显示名、两个状态标、勾选、整体
+// 停用位。漏掉任何一项，那一项就再也不会刷新了。
+function checksSig(items, selected, disabled) {
+  return JSON.stringify([
+    items.map(function (it) { return [it.name, it.text, !!it.disabled, !!it.missing]; }),
+    items.map(function (it) { return !!selected[it.name]; }),
+    !!disabled
+  ]);
+}
+
+// 上一次渲染出来的顺序，按 box 记。重建之后靠它把焦点放回【同一项】—— 按下标
+// 放回去会在清单长短变化时落到隔壁那一行，那比丢焦点更糟：下一次空格就勾错号
+// 了。名字只留在这个闭包里，不写进 DOM 属性。
+var renderedNames = Object.create(null);
+
+function checkTitle(it) {
+  var bits = [it.text];
+  if (it.disabled) {
+    bits.push("这个凭据在 CPA 里是停用的。仍然可以勾 —— 停用只是 CPA 不给它派业务流量，探测是点名探的，照样探得到。");
+  }
+  if (it.missing) {
+    bits.push("配置里选着它，但服务端的清单里没有这一项。这里照样勾着，免得一次刷新就把探测范围悄悄缩小了；真要去掉，取消勾选再保存。");
+  }
+  return bits.join("\n");
+}
+
+// 只在清单或勾选真的变了时重建 DOM：每 10 秒把一排勾选框拆了重建，会把正在
+// 操作的人的焦点和滚动位置一起弄丢。真要重建时也把这两样还回去。
+function renderChecks(boxId, sigKey, items, selected, disabled, emptyText, onToggle) {
+  var sig = checksSig(items, selected, disabled);
+  if (scope[sigKey] === sig) { return; }
+  scope[sigKey] = sig;
+
+  var box = $(boxId);
+  var keepTop = box.scrollTop;
+  var focusName = "";
+  var prev = renderedNames[boxId] || [];
+  var inputs = box.getElementsByTagName("input");
+  for (var i = 0; i < inputs.length; i++) {
+    if (inputs[i] === document.activeElement) { focusName = prev[i] || ""; break; }
+  }
+
+  box.className = "checks" + (disabled ? " disabled" : "");
+  clear(box);
+  renderedNames[boxId] = items.map(function (it) { return it.name; });
+
+  if (!items.length) {
+    box.appendChild(el("div", { cls: "empty", text: emptyText }));
+    return;
+  }
+
+  var refocus = null;
+  items.forEach(function (it) {
+    var cb = el("input", { attrs: { type: "checkbox" } });
+    cb.checked = !!selected[it.name];
+    // 整体停用（旧 .so 报不出 probe_accounts）才禁用勾选框。条目自己的
+    // it.disabled 是 CPA 里的启用位，只挂个标，不挡勾。
+    cb.disabled = !!disabled;
+    cb.addEventListener("change", function () { onToggle(it.name, cb.checked); });
+    if (focusName && it.name === focusName) { refocus = cb; }
+
+    // 只显示 it.text。账号的 it.name 是凭据文件名【含客户邮箱】，它是提交值，
+    // 不进 DOM —— 不做二次查询、不显示除这个短名以外的任何账号信息，更没有
+    // 任何 token。
+    var kids = [cb, el("span", { text: it.text, attrs: { title: it.text } })];
+    if (it.disabled) { kids.push(el("i", { cls: "tag off", text: "CPA 已停用" })); }
+    if (it.missing) { kids.push(el("i", { cls: "tag gone", text: "清单里没有" })); }
+    box.appendChild(el("label", {
+      cls: "check" + (it.disabled ? " isoff" : ""),
+      attrs: { title: checkTitle(it) }
+    }, kids));
+  });
+
+  box.scrollTop = keepTop;
+  // preventScroll 是为了不让「把焦点放回去」再把刚还原好的滚动位置顶掉。
+  // 老浏览器不认这个参数会当成无参调用，那也只是退回到「可能跳一下」。
+  if (refocus) { refocus.focus({ preventScroll: true }); }
+}
+
+function renderScopeChecks() {
+  var acctOff = !scopeAccountsEditable();
+  renderChecks("scopeAccounts", "acctSig", scope.acctItems, scope.acctSelected, acctOff,
+    usingChoices()
+      ? "服务端说 CPA 手里一个 Codex 凭据都没有。"
+      : "一个账号都没有 —— CPA 没报账号列表，store 也是空的。",
+    function (name, on) { scope.acctSelected[name] = on; onScopeEdited(); });
+  renderChecks("scopeModels", "modelSig", scope.modelItems, scope.modelSelected, false,
+    "清单是空的。用下面的输入框补一个模型 id。",
+    function (name, on) { scope.modelSelected[name] = on; onScopeEdited(); });
+}
+
+// 勾选之后不重建清单（会打断正在点的人），只把签名对齐，免得下一次轮询把它
+// 重建掉，然后更新那几处计数。
+function onScopeEdited() {
+  scope.dirty = true;
+  scope.acctSig = checksSig(scope.acctItems, scope.acctSelected, !scopeAccountsEditable());
+  scope.modelSig = checksSig(scope.modelItems, scope.modelSelected, false);
+  renderScopeMeta(state.data || {});
+}
+
+function renderScopeProxies() {
+  renderOneProxyBox("scopeRotating", "rotText", !scope.hasRotField);
+  var ta = $("scopeProxies");
+  // 明文，始终可写，不做掩码 —— 操作员明确要求过：掩码的代价是改一条代理就得
+  // 把整个池子重打一遍。别再「顺手改进」成掩码，那是从头来过。
+  ta.readOnly = false;
+  // 正在输入时不要动它的值，否则光标会跳。输入事件已经把值同步进 scope 了。
+  if (document.activeElement !== ta && ta.value !== scope.proxyText) {
+    ta.value = scope.proxyText;
+  }
+}
+
+// 轮换栏走同一套规则：正在输入时不碰它的值，否则光标会跳。
+function renderOneProxyBox(id, field, readOnly) {
+  var ta = $(id);
+  if (!ta) { return; }
+  ta.readOnly = !!readOnly;
+  if (document.activeElement !== ta && ta.value !== scope[field]) {
+    ta.value = scope[field];
+  }
+}
+
+/* ---------------- 代理连通性 ----------------
+   结果不属于 status，所以自己存一份：轮询不会覆盖它，测完之后一直留在页面上，
+   直到下一次测试。 */
+var proxyCheck = { data: null, running: false };
+
+var PC_LABEL = { ok: "通", blocked: "被拒", ratelimited: "限速", unexpected: "异常", dead: "不通" };
+var PC_CLASS = { ok: "v-ok", blocked: "v-bad", ratelimited: "v-warn", unexpected: "v-warn", dead: "v-bad" };
+
+function syncProxyCheckBtn() {
+  var btn = $("btnProxyCheck");
+  if (!btn) { return; }
+  btn.disabled = proxyCheck.running;
+  btn.textContent = proxyCheck.running ? "测试中…" : "测试连通性";
+}
+
+function renderProxyCheck() {
+  var box = $("proxyCheck");
+  if (!box) { return; }
+  clear(box);
+
+  if (proxyCheck.running) {
+    box.appendChild(el("div", { cls: "pcsum",
+      text: "正在逐条测……请求不带任何凭据，所以不消耗额度。" }));
+    return;
+  }
+  var d = proxyCheck.data;
+  if (!d) { return; }
+
+  var bits = [];
+  bits.push(d.direct ? "本机直连" : ("共 " + d.checked + " 条"));
+  bits.push(d.ok + " 通");
+  if (d.blocked) { bits.push(d.blocked + " 被拒/限速"); }
+  if (d.dead) { bits.push(d.dead + " 不通"); }
+  if (d.other) { bits.push(d.other + " 异常"); }
+  if (d.distinct_ips) { bits.push("出口地址 " + d.distinct_ips + " 个"); }
+  bits.push((Number(d.ms) / 1000).toFixed(1) + "s");
+
+  var sum = el("div", { cls: "pcsum" });
+  sum.appendChild(el("b", { text: bits.shift() }));
+  sum.appendChild(el("span", { text: " · " + bits.join(" · ") }));
+  box.appendChild(sum);
+
+  if (d.note) { box.appendChild(el("div", { cls: "pcsum", text: d.note })); }
+  if (d.timed_out) {
+    box.appendChild(el("div", { cls: "pcsum warntext",
+      text: "整批跑到时间上限了 —— 下面若有没跑完的，那是没测到，不是不通。" }));
+  }
+  // 池子条数多、出口地址少 = 好几条代理其实共用一个出口。探测把它们当成不同出口
+  // 轮着试，实际上是同一个地址被连着打 —— 花了钱却没换到出口的典型形态，而这是
+  // 页面上唯一能看出来的地方。
+  if (d.mismatches) {
+    box.appendChild(el("div", { cls: "pcsum warntext",
+      text: "有 " + d.mismatches + " 条放错了池子（见下面带 ⚠ 的行）。放在静态池里的轮换代理，" +
+            "失败时 55 分钟才重试一次，白白浪费掉它每次换 IP 的能力。" }));
+  }
+  // 只对静态池说这句。轮换池本来就该每次都不一样，拿它算「去重后几个出口」
+  // 只是在复述有几条轮换代理，没有信息量。
+  var staticN = Number(d.static_checked) || 0;
+  if (!d.direct && d.distinct_ips > 0 && staticN > 1 && d.distinct_ips < staticN) {
+    box.appendChild(el("div", { cls: "pcsum warntext",
+      text: "注意：静态池里 " + staticN + " 条只落在 " + d.distinct_ips +
+            " 个出口地址上。地址相同的几条，对上游来说是同一个出口。" }));
+  }
+
+  var list = el("div", { cls: "pclist" });
+  (d.results || []).forEach(function (r) {
+    var row = el("div", { cls: "pcrow " + (PC_CLASS[r.verdict] || "v-warn") });
+    var line = el("div", { cls: "pcline" });
+    line.appendChild(el("span", { cls: "idx", text: "#" + r.index }));
+    line.appendChild(el("span", { cls: "vd", text: PC_LABEL[r.verdict] || r.verdict }));
+    line.appendChild(el("span", { cls: "pool", text: r.pool === "rotating" ? "轮换" : "静态" }));
+    var meta = [];
+    if (r.status_code) { meta.push(String(r.status_code)); }
+    meta.push((Number(r.ms) / 1000).toFixed(1) + "s");
+    if (r.exit_ip) { meta.push(r.exit_ip); }
+    if (r.country) { meta.push(r.country); }
+    if (r.colo) { meta.push(r.colo); }
+    if (r.proxy) { meta.push(r.proxy); }
+    line.appendChild(el("span", { cls: "meta", text: meta.join("  ") }));
+    row.appendChild(line);
+    // 通的那些不再多解释一句：十八行「一切正常」会把真正出问题的两行淹掉。
+    if (r.verdict !== "ok" && r.detail) {
+      row.appendChild(el("div", { cls: "why", text: r.detail }));
+    }
+    // 声明错了是独立于连通性的一件事：一条完全「通」的代理照样可能放错池子。
+    if (r.mismatch) {
+      row.appendChild(el("div", { cls: "why bad", text: "⚠ " + r.mismatch }));
+    }
+    list.appendChild(row);
+  });
+  box.appendChild(list);
+}
+
+function renderScopeMeta(d) {
+  d = d || {};
+  var selA = selectedAccounts();
+  var selM = selectedModels();
+
+  var warn = choicesWarning();
+
+  var aNote = $("scopeAcctNote");
+  clear(aNote);
+  var aText;
+  if (!scopeAccountsEditable()) {
+    aText = "当前 .so 的 status 不报 probe_accounts，勾选已停用 —— 不把猜出来的范围存回去";
+  } else {
+    aText = "已选 " + selA.length + " / 候选 " + scope.acctItems.length;
+    var aGone = countMissing(scope.acctItems);
+    // 这句必须说出来：清单里少一个号，和「这个号被摘掉了」是两回事，而后者
+    // 不吭声就等于范围被无声缩小。
+    if (aGone) { aText += "；其中 " + aGone + " 项 CPA 已不再报告，仍勾着"; }
+  }
+  aNote.className = "hint" + ((!scopeAccountsEditable() || warn) ? " warn" : "");
+  aNote.appendChild(el("span", { text: aText }));
+  // 降级说明只挂一次（账号是第一列），文案里已经说清它同时影响模型。
+  if (warn) { aNote.appendChild(el("span", { text: "　" + warn })); }
+
+  var mNote = $("scopeModelNote");
+  clear(mNote);
+  var mText = "已选 " + selM.length + " / 候选 " + scope.modelItems.length;
+  var mGone = countMissing(scope.modelItems);
+  if (mGone) { mText += "；其中 " + mGone + " 项不在服务端清单里"; }
+  mNote.className = "hint";
+  mNote.appendChild(el("span", { text: mText }));
+
+  var pNote = $("scopeProxyNote");
+  clear(pNote);
+  var count = (typeof d.probe_proxy_count === "number") ? d.probe_proxy_count : null;
+  var pText;
+  if (scope.hasProxyFields) {
+    pText = "明文显示可直接编辑" + (count === null ? "" : ("，插件里共 " + count + " 条"));
+  } else {
+    pText = "当前 .so 的 status 不返回代理信息";
+  }
+  pNote.appendChild(el("span", { text: pText }));
+
+  var rNote = $("scopeRotNote");
+  if (rNote) {
+    clear(rNote);
+    var rCount = (typeof d.probe_proxy_rotating_count === "number") ? d.probe_proxy_rotating_count : null;
+    rNote.appendChild(el("span", {
+      text: scope.hasRotField
+        ? ("明文显示可直接编辑" + (rCount === null ? "" : ("，插件里共 " + rCount + " 条")))
+        : "当前 .so 不支持轮换池 —— 换新版并重启 CPA 后可用"
+    }));
+  }
+
+  var pHint = $("scopeProxyHint");
+  clear(pHint);
+  var lines = parseLines(scope.proxyText);
+  var notURL = lines.filter(function (l) { return !/^[a-z][a-z0-9+.\-]*:\/\//i.test(l); });
+  var maskedLines = lines.filter(looksMasked);
+  var baseline = strList((state.data || {}).probe_proxies);
+  var touched = !sameList(baseline, lines);
+  pHint.className = "hint" + (maskedLines.length || notURL.length ? " warn" : "");
+  var bits = [lines.length + " 行"];
+  if (!touched) {
+    bits.push("与插件里的一致，这次保存【不会】提交代理");
+  } else {
+    bits.push("保存时会替换整个清单；顺序就是探测的尝试顺序");
+  }
+  if (maskedLines.length) {
+    // 明文回填之后，带 *** 的行只可能是从旧版本页面复制过来的掩码。存回去会
+    // 毁掉那条代理，而且毁得很隐蔽：配置看着还在，探测却连不出去。
+    bits.push("有 " + maskedLines.length + " 行带着 ***，那是旧版的掩码不是真值，保存会被拦下");
+  }
+  if (notURL.length) {
+    bits.push(notURL.length + " 行不像 URL（少 scheme://）—— 照样提交，合法性由插件判，错了会出现在下面的配置错误里");
+  }
+  pHint.appendChild(el("span", { text: bits.join("；") + "。" }));
+
+  var dirty = $("scopeDirty");
+  clear(dirty);
+  dirty.className = "hint" + (scope.dirty ? " warn" : "");
+  // 账号那一侧读不到的时候，不要写「0 账号」—— 那看着像是人自己一个都没选。
+  dirty.appendChild(el("span", {
+    text: (scopeAccountsEditable()
+            ? ("表单：" + selA.length + " 账号 × " + selM.length + " 模型 = " +
+               (selA.length * selM.length) + " 个目标桶")
+            : ("表单：模型 " + selM.length + " 个；账号这一侧读不到，算不出目标桶数")) +
+          (scope.dirty ? " · 有未保存的改动" : " · 与当前配置一致")
+  }));
+
+  $("btnScopeReset").disabled = !scope.dirty;
+}
+
+// config_errors 的元素形状由插件决定，这里对字符串、对象和 map 都兜住 ——
+// 宁可显示一行 JSON，也不要因为形状没对上就把错误吞掉。
+function configErrorLines(d) {
+  var v = d ? d.config_errors : null;
+  var out = [];
+
+  function one(x) {
+    if (x === null || x === undefined) { return ""; }
+    if (typeof x === "string") { return x; }
+    if (typeof x === "object") {
+      var head = [];
+      ["field", "key", "name", "item", "value"].forEach(function (k) {
+        if (typeof x[k] === "string" && x[k]) { head.push(x[k]); }
+      });
+      var msg = "";
+      ["message", "error", "reason", "detail"].forEach(function (k) {
+        if (!msg && typeof x[k] === "string" && x[k]) { msg = x[k]; }
+      });
+      if (msg) { head.push(msg); }
+      if (head.length) { return head.join("："); }
+      try { return JSON.stringify(x); } catch (e) { return String(x); }
+    }
+    return String(x);
+  }
+
+  if (typeof v === "string") {
+    if (v) { out.push(v); }
+  } else if (Array.isArray(v)) {
+    v.forEach(function (x) { var s = one(x); if (s) { out.push(s); } });
+  } else if (v && typeof v === "object") {
+    Object.keys(v).forEach(function (k) {
+      var s = one(v[k]);
+      out.push(s ? (k + "：" + s) : k);
+    });
+  }
+  return out;
+}
+
+// 这块没有关闭按钮：它是一个【状态】而不是一条事件通知。关掉它，配置还是错的，
+// 而下一次轮询它又会回来 —— 不如一直挂着，直到配置改对。
+function renderScopeErrors(d) {
+  var box = $("scopeErrors");
+  var lines = configErrorLines(d);
+  var sig = lines.join("\u0000");
+  if (box.getAttribute("data-sig") === sig) { return; }
+  box.setAttribute("data-sig", sig);
+  clear(box);
+  if (!lines.length) { return; }
+
+  var msg = el("div", { cls: "msg" });
+  msg.appendChild(el("div", { text: "插件读配置时丢掉了这些条目 —— 它们不在探测范围里，但看起来像是在：" }));
+  lines.forEach(function (l) { msg.appendChild(el("div", { cls: "mono", text: "· " + l })); });
+  msg.appendChild(el("div", { text: "不致命：插件照常跑。但在改对之前，上面的目标桶数不是你以为的那个。" }));
+  box.appendChild(el("div", { cls: "notice warn" }, [msg]));
+}
+
+function renderScope(d) {
+  if (!d) { return; }
+  syncScope(d);
+  renderScopeChecks();
+  renderScopeProxies();
+  renderScopeMeta(d);
+  renderScopeErrors(d);
+}
+
+function addModelFromInput() {
+  var input = $("scopeModelAdd");
+  var raw = input.value.trim();   // 只去首尾空白（多半是粘贴带进来的），其余原样
+  if (!raw) { return; }
+  if (/\s/.test(raw)) {
+    notify("err", "模型 id 里不该有空白字符：" + raw + "。一次加一个。");
+    return;
+  }
+  var known = hasItemNamed(scope.modelItems, raw);
+  if (!known && scope.extraModels.indexOf(raw) < 0) { scope.extraModels.push(raw); }
+  var already = known && !!scope.modelSelected[raw];
+  scope.modelSelected[raw] = true;
+  scope.dirty = true;
+  input.value = "";
+  scope.modelSig = "";            // 清单变了，强制重建
+  if (state.data) { renderScope(state.data); }
+  notify("ok", already
+    ? (raw + " 本来就在清单里，已确保勾上。")
+    : ("已把 " + raw + " 加进清单（还没保存）。id 原样提交，大小写和横线一个字符都没动。"));
+}
+
+function scopeDiff(d) {
+  var patch = {};
+  var lines = [];
+
+  // 浅合并：只发改过的键。把没改的键一起发回去，等于拿页面上这份可能已经过时的
+  // 快照去覆盖配置 —— 别人刚在 config.yaml 里改的东西会被无声顶掉。
+  if (scopeAccountsEditable()) {
+    var baseA = strList(d.probe_accounts);
+    var nextA = selectedAccounts();
+    if (!sameSet(baseA, nextA)) {
+      patch.probe_accounts = nextA;
+      lines.push({ text: "账号：" + baseA.length + " → " + nextA.length + " 个" });
+    }
+  }
+
+  var baseM = strList(d.models);
+  var nextM = selectedModels();
+  if (!sameSet(baseM, nextM)) {
+    patch.models = nextM;
+    lines.push({ text: "模型：" + baseM.length + " → " + nextM.length + " 个" });
+  }
+
+  // 代理现在是明文回填的，所以判据就是最朴素的那个：和插件里的值逐行比。
+  // 没动过 diff 就是空的，什么都不提交；动过就整段替换。
+  // 旧 .so 报不出轮换池：那种情况下【不提交】这一栏，否则会把它存成空的。
+  if (scope.hasRotField) {
+    var baseR = strList(d.probe_proxies_rotating);
+    var nextR = parseLines(scope.rotText);
+    if (!sameList(baseR, nextR)) {
+      patch.probe_proxies_rotating = nextR;
+    }
+  }
+
+  var baseP = strList(d.probe_proxies);
+  var nextP = parseLines(scope.proxyText);
+  if (!sameList(baseP, nextP)) {
+    patch.probe_proxies = nextP;
+    lines.push({ text: "代理：" + baseP.length + " → " + nextP.length + " 条（整段替换；顺序即尝试顺序，这里不显示内容）" });
+  }
+
+  return { patch: patch, lines: lines };
+}
+
+// 保存完成之后【不】自动开始采集。范围改了就去点「开始探测」——
+// 保存和采集是两件事，把它们绑在一起会让人改一个模型名就烧掉一轮额度。
+function noticeSaved() {
+  notify("ok", "保存完成。需要采集时，请到「概览」点击「开始探测」。");
+}
+
+function doSaveScope() {
+  var d = state.data;
+  if (!d) { notify("err", "还没拿到状态，等一次刷新再保存。"); return; }
+
+  // 框里现在是明文，所以带 *** 的行只可能是从旧版页面复制来的掩码。掩码是单向
+  // 的，存回去会毁掉那条代理，而且毁得很隐蔽：配置看着还在，探测却连不出去。
+  var masked = parseLines(scope.proxyText).concat(parseLines(scope.rotText)).filter(looksMasked);
+  if (masked.length) {
+    notify("err", "代理里有 " + masked.length + " 行带着 ***。那是旧版页面的掩码，不是真值，" +
+      "推不回原值；存回去会把那条代理毁掉，而且毁得很隐蔽：配置看着还在，探测却连不出去。" +
+      "所以这次什么都没发 —— 把那几行换成完整 URL，或者点「放弃改动」退回插件里的当前值。");
+    return;
+  }
+
+  var diff = scopeDiff(d);
+  var keys = Object.keys(diff.patch);
+  if (!keys.length) {
+    notify("info", "和当前配置一模一样，没有发出任何请求。");
+    return;
+  }
+
+  var finalA = diff.patch.probe_accounts || strList(d.probe_accounts);
+  var finalM = diff.patch.models || strList(d.models);
+  var lines = diff.lines.slice();
+  lines.push({ text: "保存后的目标桶数：" + finalA.length + " × " + finalM.length +
+                     " = " + (finalA.length * finalM.length) + " 个。" });
+  // 清空一侧不是「探测范围变成零」，而是「这一侧不再限定范围」—— 两者差得很远，
+  // 值得在按下去之前说清楚。
+  if (!finalA.length) {
+    lines.push({ text: "注意：账号范围将为空，主动探测无法启动。已有模板不会被删除。", em: true });
+  }
+  if (!finalM.length) {
+    lines.push({ text: "注意：模型范围将为空，主动探测无法启动。已有模板不会被删除。", em: true });
+  }
+  lines.push({ text: "只发改动的键（" + keys.join("、") + "）。未修改的字段不提交。" });
+  lines.push({ text: "这只是改配置：不会开始采集，也不影响业务端的替换。采集要点「开始探测」。" });
+
+  confirmDialog({
+    title: "保存全部配置改动？",
+    confirmText: "保存",
+    lines: lines
+  }).then(function (go) {
+    if (!go) { return; }
+    return withBusy(function () {
+      // 无密钥保存。走 RES 下的 /ops/scope：插件把范围写进【自己的】scope 文件，
+      // 不经过 CPA 那条鉴权的 config PATCH —— 宿主没给插件保存配置的接口，那条
+      // PATCH 是唯一的替代，而它要密钥，等于在这个页面上立一道门。
+      //
+      // fields 显式列出要替换哪几项。少了它，「把代理清空」和「这次没提交代理」
+      // 在 query 里长得一模一样，猜错就是把一串没有别处可恢复的凭据抹掉。
+      var fields = [];
+      var params = {};
+      if (diff.patch.probe_accounts) { fields.push("accounts"); params.account = diff.patch.probe_accounts; }
+      if (diff.patch.models) { fields.push("models"); params.model = diff.patch.models; }
+      if (diff.patch.probe_proxies) { fields.push("proxies"); params.proxy = diff.patch.probe_proxies; }
+      if (diff.patch.probe_proxies_rotating) { fields.push("rotating"); params.rotating_proxy = diff.patch.probe_proxies_rotating; }
+      params.fields = fields.join(",");
+
+      return resAction("/ops/scope", params).then(function (r) {
+        if (r === null) { return; }
+        scope.dirty = false;
+        scope.extraModels = [];
+        scope.acctSig = "";
+        scope.modelSig = "";
+        noticeSaved();
+        return refresh();
+      });
+    }).catch(actionError);
+  });
+}
+
+function doResetScope() {
+  scope.dirty = false;
+  scope.extraModels = [];
+  scope.acctSig = "";
+  scope.modelSig = "";
+  if (state.data) { renderScope(state.data); }
+  notify("ok", "已放弃未保存的改动，表单退回当前配置。");
+  // 「放弃改动」= 把服务端那份再给我一遍。清单在表单被动过期间是不刷的，所以
+  // 这里强制读一次，省得还要等最多 60 秒才看到别人刚加的号。
+  fetchChoices(true).then(function () { if (state.data) { renderScope(state.data); } });
+}
+
+/* ---------------------------- 探测进度 ---------------------------- */
+
+// 旧的 .so 不返回 probe_run。那种情况下按钮要停用并说清楚原因，而不是让人点了
+// 之后拿到一个 404 —— 「这个版本没有这个功能」和「这次请求失败了」是两回事。
+function probeRunOf(d) {
+  var r = d ? d.probe_run : null;
+  return (r && typeof r === "object") ? r : null;
+}
+
+function elapsedText(startedAt) {
+  var t = Date.parse(startedAt || "");
+  if (!t) { return ""; }
+  var secs = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (secs < 60) { return secs + " 秒"; }
+  return Math.floor(secs / 60) + " 分 " + (secs % 60) + " 秒";
+}
+
+function renderProbeRun(d) {
+  var run = probeRunOf(d);
+  var start = $("btnProbeStart");
+  var cancel = $("btnProbeCancel");
+  var note = $("probeProgress");
+  clear(note);
+
+  if (!run) {
+    start.disabled = true;
+    cancel.disabled = true;
+    note.className = "hint warn";
+    note.appendChild(el("span", { text: "当前 .so 的 status 不返回 probe_run —— 这个版本还没有插件内探测，换成新的 .so 并重启 CPA 才有。" }));
+    clear($("probeLines"));
+    return;
+  }
+
+  var running = !!run.running;
+  // 探测跑起来之后范围就定死了，此时再存范围只会让人以为改动生效了。
+  start.disabled = running || state.busy;
+  cancel.disabled = !running;
+  start.textContent = running ? "探测进行中…" : "开始探测";
+
+  var total = Number(run.total) || 0;
+  var done = Number(run.done) || 0;
+  var bits = [];
+  if (running) {
+    bits.push(done + " / " + total + " 个桶");
+    if (run.current) { bits.push("正在：" + run.current); }
+    var el0 = elapsedText(run.started_at);
+    if (el0) { bits.push("已跑 " + el0); }
+  } else if (run.finished_at) {
+    bits.push("上一轮：" + done + " / " + total + " 个桶");
+  } else {
+    bits.push("尚未跑过");
+  }
+  note.className = "hint" + (run.error ? " warn" : "");
+  if (run.error) { bits.push("错误：" + run.error); }
+  note.appendChild(el("span", { text: bits.join(" · ") }));
+
+  var box = $("probeLines");
+  var lines = strList(run.lines);
+  // 只在内容真的变了时重建：两秒一次把节点全拆了重建，会把人正在看的滚动位置
+  // 顶掉。签名比整段 DOM 便宜得多。
+  var sig = lines.join("\n");
+  if (box.getAttribute("data-sig") === sig) { return; }
+  box.setAttribute("data-sig", sig);
+  var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+  clear(box);
+  lines.forEach(function (line) { box.appendChild(el("p", { text: line })); });
+  // 人往回翻的时候不要把他拽回底部；贴着底看的时候才跟着滚。
+  if (atBottom) { box.scrollTop = box.scrollHeight; }
+}
+
+function render() {
+  renderFreshness();
+  if (!state.data) { return; }
+  var d = state.data;
+  renderBadges(d);
+  renderScope(d);
+  renderMatrix(d);
+  renderObservationFeed(d);
+  renderCounters(d);
+  renderProbeRun(d);
+  renderSelftestAuths(d);
+  renderSelftestModels(d);
+  renderOverview(d);
+  $("btnDryRun").textContent = d.dry_run ? "关闭 dry_run（开始改写流量）" : "开启 dry_run（停止改写）";
+  $("btnRole").textContent = "切到 " + (d.role === "probe" ? "business" : "probe");
+}
+
+/* ---------------------------- 轮询 ---------------------------- */
+
+// 探测跑起来的时候 10 秒一刷太钝：进度条几乎不动，人会以为卡死了。跑完之后要
+// 退回原来的节奏，否则页面开一天就是几万次无谓请求。这里【复用同一个定时器】，
+// 再开一个只会让两条时间线互相打架。
+function desiredPollMs() {
+  var run = probeRunOf(state.data);
+  return (run && run.running) ? 2000 : POLL_MS;
+}
+
+function retunePolling() {
+  var want = desiredPollMs();
+  if (want === state.pollMs) { return; }
+  state.pollMs = want;
+  if (state.timer) { startPolling(); }
+}
+
+function refresh() {
+  // 清单和 status 并行取，一起渲染 —— 分两步会让首屏先画一遍退回清单再跳成
+  // 勾选清单。fetchChoices 永不 reject，也自己限速，所以下面的失败分支只会是
+  // status 的失败，降级语义（不清 state.data）跟以前一样。
+  return Promise.all([resGet("/status"), fetchChoices(false)]).then(function (got) {
+    state.data = got[0];
+    state.lastGood = new Date();
+    state.lastError = null;
+    render();
+    retunePolling();
+  }).catch(function (err) {
+    // 关键：失败时不清 state.data。网络抖一下就把看板刷成空白，会让人以为
+    // 桶全没了 —— 那正是最容易引发误操作的时刻。
+    state.lastError = (err && err.message) ? err.message : String(err);
+    render();
+  });
+}
+
+function startPolling() {
+  stopPolling();
+  if (state.paused) { return; }
+  state.timer = setInterval(function () {
+    if (!state.busy) { refresh(); }
+  }, state.pollMs || POLL_MS);
+}
+
+function stopPolling() {
+  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+}
+
+// 即使暂停轮询，「刷新于 N 秒前」也要继续走，否则会停在一个骗人的旧读数上。
+setInterval(renderFreshness, 1000);
+
+/* ---------------------------- 操作 ---------------------------- */
+
+function withBusy(fn) {
+  if (state.busy) { return Promise.resolve(); }
+  state.busy = true;
+  return fn().then(function () { state.busy = false; },
+                   function (e) { state.busy = false; throw e; });
+}
+
+function actionError(err) {
+  notify("err", (err && err.message) ? err.message : String(err));
+}
+
+function doToggleDryRun() {
+  var d = state.data;
+  if (!d) { return; }
+  var turningOn = !d.dry_run;   // 目标值
+  var p;
+  if (turningOn) {
+    // 从 OFF 翻回 ON 是回滚到安全态，不拦。
+    p = Promise.resolve(true);
+  } else {
+    p = confirmDialog({
+      title: "关闭 dry_run？",
+      danger: true,
+      confirmText: "关闭 dry_run",
+      lines: [
+        { text: "关闭后插件将开始改写真实业务流量：凡是带 " + (d.replace_length || 312) +
+                " 长度 X-Codex-Turn-State 的请求，都会被替换成 store 里该桶的 " +
+                (d.template_length || 292) + " 再发往上游。" },
+        { text: "改写时会同时附带该账号池中的 __cflb/__oailb 路由 Cookie —— 没有它，" +
+                "票在上游撑不过约 240 秒。", em: true },
+        { text: "在此之前这些替换只出现在日志里，上游收到的仍是原值。", em: true },
+        { text: "回滚方式：把 dry_run 重新打开即可，无需重启。" }
+      ]
+    });
+  }
+  p.then(function (go) {
+    if (!go) { return; }
+    return withBusy(function () {
+      return resAction("/ops/dry-run", { value: turningOn ? "on" : "off" }).then(function () {
+        notify("ok", "dry_run 已切换为 " + (turningOn ? "ON（只记录）" : "OFF（改写真实流量）"));
+        return refresh();
+      });
+    }).catch(actionError);
+  });
+}
+
+function doToggleRole() {
+  var d = state.data;
+  if (!d) { return; }
+  var next = d.role === "probe" ? "business" : "probe";
+  confirmDialog({
+    title: "把 role 切到 " + next + "？",
+    danger: true,
+    confirmText: "切到 " + next,
+    lines: [
+      next === "probe"
+        ? { text: "probe 角色只从上游响应采集模板写盘，不会替换任何业务请求的头。切过去之后业务端会停止替换。" }
+        : { text: "business 角色只读 store 并按 replace-only 替换，不再采集。切过去之前请确认 store 里的桶已经探齐。" },
+      { text: "能力声明是插件注册时上报给 CPA 的，热重载不一定会重新协商。切换后若发现响应钩子没有被调用（探测采不到）或替换没发生，需要重启一次 CPA。", em: true }
+    ]
+  }).then(function (go) {
+    if (!go) { return; }
+    return withBusy(function () {
+      return resAction("/ops/role", { value: next }).then(function () {
+        notify("info", "role 已切到 " + next +
+          "。若接下来发现钩子没被调用（probe 采不到 / business 不替换），重启一次 cli-proxy-api。");
+        return refresh();
+      });
+    }).catch(actionError);
+  });
+}
+
+function doClearBucket(auth, model) {
+  confirmDialog({
+    title: "清空这个桶？",
+    danger: true,
+    confirmText: "清空",
+    lines: [
+      { text: auth + " / " + model },
+      { text: "清掉之后，在探测重新采到之前，业务端对这个桶会停止替换 —— 降级请求会原样发往上游。", em: true }
+    ]
+  }).then(function (go) {
+    if (!go) { return; }
+    return withBusy(function () {
+      return resAction("/ops/clear", { auth_id: auth, model: model }).then(function (r) {
+          notify("ok", "已清空 " + (r && r.cleared !== undefined ? r.cleared : 1) + " 个桶：" + auth + " / " + model);
+          return refresh();
+        });
+    }).catch(actionError);
+  });
+}
+
+function doClearAll() {
+  confirmDialog({
+    title: "清空全部桶？",
+    danger: true,
+    confirmText: "全部清空",
+    lines: [
+      { text: "store 里所有 (账号, 模型) 的模板都会被删除。" },
+      { text: "在重新探齐之前，业务端将完全停止替换 —— 所有降级请求都会原样发往上游。", em: true },
+      { text: "重新探齐要跑一轮探测（无需停业务），并且会消耗额度。" }
+    ]
+  }).then(function (go) {
+    if (!go) { return; }
+    return withBusy(function () {
+      return resAction("/ops/clear", { all: "1" }).then(function (r) {
+          notify("ok", "已清空 " + (r && r.cleared !== undefined ? r.cleared : "全部") + " 个桶。");
+          return refresh();
+        });
+    }).catch(actionError);
+  });
+}
+
+function doProbeStart() {
+  var d = state.data;
+  if (!d) { notify("err", "还没拿到状态，等一次刷新再开始。"); return; }
+
+  var accounts = strList(d.probe_accounts);
+  var models = strList(d.models);
+  var proxies = Number(d.probe_proxy_count) || 0;
+  var pending = (Number(d.targets_total) || 0) - (Number(d.targets_ready) || 0);
+
+  var lines = [];
+  lines.push({ text: "范围：" + accounts.length + " 账号 × " + models.length + " 模型；" +
+                     "已就绪的桶会跳过，这一轮大约要采 " + Math.max(0, pending) + " 个。" });
+  lines.push({ text: "出口：" + (proxies ? (proxies + " 条代理，按清单顺序逐条试") : "没有配代理，直接用账号当前的出口") });
+  lines.push({ text: "直连上游采集，不经过 CPA、不改任何账号状态；账号照常跑业务，无需停服。", em: true });
+  lines.push({ text: "会消耗额度：每个还没就绪的桶至少一条上游请求。", em: true });
+
+  confirmDialog({
+    title: "开始探测？",
+    danger: true,
+    confirmText: "开始探测",
+    lines: lines
+  }).then(function (go) {
+    if (!go) { return; }
+    return withBusy(function () {
+      return resAction("/ops/probe/start", {}).then(function () {
+        notify("ok", "探测已开始。进度就在这一节里，页面会自动加快刷新。");
+        return refresh();
+      });
+    }).catch(actionError);
+  });
+}
+
+function doProbeCancel() {
+  confirmDialog({
+    title: "停止探测？",
+    danger: true,
+    confirmText: "停止",
+    lines: [
+      { text: "已经采到的桶会留下，没采的这一轮就不采了。" },
+      { text: "续期循环也会一并停 —— 卡到期后桶会空，改由业务流量顺带采集接管（有空窗）。", em: true }
+    ]
+  }).then(function (go) {
+    if (!go) { return; }
+    return withBusy(function () {
+      return resAction("/ops/probe/cancel", {}).then(function () {
+        notify("info", "已要求停止。探测会跑完当前这次采集后退出，稍等一次刷新。");
+        return refresh();
+      });
+    }).catch(actionError);
+  });
+}
+
+// 刻意【不】走 withBusy：整批最多要跑 45 秒，把整页按钮锁这么久没道理 —— 这个
+// 操作不改任何状态、不花额度（请求不带凭据），和别的操作并行没有风险。
+//
+// 测的是【插件里已保存的】代理池，不是文本框里的内容。代理 URL 带密码，而这是
+// 免鉴权的 GET 路由，把清单当查询参数传会把密码写进宿主访问日志和浏览器历史。
+function doProxyCheck() {
+  if (proxyCheck.running) { return; }
+  if (scope.dirty) {
+    notify("warn", "代理框改过还没保存 —— 测的是插件里已存的那一份。想测刚填的，先点「保存范围」。");
+  }
+  proxyCheck.running = true;
+  proxyCheck.data = null;
+  syncProxyCheckBtn();
+  renderProxyCheck();
+
+  resAction("/ops/proxy-check", {}).then(function (d) {
+    proxyCheck.data = d;
+    if (d.checked && d.ok === d.checked) {
+      notify("ok", "全部 " + d.checked + " 条都连得到 OpenAI。");
+    } else {
+      notify("warn", d.ok + " / " + d.checked + " 条连得到 OpenAI，逐条结果在代理那一栏。");
+    }
+  }).catch(function (err) {
+    var m = (err && err.message) ? err.message : String(err);
+    if (/404|no such/i.test(m)) {
+      m = "当前 .so 没有这个路由 —— 换上新版 .so 并重启 CPA 之后才有「测试连通性」。";
+    }
+    notify("err", m);
+  }).then(function () {
+    proxyCheck.running = false;
+    syncProxyCheckBtn();
+    renderProxyCheck();
+  });
+}
+
+// 追加而不是整段替换：池子有二十条的时候，加一条不该逼人滚到文本框末尾找位置。
+// 分隔符取空白和逗号 —— 这三种字符在代理 URL 里都必须转义成 %XX，所以按它们切
+// 分不会劈开一条合法的代理。重复的行直接跳过，顺序保持不变（顺序就是探测顺序）。
+function doAddRotating() { addProxyLines("scopeRotAdd", "rotText"); }
+function doAddProxy() { addProxyLines("scopeProxyAdd", "proxyText"); }
+
+function addProxyLines(inputID, field) {
+  var input = $(inputID);
+  if (!input) { return; }
+  var candidates = String(input.value || "").split(/[\s,]+/)
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s; });
+  if (!candidates.length) { notify("warn", "输入框是空的。"); return; }
+
+  var lines = parseLines(scope[field]);
+  var seen = Object.create(null);
+  lines.forEach(function (l) { seen[l] = true; });
+  var added = 0;
+  candidates.forEach(function (c) {
+    if (seen[c]) { return; }
+    seen[c] = true;
+    lines.push(c);
+    added++;
+  });
+  if (!added) { notify("warn", "这几条清单里已经有了。"); return; }
+
+  scope[field] = lines.join("\n");
+  scope.dirty = true;
+  input.value = "";
+  renderScopeProxies();
+  renderScopeMeta(state.data || {});
+  notify("ok", "追加了 " + added + " 条，还没生效 —— 记得点「保存范围」。");
+}
+
+// 自检的结果有两个独立维度，UI 上必须分开呈现：
+//   reached      —— 请求有没有打到上游并拿到响应（链路/协议层面）
+//   status_code  —— 上游回的真实状态码（账号/配额层面）
+// 「reached:true + 4xx」是有意义的组合：链路是通的，是上游拒绝了。把它和
+// 「根本没打通」一起压成「失败」，运维就丢掉了区分这两类故障的唯一线索。
+function selfTestKind(r) {
+  if (!r || !r.reached) { return "err"; }
+  var c = Number(r.status_code);
+  if (c >= 200 && c < 300) { return "ok"; }
+  return "warn";
+}
+
+function selfTestMessage(r, model) {
+  var code = (r && r.status_code !== undefined && r.status_code !== null) ? r.status_code : "—";
+  var lines = [];
+  lines.push(r && r.reached ? "链路：通（已拿到上游响应）" : "链路：不通（没拿到上游响应）");
+  lines.push("上游状态码：" + code);
+  lines.push("模型：" + ((r && r.model) || model));
+  // 没定向就是真的不知道用了哪个号：CPA 的 HostModelExecutionResponse 只有
+  // StatusCode/Headers/Body，不带账号标识。这里必须明说「未知」，填个空串或
+  // 拿请求里的值糊弄，会让人以为自检验证过那个账号。
+  if (r && r.targeted) {
+    lines.push("账号：" + ((r && r.auth_id) || "—") + "（已定向）");
+  } else {
+    lines.push("账号：未知 —— 未指定账号时无法得知实际用了哪个号（CPA 的响应不携带账号标识）");
+  }
+  lines.push("落盘：否 —— 自检不产生桶，采集请用「开始探测」");
+  if (r && r.note) { lines.push(String(r.note)); }
+  if (r && r.error) { lines.push("错误：" + String(r.error)); }
+  return lines.join("\n");
+}
+
+// opts 可选：{auth, model}。矩阵角标走这条，按钮走下拉。注意事件监听器必须
+// 包一层，否则 MouseEvent 会被当成 opts 传进来。
+function doSelfTest(opts) {
+  opts = opts || {};
+  var model = (opts.model !== undefined) ? opts.model : $("selftestModel").value;
+  var auth = (opts.auth !== undefined) ? opts.auth : $("selftestAuth").value;
+  if (!model) { return; }
+
+  var lines = [
+    { text: "会向上游真实发一次请求，消耗额度。" },
+    { text: "只验证链路是否打通，不会产生桶：宿主会让插件自己发出的请求跳过本插件的响应钩子，所以自检永远采不到模板。", em: true },
+    { text: "要真正采集模板，用「开始探测」。" }
+  ];
+  if (auth) {
+    lines.push({ text: "定向到 " + auth + "。定向自检不需要停用其它账号。" });
+  } else {
+    lines.push({ text: "未指定账号：由 CPA 调度决定用哪个号，且结果无法得知实际用的是哪个（响应不携带账号标识）。" });
+  }
+
+  confirmDialog({
+    title: auth
+      ? ("对 " + auth + " / " + model + " 跑一次连通性自检？")
+      : ("对 " + model + " 跑一次连通性自检？（不指定账号）"),
+    confirmText: "开始自检",
+    lines: lines
+  }).then(function (go) {
+    if (!go) { return; }
+    return withBusy(function () {
+      // auth 为空时 qs 会把 auth_id 略掉，等于「由调度器选号」。
+      return resAction("/ops/selftest", { model: model, auth_id: auth || "" })
+        .then(function (r) {
+          notify(selfTestKind(r), selfTestMessage(r, model));
+          return refresh();
+        });
+    }).catch(function (err) {
+        // 服务端的错误原文是排障线索，一律原样透出。400 = 模型名不在清单里。
+      var prefix = (err instanceof ApiError && err.status === 400)
+        ? "自检未执行（模型名不被接受）："
+        : "自检未执行：";
+      notify("err", prefix + ((err && err.message) ? err.message : String(err)));
+    });
+  });
+}
+
+/* ---------------------------- 启动 ---------------------------- */
+
+$("btnPause").addEventListener("click", function () {
+  state.paused = !state.paused;
+  $("btnPause").textContent = state.paused ? "继续刷新" : "暂停刷新";
+  if (state.paused) { stopPolling(); } else { startPolling(); refresh(); }
+  renderFreshness();
+});
+
+$("btnProbeStart").addEventListener("click", doProbeStart);
+$("btnProbeCancel").addEventListener("click", doProbeCancel);
+$("btnDryRun").addEventListener("click", doToggleDryRun);
+$("btnRole").addEventListener("click", doToggleRole);
+$("btnClearAll").addEventListener("click", doClearAll);
+// 必须包一层：直接传 doSelfTest 会把 MouseEvent 当成 opts。
+$("btnSelftest").addEventListener("click", function () { doSelfTest(); });
+
+$("btnScopeSave").addEventListener("click", doSaveScope);
+$("btnScopeReset").addEventListener("click", doResetScope);
+$("btnAddModel").addEventListener("click", addModelFromInput);
+$("scopeModelAdd").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); addModelFromInput(); }
+});
+$("btnProxyCheck").addEventListener("click", doProxyCheck);
+$("btnAddProxy").addEventListener("click", doAddProxy);
+$("scopeProxyAdd").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); doAddProxy(); }
+});
+$("scopeProxies").addEventListener("input", function () {
+  scope.proxyText = $("scopeProxies").value;
+  scope.dirty = true;
+  renderScopeMeta(state.data || {});
+});
+$("scopeRotating").addEventListener("input", function () {
+  scope.rotText = $("scopeRotating").value;
+  scope.dirty = true;
+  renderScopeMeta(state.data || {});
+});
+$("btnAddRot").addEventListener("click", doAddRotating);
+$("scopeRotAdd").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); doAddRotating(); }
+});
+
+/* Presentation only: tab visibility and summaries never dispatch API actions. */
+function initDashboardTabs() {
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('[data-panel]'));
+  function activate(tab, focus) {
+    tabs.forEach(function (item) {
+      var selected = item === tab;
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      item.tabIndex = selected ? 0 : -1;
+      $('panel-' + item.getAttribute('data-panel')).hidden = !selected;
+    });
+    var name = tab.getAttribute('data-panel');
+    $('sharedScopeEditor').hidden = name !== 'scope' && name !== 'proxies';
+    if (focus) { tab.focus(); }
+  }
+  tabs.forEach(function (tab, index) {
+    tab.addEventListener('click', function () { activate(tab, false); });
+    tab.addEventListener('keydown', function (event) {
+      var next;
+      if (event.key === 'ArrowRight') { next = (index + 1) % tabs.length; }
+      if (event.key === 'ArrowLeft') { next = (index + tabs.length - 1) % tabs.length; }
+      if (event.key === 'Home') { next = 0; }
+      if (event.key === 'End') { next = tabs.length - 1; }
+      if (next !== undefined) { event.preventDefault(); activate(tabs[next], true); }
+    });
+  });
+}
+
+function renderOverview(d) {
+  var role = $('headerRole');
+  role.textContent = d.role === 'business' ? '业务模式' : (d.role === 'probe' ? '探测模式' : '角色未知');
+  role.className = 'status-pill' + (d.role === 'business' ? ' is-ok' : '');
+  var run = probeRunOf(d);
+  $('overviewProbe').textContent = !run ? '状态不可用' : run.running ? '探测运行中' : run.error ? '探测异常' : '探测待命';
+  $('overviewProbeNote').textContent = !run ? '当前服务未返回任务状态' : run.error ? '详情见下方探测活动' : run.running ? '主动采集与续期任务已启动' : run.finished_at ? '任务已停止，可手动启动' : '尚未启动主动探测';
+  $('overviewProbe').className = 'stat-value text' + (run && run.error ? ' warntext' : '');
+  $('overviewMode').textContent = d.inject_mode === 'always' ? '始终注入' : d.inject_mode === 'replace-only' ? '按长度替换' : '—';
+  $('overviewModeNote').textContent = d.role === 'probe' ? '探测模式 · 不改写请求' : d.dry_run ? '模拟运行 · 不改写请求' : '实际请求改写已启用';
+  var fixed = typeof d.probe_proxy_count === 'number' ? d.probe_proxy_count : null;
+  var rotating = typeof d.probe_proxy_rotating_count === 'number' ? d.probe_proxy_rotating_count : null;
+  $('overviewExits').textContent = fixed === null || rotating === null ? '—' : String(fixed + rotating);
+  $('overviewExitNote').textContent = fixed === null || rotating === null ? '当前服务未返回完整出口统计' : fixed === 0 && rotating === 0 ? '未配置代理 · 使用服务器出口' : fixed + ' 个静态出口 · ' + rotating + ' 个轮换入口';
+}
+
+initDashboardTabs();
+
+(function boot() {
+  // 没有登录门，也没有任何需要密钥的动作：看数据、四个操作、读可选清单、保存
+  // 探测范围，全部走不鉴权的 resource 路由。代理明文由 status 回传，所以那条
+  // 鉴权的 /config 路由这个页面从不调用。
+  refresh().then(startPolling);
+})();
+</script>
+</body></html>

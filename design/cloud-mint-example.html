@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>云端打票与设置 · 独立面板示例</title>
+<style>
+:root{--bg:#f8f9f6;--paper:#fff;--ink:#26362b;--muted:#788277;--line:#e5e9e1;--green:#466546;--wash:#eef3e9;--amber:#a47a32;--amber-bg:#fbf5e8;--radius:13px}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--bg);font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","Microsoft YaHei",sans-serif}
+button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--green);outline-offset:3px}
+.shell{max-width:1400px;margin:auto;padding:24px 42px 28px}.demo{display:flex;justify-content:space-between;gap:12px;align-items:center;font-size:11px;color:#7c806f;border-bottom:1px dashed #d8ddcf;padding-bottom:14px}.demo b{color:#657a55;font-size:10px;letter-spacing:1.4px}
+.top{display:flex;align-items:center;justify-content:space-between;padding:27px 0;gap:16px}.brand{display:flex;align-items:center;gap:13px}.logo{width:41px;height:41px;border-radius:11px;background:var(--ink);display:grid;place-items:center;color:#d5e4c7}.brand h1{font-size:24px;margin:0;font-weight:650}.brand p{font-size:10px;letter-spacing:1.4px;color:var(--muted);margin:1px 0 0}.actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;padding:4px 10px;background:var(--wash);color:var(--green);border-radius:6px;font-size:11px;white-space:nowrap}.pill.amber{background:var(--amber-bg);color:var(--amber)}.pill.neutral{color:#767f72;background:#f0f2ed}
+.button{border:1px solid #dbe1d4;border-radius:7px;background:white;color:#53634b;padding:8px 12px;font-size:12px;text-decoration:none}.button.primary{color:white;background:var(--green);border-color:var(--green)}.button:disabled{opacity:.5;cursor:default}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:21px}.stat{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:17px 20px}.stat label{color:var(--muted);font-size:11px;display:flex;justify-content:space-between}.stat strong{font-size:31px;font-weight:600;line-height:1.4;letter-spacing:-1px}.stat strong small{font-size:15px;letter-spacing:0;font-weight:400;color:#9ca493}.stat p{margin:4px 0 0;color:#8a9285;font-size:10px}.stat .positive{color:var(--green)}.stat .warm{color:var(--amber)}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:20px;align-items:start}.layout>div{min-width:0}.card{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-bottom:18px}.card-head{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}.card-head h2,.card-head h3{font-size:13px;margin:0;font-weight:600}.card-head small{font-size:10px;color:var(--muted)}
+.toolbar{display:flex;gap:9px;align-items:center;padding:12px 16px;background:#fdfefb}.search{position:relative;flex:1;min-width:80px}.search svg{position:absolute;top:11px;left:10px;color:#9ba392}.search input{border:1px solid var(--line);width:100%;padding:7px 10px 7px 30px;border-radius:6px;background:#fff;font-size:11px;color:var(--ink)}select{border:1px solid var(--line);border-radius:6px;color:#68755e;background:#fff;padding:7px 9px;font-size:11px}
+.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap;text-align:left}th{font-size:10px;color:#929a89;background:#f8faf5;font-weight:400;padding:9px 13px}td{padding:14px 13px;border-bottom:1px solid #eff1eb;font-size:11px}tr:last-child td{border-bottom:0}.account{font-size:10px;color:#929a8a}.model{font-weight:550;margin-top:2px;font-size:11px}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}.muted{color:var(--muted)}.tiny{font-size:10px;color:#929c89}.bar{height:3px;background:#eef2e8;border-radius:10px;margin-top:5px;min-width:62px}.bar i{display:block;height:100%;background:#809a6b;border-radius:10px}
+.card-foot{padding:10px 16px;border-top:1px solid var(--line);color:#919888;font-size:10px;display:flex;justify-content:space-between;gap:8px}.feed-head{display:flex;gap:12px;align-items:center}.toggle{border:0;background:none;color:#67775c;font-size:10px;padding:3px}.toggle[aria-pressed=false]{color:#91998b}.logs{padding:0 18px}.entry{padding:16px 0;border-bottom:1px solid #eef1e8}.entry:last-child{border:0}.entry-title{display:flex;gap:8px;align-items:center;font-size:12px;font-weight:550;flex-wrap:wrap}.entry-title time{margin-left:auto;font-size:10px;color:#97a08f;font-weight:400;font-family:monospace}.event-dot{width:7px;height:7px;background:#7c946b;border-radius:50%;flex:none}.entry.wait .event-dot{background:#caa360}
+.entry-body{font-size:11px;color:#7e8875;line-height:1.95;padding:8px 0 0 15px;overflow-wrap:anywhere}.entry-body .finger{color:#576b4f;font-family:monospace;background:#f1f5ec;padding:1px 4px;border-radius:3px}.entry-body strong{font-weight:500;color:#516648}.entry-body .unknown{color:#a17f40}.entry-body .separator{color:#bdc6b3;padding:0 4px}.entry-label{font-size:9px;color:#9ba590;font-weight:400}.empty{padding:30px;text-align:center;color:var(--muted);font-size:12px}
+.settings-body{padding:16px 18px}.switchline{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:550;gap:10px}.switchline input{appearance:none;width:34px;height:20px;border-radius:20px;background:#d9e0d3;position:relative;margin:0;cursor:pointer;flex:none}.switchline input:checked{background:var(--green)}.switchline input:after{content:"";width:14px;height:14px;position:absolute;top:3px;left:3px;border-radius:50%;background:white}.switchline input:checked:after{left:17px}
+.field{display:block;margin-top:17px;font-size:11px;color:#596b52}.field input,.field select{display:block;margin-top:6px;width:100%;min-width:0;padding:8px 10px;border:1px solid #dfe5d8;border-radius:6px;color:var(--ink);background:white;font-size:12px}.field input[aria-invalid=true]{border-color:#b35449}.field small,.help{display:block;color:#909b86;font-size:10px;line-height:1.8;margin-top:5px}.field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}details{border-top:1px solid var(--line);margin-top:19px;padding-top:13px}summary{cursor:pointer;color:#647958;font-size:11px}.settings-actions{display:flex;gap:8px;margin-top:21px}.settings-actions .primary{flex:1}.message{font-size:10px;margin:11px 0 0;color:#7a886f;line-height:1.9;min-height:38px;overflow-wrap:anywhere}.message[data-kind=error]{color:#b35449}.message[data-kind=success]{color:var(--green)}.note{padding:11px 18px;border-top:1px solid var(--line);background:#f9fbf6;font-size:10px;color:#919b87;line-height:1.9}.foot{display:flex;justify-content:space-between;gap:12px;color:#9aa38f;font-size:10px;padding-top:8px}.mobile-only{display:none}
+@media(max-width:1100px){.shell{padding:20px 24px}.layout{grid-template-columns:minmax(0,1fr) 285px}th,td{padding-left:10px;padding-right:10px}.stat{padding:15px}.toolbar{flex-wrap:wrap}.search{flex-basis:100%}}
+@media(max-width:850px){.layout{grid-template-columns:minmax(0,1fr)}.stats{gap:10px}.table-wrap table{min-width:670px}.settings-body{max-width:650px}.mobile-only{display:block}}
+@media(max-width:520px){.shell{padding:17px 16px}.demo{align-items:flex-start;font-size:9px}.demo span{max-width:210px;text-align:right}.top{align-items:flex-start;padding:22px 0;flex-wrap:wrap}.brand h1{font-size:23px}.actions{width:100%;justify-content:flex-end}.actions .pill{margin-right:auto}.stats{grid-template-columns:1fr 1fr}.stat strong{font-size:28px}.stat{padding:13px 15px}.card-head{padding:14px}.toolbar{padding:11px}.logs{padding:0 14px}.entry-title{font-size:11px}.entry-title time{font-size:9px}.entry-body{padding-left:0}.foot{display:block;line-height:2}.card-foot{font-size:9px}.feed-head{gap:5px}}
+</style>
+</head>
+<body>
+<main class="shell">
+<div class="demo"><b>INTERACTIVE EXAMPLE</b><span>虚构数据 · 未连接 CPA · 不触发真实打票</span></div>
+<header class="top"><div class="brand"><div class="logo" aria-hidden="true"><svg width="23" height="23" viewBox="0 0 24 24" fill="none"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4z" fill="currentColor"/><path d="M14 17h6M17 14v6" stroke="currentColor" stroke-width="2"/></svg></div><div><h1>云端打票</h1><p>CLOUD MINT · CPA NATIVE PLUGIN</p></div></div><div class="actions"><span class="pill" id="enabledStatus">示例已启用</span><a class="button" href="#settings">打票设置</a><button class="button" id="reset" type="button">重置示例</button></div></header>
+<section class="stats" aria-label="云端打票示例快照"><div class="stat"><label>有效缓存票 <span>READY</span></label><strong class="positive">8 <small>/ 12</small></strong><p>账号 × 模型 × 协议隔离</p></div><div class="stat"><label>正在打票 <span>IN FLIGHT</span></label><strong>2 <small>/ 4</small></strong><p>同账号串行 · 同桶并发合并</p></div><div class="stat"><label>冷却中的任务 <span>COOLDOWN</span></label><strong class="warm">1 <small>个</small></strong><p>示例快照 · 30 秒后继续补票</p></div><div class="stat"><label>打票流水 <span>LOGS</span></label><strong>4 <small>条</small></strong><p>只记录短指纹，不暴露凭据</p></div></section>
+<div class="layout"><div><section class="card"><div class="card-head"><h3>票与任务</h3><small>演示 4 个桶 · 内存缓存</small></div><div class="toolbar"><div class="search"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.3" stroke="currentColor"/><path d="m10 10 3 3" stroke="currentColor"/></svg><input id="search" aria-label="搜索账号、模型或票指纹" placeholder="搜索账号、模型、票指纹…"></div><select id="status" aria-label="筛选任务状态"><option value="all">全部状态</option><option value="ready">已就绪</option><option value="minting">打票中</option><option value="cooldown">冷却中</option></select><select id="transport" aria-label="筛选协议"><option value="all">全部协议</option><option>SSE</option><option>WS</option></select></div><div class="tiny mobile-only" style="padding:0 12px 8px">左右滑动查看网关、票指纹与有效期 →</div><div class="table-wrap"><table><thead><tr><th>账号 / 模型</th><th>协议</th><th>状态</th><th>目标网关</th><th>票摘要</th><th>剩余有效期</th></tr></thead><tbody id="rows"></tbody></table></div><div class="card-foot"><span id="rowCount">显示 4 个示例桶</span><span>已有客户端状态不覆盖 · 票与 pair 双重验期</span></div></section>
+<section class="card"><div class="card-head"><h3>打票流水</h3><div class="feed-head"><small>脱敏示例 · UTC+8</small><button class="toggle" id="follow" aria-pressed="true">● 跟随最新</button></div></div><div class="logs" id="logs"></div><div class="card-foot"><span>未知不等于失败，更不等于成功。</span><span>最近 4 条 · 示例数据</span></div></section>
+</div><aside class="card" id="settings" aria-labelledby="settingsTitle">
+<div class="card-head"><h2 id="settingsTitle">打票设置</h2><span class="pill neutral" id="settingsState">已应用示例</span></div>
+<form id="settingsForm" class="settings-body" novalidate>
+<label class="switchline" for="enabled">启用云端打票<input id="enabled" type="checkbox" role="switch" checked></label>
+<span class="help">只改变示例配置，不启动或停止真实任务。</span>
+<label class="field" for="endpoint">云函数地址<input id="endpoint" type="url" value="https://HOST/" autocomplete="off" spellcheck="false" required><small>HTTPS 地址，不含账号密码、查询参数或片段。</small></label>
+<label class="field" for="proxyURL">云函数前置代理<input id="proxyURL" type="url" placeholder="http://HOST:PORT 或 socks5h://HOST:PORT" autocomplete="off" spellcheck="false"><small>只代理“插件 → 云函数”；留空直连，失败不回退直连。</small></label>
+<div class="field-row">
+<label class="field" for="mintTransport">打票协议<select id="mintTransport"><option value="sse">SSE</option><option value="websocket">WebSocket</option></select></label>
+<label class="field" for="gateway">目标网关<input id="gateway" value="unified-88" spellcheck="false" required></label>
+</div>
+<div class="field-row">
+<label class="field" for="ticketLength">验收票长<input id="ticketLength" type="number" min="1" max="4096" step="1" value="780" required></label>
+<label class="field" for="ttlSeconds">票有效期 / 秒<input id="ttlSeconds" type="number" min="1" max="3600" step="1" value="240" required></label>
+</div>
+<details id="advancedSettings"><summary>高级设置 · 环境变量与等待上限</summary>
+<label class="field" for="keyEnv">密钥环境变量名<input id="keyEnv" value="CPA_RELAY_KEY" spellcheck="false" autocomplete="off" required><small>这里只填变量名，不输入或展示密钥内容。</small></label>
+<label class="field" for="proxyEnv">代理环境变量名 / 可选<input id="proxyEnv" placeholder="CPA_MINT_PROXY" autocomplete="off" spellcheck="false"><small>与上方代理地址二选一；代理带账号密码时推荐此方式。</small></label>
+<div class="field-row">
+<label class="field" for="waitMs">业务等待 / 毫秒<input id="waitMs" type="number" min="1" max="10000" value="2000" required></label>
+<label class="field" for="timeoutMs">任务超时 / 毫秒<input id="timeoutMs" type="number" min="1" max="180000" value="90000" required></label>
+</div>
+</details>
+<div class="settings-actions"><button class="button primary" id="saveSettings" type="submit">保存示例设置</button><button class="button" id="discardSettings" type="button">放弃改动</button></div>
+<p id="settingsMessage" class="message" role="status" aria-live="polite">仅编辑当前页面内的示例配置。刷新页面恢复初始值，历史票与流水不随设置改写。</p>
+</form>
+<div class="note">仅列出插件当前支持的可配置项。云函数端的轮间冷却不在此处修改。</div>
+</aside></div>
+<footer class="foot"><span>独立交互示例 · 设置仅在本页生效 · 尚未接入正式面板</span><span>仅保留云端打票与相关设置</span></footer>
+</main>
+<script>
+'use strict';
+// 纯本地示例：不调用 fetch / WebSocket，不写入存储或 CPA 配置。
+const records=[
+ {account:'账号 A · #D2q8fLk1',model:'gpt-6-sol',transport:'SSE',state:'ready',label:'已就绪',gateway:'unified-88',finger:'Y89E_-KZ',length:780,left:218},
+ {account:'账号 A · #D2q8fLk1',model:'gpt-6-astra',transport:'SSE',state:'cooldown',label:'冷却中 · 18s',gateway:'unified-88',finger:'',left:0},
+ {account:'账号 B · #a8M4pRz7',model:'gpt-6-luna',transport:'SSE',state:'minting',label:'打票中 · 3/24',gateway:'unified-88',finger:'',left:0},
+ {account:'账号 C · #b9J3nVc5',model:'gpt-6-sol',transport:'WS',state:'ready',label:'已就绪',gateway:'unified-88',finger:'k7Pf2_nQ',length:780,left:173}
+];
+const entries=[
+ {title:'模型声明确认',kind:'ready',time:'20:32:12',meta:'账号 A / gpt-6-sol / SSE',body:'<strong>response.created.response.model = gpt-6-sol</strong><br>响应 ID #r_7f2a <span class="separator">·</span> 关联票 <span class="finger">#Y89E_-KZ</span> <span class="separator">·</span> 声明与请求一致'},
+ {title:'收到回源票，网关发生变化',kind:'wait',time:'20:32:11',meta:'业务回源观测',body:'cookie-780 · 票长 780 · <span class="finger">#hPdTPIqq</span> · unified-199<br>→ 得到 <strong>unified-88</strong> · 票长 780 · <span class="finger">#Y89E_-KZ</span><br>这张票龄 22s <span class="separator">·</span> <span class="unknown">未见模型</span> <span class="separator">·</span> <strong>网关变化</strong>'},
+ {title:'收到响应头，等待模型事件',kind:'wait',time:'20:32:08',meta:'账号 B / gpt-6-sol / SSE',body:'cookie-780 · 票长 780 · <span class="finger">#k7Pf2_nQ</span> · unified-88<br>→ 得到 unified-88 · 票长 780 · <span class="finger">#uQ3d9_Ap</span><br>这张票龄 8s <span class="separator">·</span> <span class="unknown">未见模型</span> <span class="separator">·</span> 网关未变'},
+ {title:'本轮达到上限，进入冷却',kind:'wait',time:'20:32:00',meta:'账号 A / gpt-6-astra / SSE',body:'24 / 24 次尝试 <span class="separator">·</span> 尚未得到目标票<br>冷却 <strong>30 秒</strong> 后继续；有效缓存保留，下轮只补缺失或失效的票。'}
+];
+const byId=id=>document.getElementById(id);
+const defaults={enabled:true,endpoint:'https://HOST/',proxyURL:'',proxyEnv:'',mintTransport:'sse',gateway:'unified-88',ticketLength:780,ttlSeconds:240,keyEnv:'CPA_RELAY_KEY',waitMs:2000,timeoutMs:90000};
+let savedSettings={...defaults};
+const numberFields=['ticketLength','ttlSeconds','waitMs','timeoutMs'];
+function readSettings(){
+ const values={};
+ Object.keys(defaults).forEach(id=>{values[id]=id==='enabled'?byId(id).checked:numberFields.includes(id)?Number(byId(id).value):byId(id).value.trim();});
+ return values;
+}
+function fillSettings(values){Object.keys(defaults).forEach(id=>{if(id==='enabled')byId(id).checked=values[id];else byId(id).value=values[id];});}
+function showMessage(text,kind='info'){byId('settingsMessage').textContent=text;byId('settingsMessage').dataset.kind=kind;}
+function markSettings(){
+ const dirty=JSON.stringify(readSettings())!==JSON.stringify(savedSettings);
+ byId('settingsState').textContent=dirty?'未保存':'已应用示例';
+ byId('settingsState').className=dirty?'pill amber':'pill neutral';
+ return dirty;
+}
+function validateSettings(values){
+ let url;
+ try{url=new URL(values.endpoint);}catch{return '请填写有效的云函数地址。';}
+ const loopback=url.hostname==='localhost'||url.hostname==='[::1]'||/^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+ if(url.username||url.password||url.search||url.hash||(url.protocol!=='https:'&&!(url.protocol==='http:'&&loopback)))return '云函数地址必须为 HTTPS，且不能包含账号密码、查询参数或片段；HTTP 仅限回环测试。';
+ if(values.proxyURL&&values.proxyEnv)return '代理地址和代理环境变量只能填一个。';
+ if(values.proxyEnv&&!/^[A-Za-z_][A-Za-z0-9_]*$/.test(values.proxyEnv))return '请填写合法的代理环境变量名，不要填写代理密码。';
+ if(values.proxyURL){
+  let proxy;try{proxy=new URL(values.proxyURL);}catch{return '请填写有效的前置代理地址。';}
+  if(!['http:','https:','socks5:','socks5h:'].includes(proxy.protocol)||!proxy.hostname||proxy.search||proxy.hash||(proxy.pathname&&proxy.pathname!=='/')||(proxy.port&&(Number(proxy.port)<1||Number(proxy.port)>65535)))return '前置代理仅支持 HTTP、HTTPS、SOCKS5、SOCKS5H，地址不能包含路径、查询参数或片段。';
+ }
+ if(!['sse','websocket'].includes(values.mintTransport))return '请选择 SSE 或 WebSocket。';
+ if(!/^unified-[0-9]+$/.test(values.gateway))return '目标网关格式应为 unified-88。';
+ if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(values.keyEnv))return '请填写环境变量名，不要输入密钥内容。';
+ const ranges={ticketLength:[1,4096,'验收票长'],ttlSeconds:[1,3600,'票有效期'],waitMs:[1,10000,'业务等待'],timeoutMs:[1,180000,'任务超时']};
+ for(const id of numberFields){const [min,max,label]=ranges[id];if(!Number.isInteger(values[id])||values[id]<min||values[id]>max)return `${label}必须是 ${min}–${max} 之间的整数。`;}
+ if(values.timeoutMs<values.waitMs)return '任务超时不能小于业务等待上限。';
+ return '';
+}
+function updateEnabled(){byId('enabledStatus').textContent=savedSettings.enabled?'示例已启用':'示例已停用';byId('enabledStatus').className=savedSettings.enabled?'pill':'pill neutral';}
+function render(){
+ const query=byId('search').value.trim().toLowerCase();
+ const rows=records.filter(r=>(byId('status').value==='all'||r.state===byId('status').value)&&(byId('transport').value==='all'||r.transport===byId('transport').value)&&[r.account,r.model,r.finger].join(' ').toLowerCase().includes(query));
+ // HTML 仅来自固定虚构数据；用户输入和可编辑配置不拼进 HTML。
+ byId('rows').innerHTML=rows.map(r=>`<tr><td><div class="account">${r.account}</div><div class="model mono">${r.model}</div></td><td class="tiny">${r.transport}</td><td><span class="pill ${r.state==='cooldown'?'amber':r.state==='minting'?'neutral':''}">${r.label}</span></td><td class="mono muted">${r.gateway}</td><td>${r.finger?`<span class="mono">#${r.finger}</span><div class="tiny">票长 ${r.length}</div>`:'<span class="tiny">尚无有效票</span>'}</td><td>${r.left?`<span class="mono">${r.left}s</span><div class="bar"><i style="width:${r.left/240*100}%"></i></div>`:'<span class="tiny">—</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">没有符合条件的示例记录</td></tr>';
+ byId('rowCount').textContent=`显示 ${rows.length} / 4 个示例桶`;
+}
+byId('logs').innerHTML=entries.map(e=>`<article class="entry ${e.kind==='wait'?'wait':''}"><div class="entry-title"><span class="event-dot"></span>${e.title}<time>${e.time}</time></div><div class="entry-body"><div class="entry-label">${e.meta}</div>${e.body}</div></article>`).join('');
+['search','status','transport'].forEach(id=>byId(id).addEventListener(id==='search'?'input':'change',render));
+byId('settingsForm').addEventListener('input',()=>{markSettings();showMessage('设置尚未应用，点击“保存示例设置”后仅在本页生效。');});
+byId('settingsForm').addEventListener('change',markSettings);
+byId('settingsForm').addEventListener('submit',event=>{
+ event.preventDefault();
+ const values=readSettings();const error=validateSettings(values);
+ if(error){showMessage(error,'error');return;}
+ savedSettings={...values};fillSettings(savedSettings);markSettings();updateEnabled();
+ showMessage('已保存，仅当前示例生效；未写入 CPA。历史票与流水保持不变。','success');
+});
+byId('discardSettings').addEventListener('click',()=>{fillSettings(savedSettings);markSettings();showMessage('已放弃未保存的改动，恢复到上次应用的示例设置。');});
+byId('reset').addEventListener('click',()=>{
+ byId('search').value='';byId('status').value='all';byId('transport').value='all';
+ savedSettings={...defaults};fillSettings(savedSettings);markSettings();updateEnabled();render();
+ showMessage('示例已重置，未连接 CPA。');
+});
+byId('follow').addEventListener('click',()=>{const next=byId('follow').getAttribute('aria-pressed')!=='true';byId('follow').setAttribute('aria-pressed',String(next));byId('follow').textContent=next?'● 跟随最新':'○ 已暂停跟随';});
+fillSettings(savedSettings);render();
+</script>
+</body>
+</html>
