@@ -135,7 +135,7 @@ function validate(cfg){
  if(relay.enabled){const e=validateEndpoint('本地 relay ',relay);if(e)return e;}
  if(!cfg.enabled&&!poolActive)return '';
  if(cfg.enabled||(cfg.pool_fill&&!fc.enabled&&!relay.enabled)){const e=validateEndpoint('云函数',{url:cfg.url,proxy_url:cfg.proxy_url,proxy_env:cfg.proxy_env});if(e)return e;}
- if(!['sse','websocket'].includes(cfg.transport)||!/^unified-[0-9]+$/.test(cfg.gateway))return '打票协议或目标网关无效。';
+ if(!['sse','websocket'].includes(cfg.transport)||!(cfg.gateway==='any'||/^unified-[0-9]+$/.test(cfg.gateway)))return '打票协议或目标网关无效。';
  if(!/^[A-Za-z0-9_.-]{1,96}$/.test(cfg.key_env))return '请填写密钥环境变量名，不要输入密钥。';
  for(const [key,min,max] of [['ticket_length',1,4096],['ttl_seconds',1,3600],['pool_fill_interval_ms',1000,3600000],['wait_ms',1,10000],['timeout_ms',1,180000]])if(!Number.isInteger(cfg[key])||cfg[key]<min||cfg[key]>max)return `${key} 必须在 ${min}–${max} 之间。`;
  if(cfg.timeout_ms<cfg.wait_ms)return '任务超时不能小于业务等待。';return '';
