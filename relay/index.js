@@ -479,6 +479,9 @@ function mintGatewayLabel(cflb, oailb) {
 // 空值、1、true 这类布尔写法不算 —— 否则会把它误读成 unified-1。
 function mintGatewayHint(v) {
   const s = String(v || '').trim();
+  // 显式 any/* 作为"不限网关"透传给 mintGatewayTarget(→null),让客户端可直接用
+  // 请求头声明不限网关,无需依赖 FC 的 MINT_GATEWAY 环境变量(重部署也不丢)。
+  if (/^(any|\*)$/i.test(s)) return s;
   return /unified[-_.]?\d+|gateway[-_.][a-z0-9-]+/i.test(s) ? s : undefined;
 }
 
