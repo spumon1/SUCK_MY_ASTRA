@@ -1,19 +1,26 @@
 'use strict';
 // chatgpt.com 中继 / 打票服务 —— 同一份代码,两种部署模式,靠环境变量切换:
 //
-//   [FC 模式]   部署到阿里云函数计算(`s deploy`)。不设 MINT_UPSTREAM_PROXY,
-//               打票回源从 FC 实例自身出网(出口 = 函数地域的阿里云 IP)。这是
-//               仓库原始行为,未改动;FC 部署照旧可用。
+//   [FC 模式]   部署到阿里云函数计算(`s deploy`)。**必须**设 MINT_UPSTREAM_PROXY
+//               指向动态住宅代理,并设 MINT_GATEWAY=any。不设住宅代理时打票回源
+//               从 FC 实例自身出网(出口 = 函数地域的阿里云数据中心 IP),会被上游
+//               持续 429(`no live target pair … total_attempt_limit`)——2026-09-25
+//               实测:同一批账号,FC 机房出口全 429,补上住宅代理后 6/6 出 780 满血票。
+//               数据中心 IP 会被降级/限流,住宅出口是拿合格票的前提,FC 与本地一样。
 //   [本地模式]  本机 `node index.js` 直接跑,设 MINT_UPSTREAM_PROXY 指向动态住宅
 //               代理(如 novproxy),打票回源经住宅出口。数据中心 IP 常被上游降级
-//               (拿到 turn-state 却无 response.created),住宅出口才稳定出合格票。
+//               (拿到 turn-state 却无 response.created,或持续 429),住宅出口才稳。
 //
-//   切换开关(全部可选,不设即 FC/直连原行为):
-//     MINT_UPSTREAM_PROXY  打票回源的前置代理 socks5h/socks5/http/https;空=直连出网
+//   切换开关:
+//     MINT_UPSTREAM_PROXY  打票回源的前置代理 socks5h/socks5/http/https;空=直连出网。
+//                          FC 与本地都应设为动态住宅代理,否则机房 IP 出口会被 429/降级。
 //     MINT_ROTATE_SID      =1 时每次连接轮换代理用户名里的 -sid-<token>(动态住宅换 IP)
-//     MINT_FORCE_GATEWAY   强制覆盖客户端网关目标;any/* = 接受任意网关(动态出口每次落点不同)
-//   CPA 插件侧对应切换:cloud_mint.url 指向 FC 地址或本地 http://127.0.0.1:<port>/;
-//   cloud_mint.gateway 用具体 unified-N(定向)或 any(配合本地动态出口)。
+//     MINT_GATEWAY         打票目标网关;any = 接受任意网关(配合动态出口每次落点不同),
+//                          unified-N = 定向某个网关。默认 unified-88。注意:代码读的是
+//                          MINT_GATEWAY(见下方 config.gateway),不是 MINT_FORCE_GATEWAY。
+//   CPA 插件侧对应切换:cloud_mint.fc.url / cloud_mint.relay.url 指向 FC 地址或本地
+//   http://127.0.0.1:<port>/;两个源都灌进同一个全局池;cloud_mint.gateway 用 any
+//   (配合动态出口)或具体 unified-N(定向)。
 //
 // 阿里云函数计算(FC 3.0 Web 函数)— chatgpt.com 透明中继
 //

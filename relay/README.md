@@ -15,7 +15,7 @@
                                        └─ X-Edge-IP: <ip>:TCP 直拨该 IP,SNI/Host/证书校验不变
 ```
 
-- **出口 IP**：回源从 FC 实例出网，出口是函数所在地域的阿里云地址，与客户端本地网络无关。
+- **出口 IP**：回源默认从 FC 实例出网，出口是函数所在地域的阿里云**数据中心 IP**。⚠️ 数据中心 IP 会被上游持续 429（`no live target pair … total_attempt_limit`）——2026-09-25 实测同一批账号 FC 机房出口全 429，补上住宅代理后 6/6 出 780 满血票。**部署 FC 时必须**通过 `MINT_UPSTREAM_PROXY`（s.yaml 已预留，部署时 `export MINT_UPSTREAM_PROXY='socks5h://…'` 注入）把回源走动态住宅代理，并设 `MINT_ROTATE_SID=1`、`MINT_GATEWAY=any`。住宅出口是拿合格票的前提，FC 与本地模式一样。
 - **边缘选择**：默认走正常 DNS。请求带 `X-Edge-IP` 时，钉的是 Cloudflare 边缘入口；gateway 节点（unified-N）仍由 `__cflb`/`__oailb` 决定，IP 选不了节点（见 [FINDINGS.md](../FINDINGS.md)「Direct gateway access」实测）。
 
 它只是一个中继：不改写请求内容、不缓存、不重试、不跟随重定向、不解压；支持 WebSocket：HTTP 升级握手后双向透传帧，普通 HTTP 请求仍剥离逐跳头。实现是零依赖的单文件 [`index.js`](index.js)。
