@@ -149,14 +149,15 @@ function showStatus(data){
  if(follow)logs=Array.isArray(data.logs)?data.logs:[];
  pool=data.pool&&typeof data.pool==='object'?data.pool:{};
  const fill=pool.fill&&typeof pool.fill==='object'?pool.fill:{};
+ const fillEnabled=!!(data.effective&&data.effective.pool_fill);
  $('poolUsable').textContent=Number(pool.usable||0);
  $('poolTotalNote').textContent=`共 ${Number(pool.total||0)} 个 · 随窗口起伏`;
  $('poolGateways').textContent=pool.gateways?Object.keys(pool.gateways).length:0;
  $('fillPooled').textContent=Number(fill.last_pooled||0);
  $('fillAttemptNote').textContent=fill.last_attempt?`上轮 ${fill.last_attempt} 次尝试`:'尚无灌池轮次';
  $('fillInterval').innerHTML=fill.interval_ms?Math.round(fill.interval_ms/1000)+'<small>s</small>':'—';
- $('fillStateNote').textContent=fill.enabled?(fill.running?'灌池循环运行中':'已启用未运行'):'灌池未启用';
- const modeText=fill.enabled?(data.enabled?'灌池 + 按请求注入':'灌池模式'):(data.enabled?'按请求注入':'均未启用');
+ $('fillStateNote').textContent=fillEnabled?(fill.running?'灌池循环运行中':'已启用未运行'):'灌池未启用';
+ const modeText=fillEnabled?(data.enabled?'灌池 + 按请求注入':'灌池模式'):(data.enabled?'按请求注入':'均未启用');
  $('enabledStatus').textContent=modeText;
  $('runtimeWarning').textContent=data.role==='probe'?'当前 role=probe，不注入业务请求；请在 CPA 配置中改为 business。':data.dry_run?'当前仅观测模式：不会请求 FC 或注入票。':'';
  const expected=saved.cloud_mint||{};
