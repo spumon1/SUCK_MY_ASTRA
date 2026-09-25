@@ -24,6 +24,18 @@ type cloudMintConfig struct {
 	TTLSeconds   int    `yaml:"ttl_seconds"`
 	WaitMS       int    `yaml:"wait_ms"`
 	TimeoutMS    int    `yaml:"timeout_ms"`
+	// PoolFill 开启后台灌池循环:用 probe_accounts 的账号定期调 FC 打票,把满血
+	// __cflb/__oailb 灌进全局池,供所有账号复用(池模式下 enabled 可为 false)。
+	PoolFill           bool `yaml:"pool_fill"`
+	PoolFillIntervalMS int  `yaml:"pool_fill_interval_ms"`
+}
+
+// 灌池间隔,过小则钳到 30s。
+func (c cloudMintConfig) poolFillIntervalMS() int {
+	if c.PoolFillIntervalMS < 1000 {
+		return 30000
+	}
+	return c.PoolFillIntervalMS
 }
 
 func defaultCloudMintConfig() cloudMintConfig {
@@ -35,7 +47,7 @@ var cloudGatewayPattern = regexp.MustCompile(`^unified-[0-9]+$`)
 var cloudNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,96}$`)
 
 func (c cloudMintConfig) validate() error {
-	if !c.Enabled {
+	if !c.Enabled && !c.PoolFill {
 		return nil
 	}
 	u, err := url.Parse(c.URL)

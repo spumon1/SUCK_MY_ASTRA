@@ -591,6 +591,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
+	cloudPoolFillerStop()
 	currentCloudMintService().close()
 	// Best effort, and only that: a docker kill never calls this, so the real
 	// upper bound on lost observations stays observationsFlushInterval, and on
@@ -766,6 +767,7 @@ func configure(raw []byte) error {
 	state.mu.Unlock()
 	if cloudChanged {
 		resetCloudMintService()
+		cloudPoolFillerReconfigure(cfg)
 	}
 
 	// Outside state.mu: loadObservations takes its own lock and must never be
