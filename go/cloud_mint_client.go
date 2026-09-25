@@ -112,7 +112,7 @@ func validateCloudMint(r cloudMintResult, cfg cloudMintConfig, model string, now
 	if issued.IsZero() || issued.After(now.Add(30*time.Second)) {
 		return cloudMintEntry{}, errors.New("invalid ticket issue time")
 	}
-	if r.Gateway != cfg.Gateway || cloudCookieGateway(r.Cookies) != cfg.Gateway {
+	if cfg.Gateway != "any" && (r.Gateway != cfg.Gateway || cloudCookieGateway(r.Cookies) != cfg.Gateway) {
 		return cloudMintEntry{}, errors.New("cloud target gateway mismatch")
 	}
 	cookies := map[string]string{}

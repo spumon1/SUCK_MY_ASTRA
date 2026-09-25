@@ -50,7 +50,7 @@ func (c cloudMintConfig) validate() error {
 	if err := c.validateProxy(); err != nil {
 		return err
 	}
-	if !cloudNamePattern.MatchString(c.KeyEnv) || !cloudGatewayPattern.MatchString(c.Gateway) {
+	if !cloudNamePattern.MatchString(c.KeyEnv) || !(c.Gateway == "any" || cloudGatewayPattern.MatchString(c.Gateway)) {
 		return errors.New("invalid cloud_mint key_env or gateway")
 	}
 	if c.Transport != "sse" && c.Transport != "websocket" {

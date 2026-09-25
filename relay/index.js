@@ -1,4 +1,20 @@
 'use strict';
+// chatgpt.com 中继 / 打票服务 —— 同一份代码,两种部署模式,靠环境变量切换:
+//
+//   [FC 模式]   部署到阿里云函数计算(`s deploy`)。不设 MINT_UPSTREAM_PROXY,
+//               打票回源从 FC 实例自身出网(出口 = 函数地域的阿里云 IP)。这是
+//               仓库原始行为,未改动;FC 部署照旧可用。
+//   [本地模式]  本机 `node index.js` 直接跑,设 MINT_UPSTREAM_PROXY 指向动态住宅
+//               代理(如 novproxy),打票回源经住宅出口。数据中心 IP 常被上游降级
+//               (拿到 turn-state 却无 response.created),住宅出口才稳定出合格票。
+//
+//   切换开关(全部可选,不设即 FC/直连原行为):
+//     MINT_UPSTREAM_PROXY  打票回源的前置代理 socks5h/socks5/http/https;空=直连出网
+//     MINT_ROTATE_SID      =1 时每次连接轮换代理用户名里的 -sid-<token>(动态住宅换 IP)
+//     MINT_FORCE_GATEWAY   强制覆盖客户端网关目标;any/* = 接受任意网关(动态出口每次落点不同)
+//   CPA 插件侧对应切换:cloud_mint.url 指向 FC 地址或本地 http://127.0.0.1:<port>/;
+//   cloud_mint.gateway 用具体 unified-N(定向)或 any(配合本地动态出口)。
+//
 // 阿里云函数计算(FC 3.0 Web 函数)— chatgpt.com 透明中继
 //
 // 客户端把原本发往 https://chatgpt.com 的请求改发到本函数;函数以 chatgpt.com
@@ -134,9 +150,21 @@ function config() {
     upstream,
     connectTimeoutMs: connectTimeoutMs > 0 ? connectTimeoutMs : CONNECT_TIMEOUT_DEFAULT_MS,
     allowPrivateEdge: process.env.ALLOW_PRIVATE_EDGE_IPS === '1',
+    // 打票上游代理:让 FC 连 chatgpt 时走住宅出口(数据中心直连拿不到满血)。
+    // 仅作用于打票 dial(SSE/WS),不影响透明中继的业务透传。
+    mintProxy: parseProxy(process.env.MINT_UPSTREAM_PROXY),
+    // 动态住宅代理:每次连接把用户名里的 -sid-XXXX 换成随机值 → 每次尝试换一个出口 IP。
+    // 住宅 IP 质量参差(有的 reset/返回非 SSE/被降级),逐次轮换才能命中干净出口。
+    mintProxyRotate: process.env.MINT_ROTATE_SID === '1',
     mint: {
       transport: process.env.MINT_TRANSPORT || 'sse',
       gateway: process.env.MINT_GATEWAY || MINT_GATEWAY_DEFAULT,
+      // 满血验证(MINT_VERIFY_STATE=1):打到票后,带着该票的 x-codex-turn-state
+      // 与路由 cookie 再发一次;上游回来不带新 state = 满血,带了新 state = 已降级。
+      // 只有满血票才交回;非满血当作拒收继续循环。默认关(不影响 FC/原有行为)。
+      verifyState: process.env.MINT_VERIFY_STATE === '1',
+      // 满血验证的重试次数:住宅出口偶发传输错,换 IP 再验,拿到明确判定为止。
+      verifyAttempts: clampInt(process.env.MINT_VERIFY_ATTEMPTS, 3, 1, 10),
       models: parseModels(process.env.MINT_MODELS || process.env.MINT_MODEL || MINT_MODELS_DEFAULT),
       // 0 表示不查票长 —— 上游改过签名格式(292→780),留个不更新代码的逃生口。
       ticketLen: nonNegInt(process.env.MINT_TICKET_LEN, MINT_TICKET_LEN_DEFAULT),
@@ -229,6 +257,186 @@ function armConnectTimeout(upReq, ms) {
     socket.once(socket.encrypted ? 'secureConnect' : 'connect', disarm);
     socket.once('close', disarm);
   });
+}
+
+// --- 打票上游住宅代理(零依赖 SOCKS5 / HTTP CONNECT)-----------------------
+// FC 打票默认从函数自己的数据中心 IP 直连 chatgpt,只能拿到 turn-state 却出不来
+// 正常 response.created(满血须走住宅出口)。MINT_UPSTREAM_PROXY 让打票 dial 经
+// 一个住宅代理隧道到上游;支持 socks5/socks5h/http/https,代理凭据只在这条通道用。
+function parseProxy(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  let u;
+  try { u = new URL(s); } catch { throw new Error('MINT_UPSTREAM_PROXY must be a URL'); }
+  const protocol = u.protocol.replace(/:$/, '').toLowerCase();
+  if (!['socks5', 'socks5h', 'http', 'https'].includes(protocol)) {
+    throw new Error(`MINT_UPSTREAM_PROXY unsupported protocol: ${protocol}`);
+  }
+  const port = Number(u.port) || (protocol === 'http' ? 80 : protocol === 'https' ? 443 : 1080);
+  return {
+    protocol,
+    host: u.hostname,
+    port,
+    user: u.username ? decodeURIComponent(u.username) : '',
+    pass: u.password ? decodeURIComponent(u.password) : '',
+  };
+}
+
+// SOCKS5(RFC1928)+ 可选用户名/密码认证(RFC1929)。握手完成后 sock 即已隧道到
+// host:port,交回调;之后由调用方在其上做 TLS。
+function socks5Handshake(sock, host, port, proxy, cb) {
+  const useAuth = !!(proxy.user || proxy.pass);
+  let stage = 'greet';
+  let buf = Buffer.alloc(0);
+  let done = false;
+  const finish = (err) => {
+    if (done) return;
+    done = true;
+    sock.removeListener('data', onData);
+    cb(err || null);
+  };
+  const sendConnect = () => {
+    stage = 'connect';
+    const fam = net.isIP(host);
+    let addr;
+    if (fam === 4) addr = Buffer.from([0x01, ...host.split('.').map((n) => Number(n) & 0xff)]);
+    else if (fam === 6) finish(new Error('socks5: IPv6 target unsupported'));
+    else { const h = Buffer.from(host); addr = Buffer.concat([Buffer.from([0x03, h.length]), h]); }
+    if (done) return;
+    const pbuf = Buffer.alloc(2); pbuf.writeUInt16BE(port);
+    sock.write(Buffer.concat([Buffer.from([0x05, 0x01, 0x00]), addr, pbuf]));
+  };
+  const onData = (d) => {
+    buf = Buffer.concat([buf, d]);
+    try {
+      if (stage === 'greet') {
+        if (buf.length < 2) return;
+        if (buf[0] !== 0x05) throw new Error('socks5: bad version');
+        const method = buf[1]; buf = buf.subarray(2);
+        if (method === 0x02) {
+          if (!useAuth) throw new Error('socks5: proxy demands auth but none set');
+          const u = Buffer.from(proxy.user), p = Buffer.from(proxy.pass);
+          sock.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]));
+          stage = 'auth';
+        } else if (method === 0x00) { sendConnect(); }
+        else throw new Error(`socks5: unsupported auth method ${method}`);
+      } else if (stage === 'auth') {
+        if (buf.length < 2) return;
+        if (buf[1] !== 0x00) throw new Error('socks5: auth failed');
+        buf = buf.subarray(2); sendConnect();
+      } else if (stage === 'connect') {
+        if (buf.length < 4) return;
+        if (buf[1] !== 0x00) throw new Error(`socks5: connect rejected (rep ${buf[1]})`);
+        const atyp = buf[3];
+        const addrLen = atyp === 0x01 ? 4 : atyp === 0x04 ? 16
+          : atyp === 0x03 ? (buf.length >= 5 ? buf[4] + 1 : Infinity) : -1;
+        if (addrLen < 0) throw new Error(`socks5: bad atyp ${atyp}`);
+        const total = 4 + addrLen + 2;
+        if (buf.length < total) return;
+        const leftover = buf.subarray(total);
+        finish(null);
+        if (leftover.length) sock.unshift(leftover);
+      }
+    } catch (e) { finish(e); }
+  };
+  sock.on('data', onData);
+  sock.write(useAuth ? Buffer.from([0x05, 0x02, 0x00, 0x02]) : Buffer.from([0x05, 0x01, 0x00]));
+}
+
+// HTTP CONNECT 隧道(http/https 前置代理)。
+function httpConnectHandshake(sock, host, port, proxy, cb) {
+  const target = net.isIP(host) === 6 ? `[${host}]:${port}` : `${host}:${port}`;
+  let head = `CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n`;
+  if (proxy.user || proxy.pass) {
+    const cred = Buffer.from(`${proxy.user}:${proxy.pass}`).toString('base64');
+    head += `Proxy-Authorization: Basic ${cred}\r\n`;
+  }
+  head += '\r\n';
+  let buf = Buffer.alloc(0);
+  let done = false;
+  const onData = (d) => {
+    buf = Buffer.concat([buf, d]);
+    const idx = buf.indexOf('\r\n\r\n');
+    if (idx === -1) return;
+    done = true;
+    sock.removeListener('data', onData);
+    const statusLine = buf.subarray(0, buf.indexOf('\r\n')).toString('latin1');
+    const m = /^HTTP\/\d\.\d\s+(\d{3})/.exec(statusLine);
+    if (!m || m[1] !== '200') { cb(new Error(`proxy CONNECT failed: ${statusLine}`)); return; }
+    const leftover = buf.subarray(idx + 4);
+    cb(null);
+    if (leftover.length) sock.unshift(leftover);
+  };
+  sock.on('data', onData);
+  sock.write(head);
+}
+
+// 连到代理并隧道到 host:port,返回已建好的裸 socket(未 TLS)。
+function proxyRawConnect(proxy, host, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (err, sock) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) { sock?.destroy?.(); reject(err); } else resolve(sock);
+    };
+    const timer = setTimeout(
+      () => settle(Object.assign(new Error('proxy connect timeout'), { code: 'ETIMEDOUT' })),
+      timeoutMs);
+    const proxyTls = proxy.protocol === 'https';
+    const raw = proxyTls
+      ? tls.connect({ host: proxy.host, port: proxy.port, servername: proxy.host })
+      : net.connect({ host: proxy.host, port: proxy.port });
+    raw.once('error', (e) => settle(e));
+    raw.once(proxyTls ? 'secureConnect' : 'connect', () => {
+      const cb = (e) => (e ? settle(e) : settle(null, raw));
+      if (proxy.protocol === 'socks5' || proxy.protocol === 'socks5h') {
+        socks5Handshake(raw, host, port, proxy, cb);
+      } else {
+        httpConnectHandshake(raw, host, port, proxy, cb);
+      }
+    });
+  });
+}
+
+// 供 http(s).request 的 createConnection 使用:经代理隧道后按需 TLS 包一层。
+// 轮换动态代理会话:把用户名里的 -sid-<token> 换成随机值(novproxy 等按此换出口 IP)。
+function rotateProxySid(proxy) {
+  const re = /(-sid-)[^-]+/;
+  if (!proxy || !re.test(proxy.user || '')) return proxy;
+  return { ...proxy, user: proxy.user.replace(re, `$1${crypto.randomBytes(6).toString('hex')}`) };
+}
+
+function makeProxyConnect(proxy, timeoutMs, isHttps, defaultServername, rotate) {
+  return function (options, cb) {
+    const useProxy = rotate ? rotateProxySid(proxy) : proxy;
+    proxyRawConnect(useProxy, options.host, options.port, timeoutMs).then((raw) => {
+      if (!isHttps) { cb(null, raw); return; }
+      const tlsOpts = {
+        socket: raw,
+        servername: options.servername || defaultServername,
+        ALPNProtocols: ['http/1.1'],
+      };
+      // Node 拒绝 checkServerIdentity: undefined,只有确为函数时才带上。
+      if (typeof options.checkServerIdentity === 'function') {
+        tlsOpts.checkServerIdentity = options.checkServerIdentity;
+      }
+      const tlsSock = tls.connect(tlsOpts);
+      tlsSock.once('secureConnect', () => cb(null, tlsSock));
+      tlsSock.once('error', (e) => cb(e));
+    }).catch((e) => cb(e));
+  };
+}
+
+// 打票 dial 用的 agent:无代理时返回 false(保持原直连行为),有代理时返回一个
+// createConnection 走隧道的一次性 agent。
+function mintUpstreamAgent(isHttps, cfg) {
+  if (!cfg.mintProxy) return false;
+  const Agent = isHttps ? https.Agent : http.Agent;
+  const agent = new Agent({ keepAlive: false, maxSockets: Infinity });
+  agent.createConnection = makeProxyConnect(cfg.mintProxy, cfg.connectTimeoutMs, isHttps, cfg.upstream.hostname, cfg.mintProxyRotate);
+  return agent;
 }
 
 // --- 打票(X-Relay-Mint)---------------------------------------------------
@@ -523,7 +731,7 @@ function fireSseMintAttempt(cfg, edgeIp, creds, model, cookieHeader) {
       method: 'POST',
       path: MINT_PATH,
       headers: mintHeaders(creds, crypto.randomUUID(), cookieHeader),
-      agent: false,
+      agent: mintUpstreamAgent(isHttps, cfg),
       servername: isHttps ? upstream.hostname : undefined,
     });
     armConnectTimeout(upReq, cfg.connectTimeoutMs);
@@ -533,10 +741,21 @@ function fireSseMintAttempt(cfg, edgeIp, creds, model, cookieHeader) {
 
     upReq.on('response', (upRes) => {
       readMintHeaders(out, upRes);
+      // 纯读头模式(verifyState 开):票(780 turn-state)就在响应头里,满血与否由
+      // 后续 state-echo 判定,无需读 body 里的 response.created。头里有票即收,
+      // 跳过 content-type 早退与 served_model 校验——顺带绕开"空 content-type/
+      // served 空"导致的误杀(US/EU 那类)。
+      if (cfg.mint.verifyState && upRes.statusCode === 200 && out.ticket) {
+        out.served = model;
+        finish({ reason: 'ok' });
+        upRes.destroy();
+        return;
+      }
       // 上游已把 SSE 响应声明为 application/octet-stream(正文仍是 SSE 文本);
       // 模型声明由 mintSseDecision 严格解析,content-type 只做早退优化,放宽白名单。
       const mintCt = upRes.headers['content-type'] || '';
       if (upRes.statusCode === 200
+          && mintCt
           && !/^text\/event-stream(?:;|$)/i.test(mintCt)
           && !/^application\/octet-stream(?:;|$)/i.test(mintCt)) {
         finish({ reason: 'bad_sse_content_type' });
@@ -596,6 +815,53 @@ function fireMintAttempt(cfg, edgeIp, creds, model, cookieHeader) {
     ? fireWsMintAttempt(cfg, edgeIp, creds, model, cookieHeader)
     : fireSseMintAttempt(cfg, edgeIp, creds, model, cookieHeader);
 }
+
+// 满血验证(带重试):住宅出口偶发 reset/timeout,一次传输错不代表票坏,重试几次
+// (每次换出口 IP)直到拿到明确判定;全都传输错才判 unverifiable。
+async function verifyFullStrength(cfg, edgeIp, creds, ticket, cookieHeader, model) {
+  const tries = cfg.mint.verifyAttempts;
+  let lastErr = 'unverifiable';
+  for (let i = 0; i < tries; i += 1) {
+    const r = await verifyStateOnce(cfg, edgeIp, creds, ticket, cookieHeader, model);
+    if (!r.error) return r;      // 明确判定(满血/降级)即返回
+    lastErr = r.error;           // 传输错 → 换 IP 再验
+  }
+  return { full: false, error: lastErr };
+}
+
+// 单发 state-echo:带 turn-state + 路由 cookie 再发一次(只读响应头即断)。
+// 上游对一个「活」的 turn-state:满血 → 不下发新 state;已降级 → 下发一个新 state。
+function verifyStateOnce(cfg, edgeIp, creds, ticket, cookieHeader, model) {
+  const { upstream } = cfg;
+  const isHttps = upstream.protocol === 'https:';
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
+    const headers = { ...mintHeaders(creds, crypto.randomUUID(), cookieHeader) };
+    headers[turnStateEchoHeader] = ticket; // 必须真的发一个 live turn-state,否则上游必回 state,判据失效
+    const req = (isHttps ? https : http).request({
+      host: edgeIp || upstream.hostname,
+      port: upstream.port || (isHttps ? 443 : 80),
+      method: 'POST',
+      path: MINT_PATH,
+      headers,
+      agent: mintUpstreamAgent(isHttps, cfg),
+      servername: isHttps ? upstream.hostname : undefined,
+    });
+    armConnectTimeout(req, cfg.connectTimeoutMs);
+    timer = setTimeout(() => { req.destroy(); finish({ full: false, error: 'timeout' }); }, cfg.mint.attemptTimeoutMs);
+    req.on('response', (resp) => {
+      const newState = first(resp.headers[turnStateEchoHeader]) || '';
+      resp.destroy(); // 只读头,不读 body
+      // 不带新 state(或与原票一致)= 满血;带了不同的新 state = 已降级。
+      finish({ full: !newState || newState === ticket, newState });
+    });
+    req.on('error', (err) => finish({ full: false, error: err.code || 'err' }));
+    req.end(mintPayload(model));
+  });
+}
+const turnStateEchoHeader = 'x-codex-turn-state';
 
 function readMintHeaders(out, response) {
   out.status = response.statusCode;
@@ -706,7 +972,7 @@ function fireWsMintAttempt(cfg, edgeIp, creds, model, cookieHeader) {
     delete headers['content-type'];
     request = (secure ? https : http).request({
       host: edgeIp || hostname, port: cfg.upstream.port || (secure ? 443 : 80),
-      method: 'GET', path: MINT_PATH, headers, agent: false,
+      method: 'GET', path: MINT_PATH, headers, agent: mintUpstreamAgent(secure, cfg),
       servername: secure && !net.isIP(hostname) ? hostname : undefined,
       checkServerIdentity: (_host, cert) => tls.checkServerIdentity(hostname, cert),
     });
@@ -919,7 +1185,10 @@ async function mintTickets(req, res, cfg, entry, edgeIp) {
   cfg = { ...cfg, mint: { ...cfg.mint, transport } };
   const want = {
     gateway: mintGatewayTarget(
-      first(req.headers['x-mint-gateway']) || mintGatewayHint(first(req.headers['x-relay-mint'])) || cfg.mint.gateway,
+      // MINT_FORCE_GATEWAY 若设置则强制覆盖客户端发来的网关(设为 any/* 即接受任意网关);
+      // 本地 relay + 动态住宅出口每次落的 unified-N 不同,先用它把打票跑通。
+      process.env.MINT_FORCE_GATEWAY
+      || first(req.headers['x-mint-gateway']) || mintGatewayHint(first(req.headers['x-relay-mint'])) || cfg.mint.gateway,
     ),
     models: parseModels(first(req.headers['x-mint-models']) || first(req.headers['x-mint-model']) || cfg.mint.models.join(',')),
     ticketLen: nonNegInt(first(req.headers['x-mint-len']), cfg.mint.ticketLen),
@@ -1053,6 +1322,14 @@ async function mintWithLifetime({ res, cfg, entry, edgeIp, want, creds, transpor
       if (why) {
         last.why = why;
         continue;
+      }
+      // 满血门:基础校验过后,用 state-echo 判定这张票是不是满血;非满血当拒收继续循环。
+      if (cfg.mint.verifyState) {
+        const vpairs = attempt.pairs || (pair && pair.pairs);
+        if (!vpairs || !vpairs.__cflb || !vpairs.__oailb) { last.why = 'verify_no_pair'; continue; }
+        const vcookie = `__cflb=${vpairs.__cflb}; __oailb=${vpairs.__oailb}`;
+        const verdict = await verifyFullStrength(cfg, edgeIp, creds, attempt.ticket, vcookie, model);
+        if (!verdict.full) { last.why = verdict.error ? `verify:${verdict.error}` : 'downgraded'; continue; }
       }
       const issuedAt = fernetIssuedAt(attempt.ticket, Date.now());
       const rec = {
