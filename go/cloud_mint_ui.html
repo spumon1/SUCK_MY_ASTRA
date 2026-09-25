@@ -38,8 +38,8 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 <p class="help" id="fillLine" style="padding:0 18px">FC 灌池：后台用探测账号逐个打票，把合格的 __cflb/__oailb 灌进全局池，供所有账号业务请求复用。可用与否随窗口起伏，就绪不等于满血鉴定。</p>
 <div class="table-wrap"><table><thead><tr><th>目标网关</th><th>来源</th><th>状态</th><th>剩余有效期</th><th>已存活</th></tr></thead><tbody id="poolRows"></tbody></table></div>
 <div class="card-foot"><span id="poolRowCount">尚未读取</span><span>池账号无关 · 可跨账号跨模型复用</span></div></section>
-<section class="card"><div class="card-head"><h3>票与任务</h3><small>实时数据 · 内存缓存</small></div><div class="toolbar"><div class="search"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.3" stroke="currentColor"/><path d="m10 10 3 3" stroke="currentColor"/></svg><input id="search" aria-label="搜索账号、模型或票指纹" placeholder="搜索账号、模型、票指纹…"></div><select id="status" aria-label="筛选任务状态"><option value="all">全部状态</option><option value="ready">已就绪</option><option value="minting">打票中</option><option value="cooldown">冷却中</option></select><select id="transport" aria-label="筛选协议"><option value="all">全部协议</option><option>SSE</option><option>WS</option></select></div><div class="tiny mobile-only" style="padding:0 12px 8px">左右滑动查看网关、票指纹与有效期 →</div><div class="table-wrap"><table><thead><tr><th>账号 / 模型</th><th>协议</th><th>状态</th><th>目标网关</th><th>票摘要</th><th>剩余有效期</th></tr></thead><tbody id="rows"></tbody></table></div><div class="card-foot"><span id="rowCount">尚未读取</span><span>已有客户端状态不覆盖 · 票与 pair 双重验期</span></div></section>
-<section class="card"><div class="card-head"><h3>请求日志</h3><div class="feed-head"><small>脱敏记录 · 本地时间</small><button class="toggle" id="follow" aria-pressed="true">● 跟随最新</button></div></div><p class="help" id="logsHelp" style="padding:0 18px">最近 80 条请求与取票记录。票指纹不是原文。未返回新票不等于已接受旧票，也不代表请求失败。faster-model 是缓冲后备声明，不是响应 model；tier 仅展示响应声明。WS 的 previous/response 只显示指纹；created 不等于 completed，续链 ID 不能跨连接当票复用。</p><div class="logs" id="logs"></div><div class="card-foot"><span>未知不等于失败，更不等于成功。</span><span>只记录实际发生的事件</span></div></section>
+<section class="card"><div class="card-head"><h3>票与任务</h3><small>就绪 <b id="readyCount">—</b> · 打票 <b id="workingCount">—</b> · 冷却 <b id="cooldownCount">—</b></small></div><div class="toolbar"><div class="search"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.3" stroke="currentColor"/><path d="m10 10 3 3" stroke="currentColor"/></svg><input id="search" aria-label="搜索账号、模型或票指纹" placeholder="搜索账号、模型、票指纹…"></div><select id="status" aria-label="筛选任务状态"><option value="all">全部状态</option><option value="ready">已就绪</option><option value="minting">打票中</option><option value="cooldown">冷却中</option></select><select id="transport" aria-label="筛选协议"><option value="all">全部协议</option><option>SSE</option><option>WS</option></select></div><div class="tiny mobile-only" style="padding:0 12px 8px">左右滑动查看网关、票指纹与有效期 →</div><div class="table-wrap"><table><thead><tr><th>账号 / 模型</th><th>协议</th><th>状态</th><th>目标网关</th><th>票摘要</th><th>剩余有效期</th></tr></thead><tbody id="rows"></tbody></table></div><div class="card-foot"><span id="rowCount">尚未读取</span><span>已有客户端状态不覆盖 · 票与 pair 双重验期</span></div></section>
+<section class="card"><div class="card-head"><h3>请求日志</h3><div class="feed-head"><small>脱敏记录 · 共 <b id="logCount">—</b> 条</small><button class="toggle" id="follow" aria-pressed="true">● 跟随最新</button></div></div><p class="help" id="logsHelp" style="padding:0 18px">最近 80 条请求与取票记录。票指纹不是原文。未返回新票不等于已接受旧票，也不代表请求失败。faster-model 是缓冲后备声明，不是响应 model；tier 仅展示响应声明。WS 的 previous/response 只显示指纹；created 不等于 completed，续链 ID 不能跨连接当票复用。</p><div class="logs" id="logs"></div><div class="card-foot"><span>未知不等于失败，更不等于成功。</span><span>只记录实际发生的事件</span></div></section>
 </div><aside class="card" id="settings" aria-labelledby="settingsTitle">
 <div class="card-head"><h2 id="settingsTitle">打票设置</h2><span class="pill neutral" id="settingsState">尚未读取</span></div>
 <form id="settingsForm" class="settings-body" novalidate><fieldset id="settingsFields" disabled style="border:0;padding:0;margin:0;min-width:0">
@@ -159,6 +159,10 @@ function showStatus(data){
  $('fillStateNote').textContent=fillEnabled?(fill.running?'灌池循环运行中':'已启用未运行'):'灌池未启用';
  const modeText=fillEnabled?(data.enabled?'灌池 + 按请求注入':'灌池模式'):(data.enabled?'按请求注入':'均未启用');
  $('enabledStatus').textContent=modeText;
+ $('readyCount').textContent=rows.filter(r=>r.state==='ready').length;
+ $('workingCount').textContent=rows.filter(r=>r.state==='minting').length;
+ $('cooldownCount').textContent=rows.filter(r=>r.state==='cooldown').length;
+ $('logCount').textContent=Array.isArray(data.logs)?Math.min(80,data.logs.length):0;
  $('runtimeWarning').textContent=data.role==='probe'?'当前 role=probe，不注入业务请求；请在 CPA 配置中改为 business。':data.dry_run?'当前仅观测模式：不会请求 FC 或注入票。':'';
  const expected=saved.cloud_mint||{};
  const matching=Object.entries(data.effective||{}).every(([key,value])=>!(key in expected)||expected[key]===value)&&!!data.dry_run===!!saved.dry_run;
@@ -201,7 +205,7 @@ $('connect').addEventListener('click',async()=>{
 $('disconnect').addEventListener('click',()=>{
  generation++;credential='';connected=false;rows=[];logs=[];pool={};saved={};dirty=false;$('managementKey').value='';
  $('settingsFields').disabled=true;$('settingsForm').reset();$('connectionState').textContent='已断开';$('enabledStatus').textContent='状态未知';$('settingsState').textContent='尚未读取';
- ['poolUsable','poolGateways','fillPooled','fillInterval'].forEach(id=>$(id).textContent='—');renderRows();renderPool();renderLogs();message('管理密钥及页面配置已从本页清除。');
+ ['poolUsable','poolGateways','fillPooled','fillInterval','readyCount','workingCount','cooldownCount','logCount'].forEach(id=>$(id).textContent='—');renderRows();renderPool();renderLogs();message('管理密钥及页面配置已从本页清除。');
 });
 $('settingsForm').addEventListener('input',()=>{dirty=true;$('settingsState').textContent='未保存';});
 $('settingsForm').addEventListener('submit',async event=>{

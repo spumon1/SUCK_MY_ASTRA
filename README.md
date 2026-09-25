@@ -108,9 +108,9 @@ NATIVE_PLUGIN_PATH=build/linux/amd64/codex-turn-state-cloud-mint.so \
 # FC 函数测试（零依赖，只连本机）
 cd relay && node --test
 
-# 面板
-node tests/ui/observed-state.test.mjs
-python3 scripts/ui_preview.py --port 8765
+# 面板（云打票 dashboard，Playwright headless）
+node tests/ui/cloud-mint-production.test.cjs
+node tests/ui/cloud-mint-example.test.cjs
 ```
 
 ## License

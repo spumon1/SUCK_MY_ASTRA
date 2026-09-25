@@ -1,0 +1,9 @@
+# Build artifacts
+/build/
+/.gocache/
+go/cpa-plugin-codex-turn-state
+
+# Node / Playwright dev deps (installed ad hoc to run tests/ui, see tests/ui/README.md)
+/node_modules/
+/package.json
+/package-lock.json

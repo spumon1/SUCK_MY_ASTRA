@@ -1,37 +1,19 @@
-# 本地 UI 验收
+# 云打票面板验收
 
-在仓库根目录运行：
+面板是插件内嵌的 `go/cloud_mint_ui.html`，宿主在 `/v0/resource/plugins/<plugin-id>/dashboard`
+下服务，并在服务时把 `cpa-plugin-id` 的占位值重写为真实插件 id。以下测试用 Playwright
+headless chromium 加载真实页面、拦截并伪造管理接口，验证浏览器到接口的契约，不连 CPA 或上游。
 
 ```bash
-python scripts/ui_preview.py --port 8765
+npm i -D playwright && npx playwright install --with-deps chromium
+node tests/ui/cloud-mint-production.test.cjs
+node tests/ui/cloud-mint-example.test.cjs
 ```
 
-访问 `http://127.0.0.1:8765/` 查看当前正式 HTML，`/baseline` 查看重构前的页面。基线固定为提交 `762df1b`，用于本次回归对照。
-
-预览通过 `fixture.js` 替换页面的 `fetch`，只返回虚构数据。未知请求被拒绝，CSP 禁止网络 API 连接；Python 服务只绑定 `127.0.0.1`。操作不会连接 CPA 或上游。正式插件不会加载任何预览脚本。
-
-将 `browser-checks.js` 中的异步函数在浏览器执行（例如 DevTools 中将函数用括号包围后调用），分别在新旧页面运行。返回的 `failures` 应为空；`traces` 记录修改接口的路径、参数和方法，两版应一致。额外的新页面断言验证未配置范围时摘要不虚构目标数量。
-
-检查覆盖模板矩阵、范围外模板、空范围、旧版字段缺失、编辑与刷新、保存差分、清空列表、保存失败、放弃草稿、取消确认、探测启停、角色与模拟模式、自检、清理、代理检查及刷新失败。
+- `cloud-mint-production.test.cjs` 加载线上 `cloud_mint_ui.html`：能力边界文案、鉴权后取数、
+  真实载荷渲染（票与任务、全局路由池、灌池状态、请求日志）、草稿保留、PATCH 浅合并、
+  保存确认、校验、XSS、陈旧态、密钥清理、移动端不横向溢出。
+- `cloud-mint-example.test.cjs` 校验设计稿 `design/cloud-mint-example.html`：只保留云打票与设置，
+  无无关导航；密钥只提供环境变量名，不出现密码/令牌输入框；筛选、前置代理互斥与校验等。
 
 这套检查验证浏览器到接口的契约，不代替真实 CPA 插件加载或线上上游测试。
-
-## 服务态判定（可自动跑，不需要浏览器）
-
-```bash
-node tests/ui/observed-state.test.mjs
-```
-
-`observedState` 是面板上唯一会「下结论」而不只是转述服务端数字的函数，也是唯一可能撒谎的地方：桶里有活模板时每个请求都被注入、上游因此不再签发，这一侧最长一小时看不到真实服务态，此时沿用上一次「正常」就是拿旧结论冒充现状。
-
-该测试把函数从 `ui.html` 切片出来直接执行（不复制源码，因此不会与线上版本漂移），逐一断言全部分支：无观测、长期无流量、新鲜自然观测（正常/受限）、注入后仍受限（报警）、注入后上游仍签发 292（有证据，不是盲区）、未知格式、注入盲区、dry_run 持模板未注入、桶好但无流量、陈旧读数，以及标签必须带样本数 `n=`、提示里必须带近 24h 汇总。
-
-三条最容易搞错的，各自都做过变异验证：
-
-| 把代码改回错的写法 | 测试报的 |
-|---|---|
-| 让未知长度落进「正常」分支 | `FAIL unrecognised length is not green` |
-| 只拿自然观测算新鲜度（忽略注入时上游签发的 292） | `FAIL injected and signed a fresh 292` |
-| 无视 `dry_run`，照样叫「注入中·盲区」 | `FAIL dry_run holds a template but injects nothing` |
-
-第一条是最要命的：我们只认识 292 和 312 两个长度，上游哪天换了格式，所有响应都会变成「未知」，那一刻把它显示成正常就是全线降智配一屏绿灯。
