@@ -10,3 +10,6 @@ go/cpa-plugin-codex-turn-state
 
 # Claude Code local session config (not for the repo)
 /.claude/
+
+# 账号凭据导入文件,禁止入库
+/gpt/
