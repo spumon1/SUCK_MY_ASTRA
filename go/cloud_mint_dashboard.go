@@ -12,7 +12,7 @@ import (
 )
 
 const routeCloudDashboardStatus = "/codex-turn-state/cloud-status"
-const cloudDashboardBuild = "cloud-mint-ui-20260924-ws-chain"
+const cloudDashboardBuild = "cloud-mint-ui-20260926-checkbox"
 const cloudDashboardLogLimit = 80
 
 type cloudDashboardLog struct {
@@ -27,7 +27,7 @@ var cloudDashboardLogs = struct {
 	items []cloudDashboardLog
 }{items: []cloudDashboardLog{}}
 
-// 仅接收调用方已脱敏的结构化结果，日志缓存有界，不暴露在匿名资源路由。
+// 只接调用方已脱敏的结构化结果，日志缓存有上限；匿名资源路由不摆这桌菜。
 func cloudRecordLog(kind, format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 	log.Printf(logPrefix+"%s · %s", kind, message)
@@ -39,7 +39,7 @@ func cloudRecordLog(kind, format string, args ...any) {
 	}
 }
 
-// 请求头与后续模型声明更新同一条记录；淘汰后的旧请求不会被迟到事件重新插回。
+// 请求头和后来的模型声明更新同一条账；记录淘汰后，迟到事件不能把旧客人从后门请回来。
 func cloudUpsertRequestLog(sequence uint64, at time.Time, kind, message string, published bool) bool {
 	cloudDashboardLogs.Lock()
 	defer cloudDashboardLogs.Unlock()
@@ -111,18 +111,32 @@ func (s *cloudMintService) dashboardRows() []cloudDashboardRow {
 }
 
 func handleCloudDashboardStatus() pluginapi.ManagementResponse {
+	now := time.Now()
 	state.mu.Lock()
 	cfg := state.config
+	pool := state.poolSnapshotLocked(now, cfg.ttl())
 	state.mu.Unlock()
+	fill := poolFillSnapshot()
 	rows := currentCloudMintService().dashboardRows()
 	cloudDashboardLogs.Lock()
 	logs := append([]cloudDashboardLog{}, cloudDashboardLogs.items...)
 	cloudDashboardLogs.Unlock()
 	sort.SliceStable(logs, func(i, j int) bool { return logs[i].At.Before(logs[j].At) })
+	// 主动探针用真实 probe_accounts 账号名做选项；下拉按名选、按名回传，不玩猜灯谜。
+	mtAccounts := append([]string(nil), cfg.ProbeAccounts...)
+	fillAccts := append([]string(nil), cfg.fillAccounts()...)
 	return jsonResponse(http.StatusOK, map[string]any{
 		"plugin_id": currentCloudPluginID(), "build": cloudDashboardBuild, "enabled": cfg.CloudMint.Enabled, "role": cfg.Role, "dry_run": cfg.DryRun,
+		"modeltrace_accounts": mtAccounts,
+		"mint_accounts":       append([]string(nil), cfg.MintAccounts...), // 当前打票名单，空就全员上灶
+		"fill_accounts":       fillAccts,                                  // 实际灌池伙计，取 mint_accounts 或全员
 		"effective": map[string]any{"enabled": cfg.CloudMint.Enabled, "transport": cfg.CloudMint.Transport, "gateway": cfg.CloudMint.Gateway,
-			"ticket_length": cfg.CloudMint.TicketLength, "ttl_seconds": cfg.CloudMint.TTLSeconds, "wait_ms": cfg.CloudMint.WaitMS, "timeout_ms": cfg.CloudMint.TimeoutMS},
+			"ticket_length": cfg.CloudMint.TicketLength, "ttl_seconds": cfg.CloudMint.TTLSeconds, "wait_ms": cfg.CloudMint.WaitMS, "timeout_ms": cfg.CloudMint.TimeoutMS,
+			"pool_fill": cfg.CloudMint.PoolFill, "pool_fill_interval_ms": cfg.CloudMint.poolFillIntervalMS()},
 		"rows": rows, "logs": logs, "worker_limit": cloudWorkersMax,
+		"pool": map[string]any{
+			"total": pool.Total, "usable": pool.Usable, "gateways": pool.Gateways, "rows": pool.Rows,
+			"ttl_seconds": cfg.TTLSeconds, "fill": fill,
+		},
 	})
 }

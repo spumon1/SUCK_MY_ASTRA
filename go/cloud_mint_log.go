@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// 只记录摘要和观测事实，不保存原始票、Cookie、访问令牌或用户文本。
+// 日志只记摘要与观测事实；原始票、Cookie、访问令牌、用户文本都不准上展台。
 type cloudLogView struct {
 	TicketLen         int
 	Fingerprint       string
@@ -87,7 +87,7 @@ func cloudEntryView(entry cloudMintEntry) cloudLogView {
 		AgeSeconds: int64(time.Since(entry.IssuedAt).Seconds()), HasAge: !entry.IssuedAt.IsZero()}
 }
 
-// 云端 trace 是不可信输入，只读取限定字段；绝不打印云端返回的自由文本错误。
+// 云端 trace 当陌生来客，只取白名单字段；自由文本错误不打印，不能让客人自己往日志墙写字。
 func logCloudAttempts(entries []cloudAttemptLog) {
 	if len(entries) > 40 {
 		entries = entries[len(entries)-40:]
@@ -110,7 +110,7 @@ func logCloudAttempts(entries []cloudAttemptLog) {
 	}
 }
 
-// 只读取声明层字段，不搜索任意嵌套 model，不把 buffering 头当作响应模型。
+// 只看声明层字段，不翻任意嵌套 model，也不把 buffering 头错认成模型的身份证。
 type cloudDeclaredResponse struct {
 	ID     string `json:"id"`
 	Model  string `json:"model"`

@@ -13,7 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// 模拟宿主已选中该账号；仅暴露虚构文件，不触及真实凭据。
+// 模拟宿主已经点选账号，只递虚构文件，道具组不借真实凭据拍戏。
 func cloudRecoveryHost(t *testing.T, runtime *pluginapi.HostAuthFileEntry) *atomic.Int32 {
 	t.Helper()
 	var reads atomic.Int32
@@ -137,7 +137,7 @@ func TestCloudMintCold503RecoversFromReadyCache(t *testing.T) {
 	if done == nil {
 		t.Fatal("cold 503 must leave a live mint job")
 	}
-	// 首次 503 后，宿主冷却到期仍可能保留 Unavailable 摘要。
+	// 首次 503 后，即使宿主冷却结束，Unavailable 摘要也可能还坐在原位。
 	runtime.Unavailable, runtime.Status = true, "error"
 	runtime.NextRetryAfter = time.Now().Add(-time.Second)
 	unblock()

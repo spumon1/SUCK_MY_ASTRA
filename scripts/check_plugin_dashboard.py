@@ -45,7 +45,7 @@ def main():
     html = base64.b64decode(result.get('Body', result.get('body')))
     expected = f'name="cpa-plugin-id" content="{args.plugin_id}"'.encode()
     assert expected in html, 'configuration uses wrong plugin ID'
-    assert b'cloud-mint-ui-20260924-ws-chain' in html, 'old dashboard'
+    assert b'cloud-mint-ui-20260926-sid-acct' in html, 'old dashboard'
     assert b'const records=[' not in html and b'INTERACTIVE EXAMPLE' not in html
     status = invoke('management.handle', {
         'Method': 'GET', 'Path': '/v0/management/' + args.plugin_id + '/cloud-status',

@@ -1,7 +1,7 @@
-# 示例插件配置，合并进 CPA config.yaml 的 plugins.configs 下面。
-# 配置键名必须等于插件 .so 文件名派生的 ID：codex-turn-state-cloud-mint。
+# 配置来认门：这份示例要住进 CPA config.yaml 的 plugins.configs，别串错包厢。
+# 门牌必须与插件 .so 文件名派生的 ID 一字不差：codex-turn-state-cloud-mint，艺名不算。
 #
-# 云端打票协议与环境变量见 relay/CPA.md；FC 端配置见 relay/README.md。
+# 找规矩别问扫地大爷：云端协议与环境变量看 relay/CPA.md，FC 配置看 relay/README.md。
 plugins:
   enabled: true
   configs:
@@ -9,58 +9,81 @@ plugins:
       enabled: true
       priority: 100
 
-      # ── 角色 ────────────────────────────────────────────────────────────
-      # business = 业务端：云端打票注入 + 路由 Cookie 引导。
-      # probe    = 只采集不改写（云端模式下同样不碰请求）。
-      # 缺失时按 business 处理；非法值拒绝启动。
+      # ── 角色：先认工牌再开工 ────────────────────────────────────────────────────────────
+      # business 是正班跑堂：负责云端打票注入和路由 Cookie 引导。
+      # probe 是拿本子旁观的：只采集不改写，云端模式也不伸手碰请求。
+      # 没报角色就按 business 上岗；乱报名字，启动的大门直接关上。
       role: business
 
-      # 逻辑照走、照打日志，但不真改请求。上线先 true 确认归属判定，
-      # 再改 false。cloud_mint.enabled 下 dry_run 也不会请求 FC。
+      # 彩排也走逻辑、写日志，只是不真改请求；上线先 true 确认归属判定，
+      # 认对客人再改 false；cloud_mint.enabled 下 dry_run 连 FC 都不敲门。
       dry_run: true
 
-      # 每个决定打一行：steer|pass|skip|harvest + auth + model + len + reason。
-      # 票、Cookie、token 的值永远不进日志。
+      # 账房一事一行：steer|pass|skip|harvest + auth + model + len + reason。
+      # 账房记事不晒钥匙：票、Cookie、token 的值永远不进日志。
       log_decisions: true
 
-      # 池化路由 Cookie 的可用时长（秒），从 Set-Cookie 最后出现起算，
-      # 并被 __oailb JWT 内嵌 exp 截短。仅池化模式使用。
+      # 池里的路由 Cookie 也有保鲜期（秒），从 Set-Cookie 最后出现起算，
+      # 但 __oailb JWT 内嵌 exp 能提前收摊；这口钟只管池化模式。
       ttl_seconds: 3900
 
-      # 本地模板/路由池落盘目录。空字符串 = 不落盘也不读盘。
+      # 本地模板/路由池的仓库地址；空字符串就是不租仓库，不落盘也不读盘。
       store_dir: ""
 
-      # ── 云端打票 ────────────────────────────────────────────────────────
-      # enabled: true 后云端模式独占注入决策；false 回到路由 Cookie 池模式。
+      # ── 云端打票：售票窗口开张 ────────────────────────────────────────────────────────
+      # enabled: true 让云端窗口独管注入决策；false 则交回路由 Cookie 池，别抢柜台。
       cloud_mint:
         enabled: true
 
-        # FC 函数地址。必须 HTTPS（HTTP 只允许回环测试地址），
-        # 不带凭据、query、fragment，不跟随重定向。
+        # FC 的门牌必须穿 HTTPS 正装（只有回环测试地址可穿 HTTP 拖鞋），
+        # 凭据、query、fragment 不准夹带，重定向招手也不跟着走。
         url: https://<函数地址>/
 
-        # 密钥不进配置文件：这里写的是【环境变量名】，值注入 CPA 进程环境，
-        # 与 FC 的 RELAY_KEY 相同。
+        # 配置只登记【环境变量名】，不登记密钥真身；值注入 CPA 进程环境，
+        # 还得与 FC 的 RELAY_KEY 对上暗号，不是同音就算数。
         key_env: CPA_RELAY_KEY
 
-        # 插件到 FC 的前置代理，二选一，都为空则明确直连（不继承系统代理）。
+        # 插件到 FC 的前置代理只能二选一；都空就直连，系统代理想代班也不收。
         # proxy_url: socks5h://user:pass@gw.example:1080
         # proxy_env: CPA_MINT_PROXY
 
-        # FC 到上游的打票传输：sse 或 websocket，需与业务通道匹配。
+        # FC 到上游乘 sse 或 websocket 这班车，必须与业务通道同路，不能各坐各的。
         transport: sse
 
-        # 目标网关（__oailb JWT 内嵌节点名），any 不查。
+        # 按 __oailb JWT 内嵌节点名认目标网关；any 表示不查门牌，不是查完都满意。
         gateway: unified-88
 
-        # 票长验收（字符数），仅是格式预期不是健康信号；0 不查。
+        # 验票只量字符数，不给健康开证明；身高合格不代表会武功，0 则不量。
         ticket_length: 780
 
-        # 票有效期（秒），自 Fernet 内嵌签发时刻起算。
+        # 票的保鲜期按秒算，从 Fernet 内嵌签发时刻开钟，拿到手不重新过生日。
         ttl_seconds: 240
 
-        # 业务线程最多等票毫秒数；超时返回 503，后台任务继续到完成。
+        # 业务线程最多等这些毫秒；超时端上 503，后台师傅仍继续做到结束。
         wait_ms: 2000
 
-        # 云端任务整体时限毫秒数。建议大于 FC MINT_TOTAL_TIMEOUT_MS。
+        # 给云端整桌活儿的总时限（毫秒）；建议大于 FC MINT_TOTAL_TIMEOUT_MS，别菜没齐就收桌。
         timeout_ms: 90000
+
+        # ---- 后台添水：定期用 probe_accounts 打票，把 __cflb/__oailb 灌进全局池，
+        # 所有账号业务请求共用这口池；两个具名源各有开关、地址和前置代理，
+        # 两位师傅可以同时开工，但打到的 pair 都倒进【同一个】全局池，不分鸳鸯锅。
+        pool_fill_interval_ms: 90000
+
+        # 一号水龙头是公网阿里云函数(FC)：填自己的 FC HTTPS 地址，再置 enabled: true 开闸。
+        fc:
+          enabled: false
+          url: ""
+          proxy_url: ""     # 插件→FC 的接驳车，一般不必叫车，留空即可
+          proxy_env: ""
+
+        # 二号水龙头是本机住宅代理 relay；住宅动态代理出口藏在 relay 内部(MINT_UPSTREAM_PROXY)，
+        # 这里登记 relay 本机入口就够了，别把后门当正门填。
+        relay:
+          enabled: true
+          url: http://127.0.0.1:9101/
+          proxy_url: ""
+          proxy_env: ""
+
+        # 旧版单源灌池是候补师傅：只有上面 fc/relay 都关闭，才用顶层 url 独自灌池。
+        pool_fill: false

@@ -1,32 +1,14 @@
 package main
 
-// Contract tests for the shapes this plugin publishes rather than merely uses.
-//
-// The other test files assert behaviour: given this request, expect that
-// decision. These assert *surface*: the exact set of JSON keys each
-// anonymously readable document can emit, the exact set of paths reachable
-// without a key, and the exact set of config fields the host is told about.
-// They are deliberately brittle. A behavioural test answers "does it still
-// work"; these answer "did the published surface change", and the only correct
-// way to make one fail is to change the literal alongside the code and think
-// about what it now exposes.
-//
-// SHAPE, NOT CONTENT. Every assertion here is about which keys exist. None of
-// it can tell whether a value put into one of them is safe. Several fields are
-// free-text channels -- probe_run.lines, store_error, accounts_error,
-// config_errors, and every "detail"/"note" on the proxy check -- and those rest
-// entirely on probeRedact, maskProxyURL and the denylist assertions in
-// TestAnonymousStatusResourceNeverLeaksTokenValues. Do not read a green run
-// here as "nothing leaks".
-//
-// Why the file exists: statusResponse carries a long comment warning that every
-// field on it is anonymously readable, and managementRegister carries another
-// warning that anything in Resources is keyless. Both were prose. The nearest
-// thing to enforcement was TestAnonymousStatusResourceNeverLeaksTokenValues
-// (management_test.go), which greps the response for the specific tokens it
-// seeded -- a denylist, which by construction cannot catch a field nobody
-// thought to seed. Verified: grafting a probe_management_key field onto
-// statusResponse passes that test and every other test in the suite.
+// 合同测试盯插件公开的形状，不只盯它怎么干活。其他测试问“这请求得这结果吗”，
+// 这里逐项钉免密文档 JSON 键、免密路径、向宿主声明的配置字段，故意对改名敏感。
+// 要改公开面就连字面量一起审，不能让新字段偷偷拿旧票进场。
+// 只验形状，不验内容！probe_run.lines、store_error、accounts_error、config_errors
+// 以及代理检查的 detail/note 都是自由文本，其安全靠 probeRedact、maskProxyURL
+// 和 TestAnonymousStatusResourceNeverLeaksTokenValues；这里绿灯不等于秘密没上镜。
+// statusResponse 与 managementRegister 原来只靠注释警告公开范围，最近的防线是
+// management_test.go 的特定 token 黑名单；未想到种进样本的新字段它抓不到。
+// 已验证：给 statusResponse 加 probe_management_key，旧套件仍全绿。门卫只认几张照片，陌生秘密就能溜进来。
 
 import (
 	"encoding"
@@ -37,20 +19,12 @@ import (
 	"testing"
 )
 
-// --- 1. the anonymous status document ------------------------------------
+// --- 1. 匿名状态文档：公开橱窗逐格点名 ---
 
-// statusResponsePublicFields is every JSON key path handleStatus can emit, and
-// therefore every key path readable without a credential: the same document
-// answers /v0/management/codex-turn-state/status and the unauthenticated
-// /v0/resource/plugins/codex-turn-state/status, with no per-route filtering.
-//
-// Nested paths are "parent.child". Slice elements are flattened onto the slice
-// key, so a field on statusBucket appears as "buckets.<field>" once rather than
-// per element.
-//
-// Adding a line here is the act of publishing that field. Before you do:
-// probe_management_key is the one value on this plugin that is never displayed
-// anywhere, masked or otherwise, and proxy URLs carry userinfo.
+// statusResponsePublicFields 列 handleStatus 能吐出的全部 JSON 键路径；
+// /v0/management/codex-turn-state/status 与免密 /v0/resource/plugins/codex-turn-state/status
+// 返回同文档，无逐路由过滤。嵌套写 parent.child，切片元素摊成 buckets.<field>，每字段一次。
+// 这里添一行就是公开一格橱窗：probe_management_key 永不展示（遮罩也不行），代理 URL 可能带 userinfo，先验货再开窗。
 var statusResponsePublicFields = []string{
 	"accounts_error",
 	"accounts_source",
@@ -59,14 +33,9 @@ var statusResponsePublicFields = []string{
 	"buckets.enabled",
 	"buckets.len",
 	"buckets.model",
-	// The observation tally. Counters, a closed set of kind strings
-	// (normal/limited/silent/other), lengths and timestamps -- nothing that can
-	// hold a credential. Reviewed field by field when they were added.
-	//
-	// bucketObservation.Hourly is deliberately NOT here: the per-hour history
-	// lives in the snapshot on disk and is rolled up into recent_24h for the
-	// page. Publishing 48 slots per bucket would grow a polled document for
-	// data the panel does not draw.
+	// 观测账只收计数、封闭 kind（normal/limited/silent/other）、长度与时刻，逐字段审过，不给凭据留口袋。
+	// bucketObservation.Hourly 特意不公开：小时历史在磁盘快照，页面只取 recent_24h；
+	// 每桶 48 槽页面不画还塞进轮询文档，只会把账本送成砖头。
 	"buckets.observed",
 	"buckets.observed.injected_limited",
 	"buckets.observed.injected_normal",
@@ -77,9 +46,7 @@ var statusResponsePublicFields = []string{
 	"buckets.observed.last_len",
 	"buckets.observed.last_natural_at",
 	"buckets.observed.last_natural_kind",
-	// The most recent reading in which the upstream signed anything, injected
-	// or not. Same classes of value as last_natural_*: a timestamp, a kind from
-	// the closed set, and a bool.
+	// 最近一次上游真签发读数，不论有无注入；类型同 last_natural_*：时刻、封闭 kind、bool，不添秘密菜。
 	"buckets.observed.last_signed_at",
 	"buckets.observed.last_signed_kind",
 	"buckets.observed.last_signed_wrote",
@@ -96,8 +63,7 @@ var statusResponsePublicFields = []string{
 	"buckets.observed.recent_24h.natural_normal",
 	"buckets.observed.recent_24h.natural_other",
 	"buckets.ready",
-	// A lifetime in seconds for the account's pooled __cflb/__oailb pair --
-	// never a cookie value.
+	// 账号池中 __cflb/__oailb pair 只报剩余秒数，不报 Cookie 真身。
 	"buckets.route_cookies_seconds_left",
 	"config_errors",
 	"counters",
@@ -109,21 +75,15 @@ var statusResponsePublicFields = []string{
 	"dry_run",
 	"generated_at",
 	"models",
-	// The live feed. auth_id here is the credential filename, which carries a
-	// customer email -- but it is already published on every buckets row, so
-	// this adds no new class of value. What it DOES newly publish is a
-	// per-account request timestamp, and therefore an activity pattern. That
-	// was a deliberate call for a loopback-bound panel; it would not be one for
-	// anything reachable.
+	// 实时流 auth_id 是带客户邮件的凭据文件名，buckets 已公开同类值；新增的其实是
+	// 逐账号请求时间戳及活动规律。仅对回环绑定面板做过此选择，暴露到可达网络可不能照抄菜单。
 	"observation_feed",
 	"observation_feed.at",
 	"observation_feed.auth_id",
 	"observation_feed.kind",
 	"observation_feed.len",
 	"observation_feed.model",
-	// The model the stream actually served when it differed from the request --
-	// the unified format's downgrade signature. A model id, same class of value
-	// as observation_feed.model.
+	// 实服与请求不同时记录实际模型，这是统一格式后的降级信号；模型 ID 与 observation_feed.model 同类，名牌不冒充能力证明。
 	"observation_feed.served",
 	"observation_feed.wrote",
 	"observations_since",
@@ -151,11 +111,8 @@ var statusResponsePublicFields = []string{
 	"ttl_seconds",
 }
 
-// choicesResponsePublicFields is the scope editor's menu, served keyless on
-// /ops/choices. accounts.name is the credential filename in full, which carries
-// a customer email; accounts.label is the masked form the page displays. Both
-// are published -- the route answers without a key and the page needs the real
-// filename to post back -- which is exactly why the shape is pinned.
+// choicesResponsePublicFields 是免密 /ops/choices 菜单；accounts.name 公开完整文件名（含邮件），
+// accounts.label 才是页面展示的遮罩值。提交需真文件名，两者都公开，所以要把橱窗形状钉牢。
 var choicesResponsePublicFields = []string{
 	"accounts",
 	"accounts.disabled",
@@ -168,11 +125,8 @@ var choicesResponsePublicFields = []string{
 	"models.selected",
 }
 
-// proxyCheckResponsePublicFields is the exit diagnostic, served keyless on
-// /ops/proxy-check. results.proxy is a proxy URL and goes out through
-// probeShowProxy; results.detail is free text off an upstream error. Neither
-// is protected by this assertion -- see the SHAPE, NOT CONTENT note above --
-// but a new field on this document is a new keyless field either way.
+// proxyCheckResponsePublicFields 对应免密 /ops/proxy-check；results.proxy 经 probeShowProxy，
+// results.detail 是上游错误自由文本。这里只钉形状，不担保值安全；每加一字段都等于多开一扇免密窗。
 var proxyCheckResponsePublicFields = []string{
 	"blocked",
 	"checked",
@@ -201,10 +155,8 @@ var proxyCheckResponsePublicFields = []string{
 	"timed_out",
 }
 
-// TestAnonymouslyReadableShapesArePinned walks each document's type -- not a
-// marshalled instance -- so that omitempty fields are counted too. An instance
-// only shows what happened to be populated, and "the leak is in a field that is
-// empty in the fixture" is exactly the case worth catching.
+// TestAnonymouslyReadableShapesArePinned 遍历文档类型，不看某个序列化样本，omitempty 也点名。
+// 样本没填的新字段恰是漏网之鱼，不能因为演员今天请假就说剧组没这人。
 func TestAnonymouslyReadableShapesArePinned(t *testing.T) {
 	for _, doc := range []struct {
 		name  string
@@ -225,23 +177,19 @@ func TestAnonymouslyReadableShapesArePinned(t *testing.T) {
 	}
 }
 
-// --- 2. the walker itself -------------------------------------------------
+// --- 2. 遍历器：查户口的人也要考试 ---
 
-// The pins above are only worth their brittleness if the walk underneath them
-// actually descends. A jsonFieldPaths that quietly returned the top level would
-// keep every assertion green while publishing whole nested structs unchecked,
-// so it gets its own fixture rather than being trusted.
+// 钉字段有意义的前提是遍历真下潜；jsonFieldPaths 若只报顶层，嵌套结构全裸也能绿灯。
+// 专给遍历器道具考题，门卫也验自己的眼镜。
 
 type walkerProbeInner struct {
 	Alpha  string `json:"alpha"`
 	Omit   string `json:"-"`
-	hidden string //nolint:unused // present so the walk is seen to skip it
+	hidden string //nolint:unused // 故意在场，好查遍历器真会跳过隐身客
 }
 
-// walkerProbeEmbedded is embedded untagged, the shape bucketObservation uses
-// for its counters. Unexported on purpose: encoding/json still promotes the
-// exported fields of an embedded unexported struct type, and that is the case
-// most likely to be got wrong.
+// walkerProbeEmbedded 无标签嵌入，和 bucketObservation 计数同形状；类型故意不导出，
+// encoding/json 仍提升其中导出字段，这处最容易把祖孙辈分算错。
 type walkerProbeEmbedded struct {
 	Promoted string `json:"promoted"`
 }
@@ -259,15 +207,15 @@ type walkerProbeOuter struct {
 func TestJSONFieldPathsDescends(t *testing.T) {
 	got := jsonFieldPaths(t, reflect.TypeOf(walkerProbeOuter{}), "")
 	want := []string{
-		"Untagged", // no tag: encoding/json falls back to the Go field name
+		"Untagged", // 没 tag 就让 encoding/json 按 Go 字段名点名
 		"list",
-		"list.alpha", // slice elements flatten onto the slice key
-		"names",      // a []string is a leaf
+		"list.alpha", // 切片元素摊在切片键下，不按人头加楼层
+		"names",      // []string 到此是叶子，不再钻树洞
 		"nested",
 		"nested.alpha",
-		"pointer", // a *struct is followed
+		"pointer", // *struct 还要跟进去查房
 		"pointer.alpha",
-		"promoted", // embedded untagged: promoted to the parent, NOT nested
+		"promoted", // 无标签嵌入提升到父级，不另开嵌套包厢
 		"top",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -279,10 +227,8 @@ func TestJSONFieldPathsDescends(t *testing.T) {
 		}
 	}
 
-	// The list above is still only my reading of encoding/json's rules, and the
-	// promotion rule for an embedded unexported struct type is the kind of thing
-	// a person gets wrong from memory. Ask the marshaller instead of trusting
-	// the reading: at the top level the two must agree exactly.
+	// 上表只是人对 encoding/json 的理解，未导出嵌入类型的提升最易记错；
+	// 请 marshaller 本尊核对顶层键完全一致，不靠脑内小剧场判法。
 	raw, err := json.Marshal(walkerProbeOuter{})
 	if err != nil {
 		t.Fatalf("marshalling the probe: %v", err)
@@ -310,14 +256,9 @@ func TestJSONFieldPathsDescends(t *testing.T) {
 	}
 }
 
-// jsonFieldPaths returns every JSON key path encoding/json can produce for typ,
-// recursing through structs, pointers and slice/array elements.
-//
-// It fails the test on any shape whose keys cannot be read off the type: a map,
-// an interface, a []byte (json.RawMessage serialises as whatever it holds), or
-// anything with its own MarshalJSON/MarshalText. Silently treating one of those
-// as a leaf would make every pin above under-report, which is the one failure
-// this file cannot afford.
+// jsonFieldPaths 递归结构、指针、切片/数组，列出 encoding/json 会产生的全部键路径。
+// map、interface、[]byte（json.RawMessage 随内容变形）及自带 MarshalJSON/MarshalText
+// 无法从类型定键就失败，不能悄悄当叶子；漏报一层会让公开面合同变成假收据。
 func jsonFieldPaths(t *testing.T, typ reflect.Type, prefix string) []string {
 	t.Helper()
 	var out []string
@@ -344,17 +285,10 @@ func collectJSONFields(t *testing.T, typ reflect.Type, prefix string, out *[]str
 		name := strings.Split(tag, ",")[0]
 
 		if field.Anonymous && name == "" {
-			// encoding/json promotes an untagged embedded struct's exported
-			// fields onto the parent rather than nesting them -- including when
-			// the embedded type itself is unexported, which is why this runs
-			// ahead of the PkgPath check below. Modelling it is not optional:
-			// pinning "observed.counts.natural_normal" for a key that ships as
-			// "observed.natural_normal" would make every list in this file
-			// describe a document that does not exist, and the pins would then
-			// be green about the wrong surface.
-			//
-			// A tagged embed is a different thing -- encoding/json nests it
-			// under the tag name -- and falls through to the ordinary path.
+			// encoding/json 将无标签嵌入结构的导出字段提升到父级，嵌入类型未导出也如此，
+			// 因此先处理再查 PkgPath。实际发 observed.natural_normal，却钉 observed.counts.natural_normal，
+			// 等于给不存在的房子验门锁，整表绿了也没用。
+			// 带标签嵌入另算，按标签嵌套，继续走普通路径，别给所有亲戚硬排同一辈。
 			embedded := derefType(field.Type)
 			if embedded.Kind() != reflect.Struct {
 				t.Fatalf("%s embeds the non-struct %s; encoding/json's rules there are subtle "+
@@ -367,7 +301,7 @@ func collectJSONFields(t *testing.T, typ reflect.Type, prefix string, out *[]str
 		}
 
 		if field.PkgPath != "" {
-			continue // unexported: never serialised
+			continue // 未导出不序列化，后台人员不上公开名单
 		}
 		if name == "" {
 			name = field.Name
@@ -393,15 +327,12 @@ func descendJSONField(t *testing.T, typ reflect.Type, path string, out *[]string
 	case reflect.Struct:
 		collectJSONFields(t, typ, path, out)
 	case reflect.Slice, reflect.Array:
-		// Elements flatten onto the slice's own key: one entry per field, not
-		// one per element. A nested slice keeps flattening.
+		// 元素字段摊到切片自身键，每字段一条不按人数复印；嵌套切片继续摊平。
 		descendJSONField(t, typ.Elem(), path, out, where+" element")
 	}
 }
 
-// rejectOpaque fails on a type whose emitted keys are not determined by the
-// type. Called at every level, including slice elements, because []map[string]X
-// hides exactly as much as map[string]X does.
+// rejectOpaque 在每层含切片元素拒绝键不能由类型决定的形状；[]map[string]X 和 map[string]X 一样藏东西，穿数组外套也不放行。
 func rejectOpaque(t *testing.T, typ reflect.Type, where string) {
 	t.Helper()
 
@@ -437,16 +368,11 @@ func derefType(typ reflect.Type) reflect.Type {
 	return typ
 }
 
-// --- 3. the keyless surface ----------------------------------------------
+// --- 3. 免密面：注册即开门 ---
 
-// keylessResourcePaths is every path registered under the resource prefix.
-// Registration *is* the grant: the host serves that prefix without
-// authentication, so a new entry in managementRegister's Resources list is a
-// new keyless endpoint whether or not anyone meant it to be one.
-//
-// TestManagementRegisterExposesExactlyOneMenuResource already stops a resource
-// from acquiring a Menu (which would publish it into the management centre).
-// This pins the weaker but wider property: the set itself.
+// keylessResourcePaths 是资源前缀下所有路径；宿主不鉴权，所以 managementRegister.Resources
+// 每加一项就真开一扇免密门，无论有没有想明白。
+// TestManagementRegisterExposesExactlyOneMenuResource 已守 Menu 不乱加，此处守更广的整组路径。
 var keylessResourcePaths = []string{
 	"/dashboard",
 	"/ops/choices",
@@ -461,21 +387,19 @@ var keylessResourcePaths = []string{
 	"/status",
 }
 
-// authenticatedRoutes is the management surface that stays behind a key.
-// routeConfig is the load-bearing one: it returns the configuration verbatim,
-// which is where a probe bearer would surface. It must never move to the
-// resource list, and it must never acquire a Menu (a GET route with a Menu is
-// re-registered under the resource prefix by the host).
+// authenticatedRoutes 留在 key 后面，routeConfig 尤其承重：原样返回配置，probe bearer 最可能从这里探头。
+// 绝不移入资源表，也不挂 Menu；宿主会把带 Menu 的 GET 再挂免密资源前缀，招牌能悄悄变通行证。
 var authenticatedRoutes = []string{
 	"GET /codex-turn-state/cloud-status",
 	"GET /codex-turn-state/config",
 	"GET /codex-turn-state/status",
 	"POST /codex-turn-state/buckets/clear",
 	"POST /codex-turn-state/selftest",
+	"POST /codex-turn-state/modeltrace",
+	"POST /codex-turn-state/gateway-sweep",
 }
 
-// The registration does not vary by role -- managementRegister reads nothing
-// off the config -- so one configured role exercises it fully.
+// managementRegister 不读配置，注册不随角色变；配一种角色就能考完整名单，没必要请全剧组换装。
 func TestKeylessSurfaceIsPinned(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -497,15 +421,10 @@ func TestKeylessSurfaceIsPinned(t *testing.T) {
 		"moving one of these to the resource list would publish it")
 }
 
-// --- 4. the declared configuration ----------------------------------------
+// --- 4. 声明配置：菜单名字也是合同 ---
 
-// configFieldNames is what the host is told this plugin accepts, in order. The
-// host renders these, so a rename is a user-visible change to a YAML key and a
-// removal silently stops the field being offered.
-//
-// This pins names, not descriptions. The descriptions are prose shown to an
-// operator and they drift like any other prose -- two of them were wrong about
-// roles until the commit that added this file's sibling fixes.
+// configFieldNames 按序列宿主被告知可接收的字段，宿主拿它渲染；改名改的是用户 YAML 键，删项会悄悄从菜单消失。
+// 只钉名字不钉说明文案；说明可润色，之前两个角色描述还写错过，别把台词锁成石碑。
 var configFieldNames = []string{
 	"role",
 	"store_dir",
@@ -520,7 +439,7 @@ var configFieldNames = []string{
 	"probe_proxies_rotating",
 	"probe_management_key",
 	"probe_base_url",
-	"cloud_mint", // 新增插件自有配置，不改变已有字段顺序。
+	"cloud_mint", // 新增插件自有配置坐末席，旧字段座次不挪。
 }
 
 func TestDeclaredConfigFieldsArePinned(t *testing.T) {
@@ -535,9 +454,7 @@ func TestDeclaredConfigFieldsArePinned(t *testing.T) {
 			"Order matters here because the host renders them in it.", got, configFieldNames)
 	}
 
-	// A field declared with no description is one the operator meets with no
-	// explanation, and several of these carry warnings about probe scope that
-	// are the only place that rule is stated to a reader of the UI.
+	// 声明字段没说明，用户见的是无字说明书；数项关于探测范围的警告只在 UI 此处出现，不能省成谜语。
 	for _, field := range fields {
 		if strings.TrimSpace(field.Description) == "" {
 			t.Errorf("config field %q is declared without a description", field.Name)
@@ -545,7 +462,7 @@ func TestDeclaredConfigFieldsArePinned(t *testing.T) {
 	}
 }
 
-// --- helpers ---------------------------------------------------------------
+// --- 帮手：收尾时也逐项对账 ---
 
 func assertSetEqual(t *testing.T, what string, got, want []string, why string) {
 	t.Helper()

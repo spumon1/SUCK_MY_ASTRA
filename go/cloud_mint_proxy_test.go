@@ -38,7 +38,7 @@ func TestCloudMintProxyValidation(t *testing.T) {
 	}
 }
 
-// 目标回环端口未监听，显式代理直接模拟 FC，不能被 NO_PROXY 绕开。
+// 目标回环端口故意不营业；显式代理扮 FC，NO_PROXY 不能把这位替身绕过去。
 func TestCloudMintReachesFCThroughForwardProxy(t *testing.T) {
 	var calls atomic.Int32
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# 手动打一发云端打票，用于诊断 503。与插件 cloud_mint_client.go 发同一组头。
+# 给云端打票端点递一次诊断单，专查 503；头部照抄插件 cloud_mint_client.go 的工牌，不临场加戏。
 #
 #   CPA_RELAY_KEY=xxx ./scripts/mint_once.sh <fc_url> [model]
 #
-# 环境变量:
-#   CPA_RELAY_KEY   必填,与 FC 的 RELAY_KEY 同值(不进命令行参数,不落盘)
-#   AUTH_FILE       Codex 凭据 JSON,默认取仓库根目录 codex-*.json 第一个
-#   CPA_MINT_PROXY  可选,插件到 FC 的前置代理(http/https/socks5/socks5h)
-#   MINT_GATEWAY    目标网关,默认 unified-88(对齐 cloud_mint.gateway)
-#   MINT_TRANSPORT  sse|websocket,默认 sse(对齐 cloud_mint.transport)
+# 环境变量负责报菜名：
+#   CPA_RELAY_KEY   必填，与 FC 的 RELAY_KEY 对口令；不进命令行参数、不落盘，钥匙不登台
+#   AUTH_FILE       Codex 凭据 JSON；未点名时请仓库根目录第一个 codex-*.json 出列
+#   CPA_MINT_PROXY  可选，插件到 FC 的带路人（http/https/socks5/socks5h）
+#   MINT_GATEWAY    目标网关门牌，默认 unified-88（与 cloud_mint.gateway 对齐）
+#   MINT_TRANSPORT  sse|websocket 两条走廊，默认 sse（与 cloud_mint.transport 对齐）
 #
-# 输出只含状态码、错误码与脱敏摘要;票/Cookie/token 一律只打长度。
+# 报告只让状态码、错误码与脱敏摘要上台；票/Cookie/token 只报身高（长度），不露脸。
 set -euo pipefail
 
 FC_URL="${1:?usage: mint_once.sh <fc_url> [model]}"

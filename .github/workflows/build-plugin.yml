@@ -1,0 +1,63 @@
+name: Build plugin
+
+# 只认手动开工单，推代码不会自动把云端灶台点着。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Linux / ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    defaults:
+      run:
+        shell: bash
+    env:
+      GOOS: linux
+      GOARCH: ${{ matrix.arch }}
+      GO_IMAGE: golang:1.26
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # 单测在原生 amd64 灶上跑；arm64 由原脚本请交叉编译师傅出菜。
+      - name: Test Go plugin
+        if: matrix.arch == 'amd64'
+        run: |
+          mkdir -p .gocache/build .gocache/mod
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$PWD/go":/src:ro -v "$PWD/.gocache":/gocache -w /src \
+            -e CGO_ENABLED=1 -e GOCACHE=/gocache/build -e GOMODCACHE=/gocache/mod \
+            -e GOFLAGS=-mod=readonly \
+            "$GO_IMAGE" go test -timeout 60s ./...
+
+      - name: Build shared plugin
+        run: bash scripts/build.sh
+
+      - name: Generate and verify checksum
+        working-directory: build/linux/${{ matrix.arch }}
+        run: |
+          test -s codex-turn-state-cloud-mint.so
+          sha256sum codex-turn-state-cloud-mint.so > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      # 只打包插件和验货单，不把源码、缓存或钥匙串塞进下载包。
+      - name: Upload plugin
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-turn-state-cloud-mint-linux-${{ matrix.arch }}
+          path: |
+            build/linux/${{ matrix.arch }}/codex-turn-state-cloud-mint.so
+            build/linux/${{ matrix.arch }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

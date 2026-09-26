@@ -1,9 +1,9 @@
 'use strict';
-// relay/index.js 的测试:本地假上游 + 真 relay(createServer,与生产同一份 server
-// 配置)。覆盖鉴权、头部剥离、Set-Cookie/压缩透传、SSE 流式与断流语义、边缘 IP
-// 钉选、默认 DNS 回源、超时。TLS 用例以子进程跑真实入口 `node index.js`(即 FC
-// 启动命令),证书校验保持开启 —— 测试证书经 NODE_EXTRA_CA_CERTS 信任。
-// 全部只连本机:上游域名一律钉到 127.0.0.1 或用 localhost。
+// relay/index.js 的片场：假上游演对手戏，真 relay 用 createServer 和生产同款配置。
+// 鉴权、剥头、Set-Cookie/压缩透传、SSE 流与断流、边缘 IP、默认 DNS、超时逐一试镜。
+// TLS 不请替身：子进程跑 `node index.js`（FC 同款入口），证书校验始终开着，
+// 测试证书由 NODE_EXTRA_CA_CERTS 发通行证。全剧只在本机拍摄：
+// 上游域名钉到 127.0.0.1 或使用 localhost，不去线上借景。
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -22,7 +22,7 @@ const { isPublicIP, filterRequestHeaders } = _internals;
 
 const RELAY_KEY = 'test-key-123';
 
-// 仅测试用的自签证书(CN=nonexistent.invalid,SAN 含 chatgpt.com)。
+// 测试专用道具证书：自签，CN=nonexistent.invalid，SAN 含 chatgpt.com，别带去真片场。
 const TEST_KEY = `-----BEGIN PRIVATE KEY-----
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCKCWuL4sjPFVLK
 9cEa8hLOsnsJZ4jvg0zdn/TfvP7uG4c5riYQ2R4NQxucZnqDf2/IysjU6BubW6Q+
@@ -73,7 +73,7 @@ ouGqW6LyLBOMgJJPO64yPSYLoc0iPEAqGvFiUfk/dg==
 -----END CERTIFICATE-----`;
 
 // ---------------------------------------------------------------------------
-// helpers
+// 帮手集合：主角要跑，杂事有人扛
 // ---------------------------------------------------------------------------
 
 function listen(server) {
@@ -81,12 +81,12 @@ function listen(server) {
     server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 function closeServer(server) {
-  // relay 不设 keep-alive 超时(FC 要求),空闲连接会一直挂着;直接掐掉所有连接收尾。
+  // FC 要求 relay 不设 keep-alive 超时；空闲连接会坐到天亮，收工直接请所有连接离席。
   if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
   return new Promise((resolve) => server.close(resolve));
 }
 
-// 起一个服务并登记收尾,返回端口。
+// 请服务上台，先登记退场手续，再报端口座位号。
 async function serve(t, server) {
   const sockets = new Set();
   server.on('connection', (socket) => {
@@ -104,8 +104,8 @@ function startRelay(t) {
   return serve(t, createServer());
 }
 
-// 以子进程跑真实入口(与 FC 启动命令一致),返回其监听端口。测试证书经
-// NODE_EXTRA_CA_CERTS 信任 —— 中继本身没有、也不该有「跳过证书校验」的开关。
+// 子进程跑真实入口（与 FC 启动命令一致），报回监听端口。测试证书拿
+// NODE_EXTRA_CA_CERTS 的介绍信进门；中继不设跳过证书校验的后门，道具也要验身份。
 function spawnRelay(t, env) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-test-'));
   const caFile = path.join(dir, 'ca.pem');
@@ -136,7 +136,7 @@ function spawnRelay(t, env) {
   });
 }
 
-// 保存/恢复环境变量
+// 环境变量先存档再还原，拍完别把布景留在人家客厅
 function withEnv(t, vars) {
   const saved = {};
   for (const k of Object.keys(vars)) saved[k] = process.env[k];
@@ -152,7 +152,7 @@ function withEnv(t, vars) {
   });
 }
 
-// 简单客户端:返回 {status, headers, body}
+// 轻装客户端只提三个袋子回来：{status, headers, body}
 function call(port, { method = 'GET', path: reqPath = '/', headers = {}, body, key = RELAY_KEY } = {}) {
   return new Promise((resolve, reject) => {
     const h = { ...headers };
@@ -171,7 +171,7 @@ function call(port, { method = 'GET', path: reqPath = '/', headers = {}, body, k
   });
 }
 
-// 假上游:回显 method/path/收到的头/请求体
+// 假上游兼职复读机：把 method/path/收到的头/请求体原样报回来
 function echoUpstream(extra) {
   return http.createServer((req, res) => {
     const chunks = [];
@@ -189,7 +189,7 @@ function echoUpstream(extra) {
   });
 }
 
-// 假 SSE 上游:先写一块,之后的行为由 then(res) 决定。
+// 假 SSE 上游先上第一道菜，后续菜单交给 then(res) 决定。
 function sseUpstream(then) {
   return http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -199,7 +199,7 @@ function sseUpstream(then) {
 }
 
 // ---------------------------------------------------------------------------
-// 鉴权
+// 鉴权：门卫不靠眼缘放人
 // ---------------------------------------------------------------------------
 
 test('RELAY_KEY 未配置时 fail-closed,带 key 也 403', async (t) => {
@@ -225,7 +225,7 @@ test('key 错误 403;key 正确才回源', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// 透传与头部剥离
+// 透传与头部剥离：行李可以过，违禁帽子留下
 // ---------------------------------------------------------------------------
 
 test('路径/query/方法/请求体原样透传,Host 改写为上游', async (t) => {
@@ -289,7 +289,7 @@ test('RELAY_MODE 非法时 fail-closed 返回 relay_misconfigured', async (t) =>
 test('逐跳头/控制头/FC 注入头不传给上游', async (t) => {
   const uport = await serve(t, echoUpstream());
   const port = await startRelay(t);
-  // x-edge-ip 是真实生效的控制头:钉到本机上游,顺带验证它本身不外发。
+  // x-edge-ip 真负责指路：钉到本机上游，也查这位带路人不会跟着请求出门。
   withEnv(t, { RELAY_KEY, RELAY_UPSTREAM: `http://127.0.0.1:${uport}`, ALLOW_PRIVATE_EDGE_IPS: '1' });
 
   const r = await call(port, {
@@ -378,7 +378,7 @@ test('压缩响应原样透传:不解压,Content-Encoding 与字节都不变', a
 });
 
 // ---------------------------------------------------------------------------
-// SSE 流式与断流语义
+// SSE 流式与断流语义：半桌菜不能报成满汉全席
 // ---------------------------------------------------------------------------
 
 test('SSE 逐块回传且按 chunked 转发(FC 据此判定流式)', async (t) => {
@@ -405,8 +405,8 @@ test('SSE 逐块回传且按 chunked 转发(FC 据此判定流式)', async (t) =
         assert.equal(res.headers['x-accel-buffering'], 'no');
         res.once('data', (chunk) => {
           assert.match(chunk.toString(), /data: one/);
-          const firstAt = Date.now(); // 首块到达时刻
-          // 等响应完整结束再 resolve —— 此刻上游的 secondWrittenAt 才已赋值。
+          const firstAt = Date.now(); // 第一道菜落桌时刻
+          // 整桌菜上完才 resolve；这时上游才填好 secondWrittenAt，别抢着替厨子记账。
           res.on('end', () => resolve(firstAt));
         });
         res.resume();
@@ -444,7 +444,7 @@ test('上游中途断流:客户端连接被掐断,截断的流不会以正常结
 test('客户端中途断开:上游连接随之拆除,不白占函数时长', { timeout: 5000 }, async (t) => {
   let upstreamGone;
   const gone = new Promise((resolve) => { upstreamGone = resolve; });
-  // 写完首块后既不再写也不结束,只有中继主动拆连接才会触发 close。
+  // 首块之后故意装木头，不写也不结束；中继亲自拆连接才会让 close 响铃。
   const uport = await serve(t, sseUpstream((res) => res.once('close', upstreamGone)));
   const port = await startRelay(t);
   withEnv(t, { RELAY_KEY, RELAY_UPSTREAM: `http://127.0.0.1:${uport}` });
@@ -452,13 +452,13 @@ test('客户端中途断开:上游连接随之拆除,不白占函数时长', { t
   const req = http.request(
     { host: '127.0.0.1', port, path: '/', headers: { 'x-relay-key': RELAY_KEY }, agent: false },
     (res) => res.once('data', () => req.destroy()));
-  req.on('error', () => {}); // destroy 之后的 socket hang up 属预期
+  req.on('error', () => {}); // destroy 后 socket hang up 是安排好的退场，不算摔跤
   req.end();
   await gone;
 });
 
 // ---------------------------------------------------------------------------
-// 边缘 IP 与默认 DNS
+// 边缘 IP 与默认 DNS：问路和指定门牌分开考
 // ---------------------------------------------------------------------------
 
 test('x-edge-ip 非 IP 字面量 → 400;私网 IP 默认拒绝', async (t) => {
@@ -479,7 +479,7 @@ test('x-edge-ip 非 IP 字面量 → 400;私网 IP 默认拒绝', async (t) => {
 });
 
 test('钉 IP:拨号地址换成该 IP,Host 仍取上游 URL,X-Relay-Edge-IP 回报所钉 IP', async (t) => {
-  // 上游域名故意不可解析 —— 只有拨号地址真的换成 127.0.0.1 才能通。
+  // 上游域名故意挂假招牌；拨号地址真换成 127.0.0.1 才能敲开门。
   const uport = await serve(t, echoUpstream());
   const port = await startRelay(t);
   withEnv(t, {
@@ -520,7 +520,7 @@ test('不钉 IP 时域名不可解析 → 502', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// TLS:子进程跑真实入口,证书校验开启
+// TLS：子进程跑真入口，验照门卫不准放假
 // ---------------------------------------------------------------------------
 
 test('钉 IP 走 TLS:SNI 与证书校验都按上游域名,不变成 IP', async (t) => {
@@ -532,7 +532,7 @@ test('钉 IP 走 TLS:SNI 与证书校验都按上游域名,不变成 IP', async 
       cert: TEST_CERT,
       SNICallback: (servername, cb) => {
         sniSeen = servername;
-        cb(null, null); // null → 用默认证书
+        cb(null, null); // null → 请默认证书出列
       },
     },
     (req, res) => {
@@ -556,7 +556,7 @@ test('证书与上游域名不符 → 502:钉 IP 不绕过证书校验', async (
     reached = true;
     res.end('should-not-reach');
   }));
-  // 证书 SAN 只有 nonexistent.invalid 与 chatgpt.com。
+  // 证书 SAN 的花名册只写 nonexistent.invalid 与 chatgpt.com，其他名字别来认亲。
   const port = await spawnRelay(t, { RELAY_UPSTREAM: `https://other.invalid:${uport}` });
 
   const r = await call(port, { headers: { 'x-edge-ip': '127.0.0.1' } });
@@ -567,11 +567,11 @@ test('证书与上游域名不符 → 502:钉 IP 不绕过证书校验', async (
 });
 
 // ---------------------------------------------------------------------------
-// 超时与配置
+// 超时与配置：等人也得带表
 // ---------------------------------------------------------------------------
 
 test('TLS 握手卡住 → 504 upstream_timeout,按建连超时放弃', async (t) => {
-  // 只收下 TCP 连接、从不回 ServerHello:卡在握手阶段。
+  // 收下 TCP 却不回 ServerHello，故意把握手晾成一场独角戏。
   const sockets = new Set();
   const blackhole = net.createServer((s) => {
     sockets.add(s);
@@ -614,10 +614,10 @@ test('createServer 满足 FC 对 HTTP Server 的要求:keep-alive 与请求均�
 });
 
 // ---------------------------------------------------------------------------
-// WebSocket 隧道(upgrade 事件 → 握手后字节级 splice)
+// WebSocket 隧道：upgrade 叫门，握手后字节级 splice 搬货，不替货物改台词
 // ---------------------------------------------------------------------------
 
-// 假 WS 上游(裸 TCP):读到 \r\n\r\n 收头后按描述回响应,之后按需 echo。
+// 假 WS 上游用裸 TCP 演戏：\r\n\r\n 表示头收齐，按描述回响应，再按需当 echo 复读机。
 // hits[i] = {head: 请求头原文, tail: 头后随包字节, socket}
 function wsUpstream(script) {
   const hits = [];
@@ -640,7 +640,7 @@ function wsUpstream(script) {
   return { server, hits };
 }
 
-// 裸 TCP 客户端发 WS 升级请求;resolve({head, socket}) 在拿到完整响应头时。
+// 裸 TCP 客户端递 WS 升级申请；完整响应头盖章到手，才 resolve({head, socket})。
 function wsHandshake(port, { path = '/ws', headers = {}, tail = '' } = {}) {
   return new Promise((resolve, reject) => {
     const sock = net.connect(port, '127.0.0.1');
@@ -701,7 +701,7 @@ test('WS 隧道:101 原样回传,帧双向透明;控制/身份/平台头不外�
   });
   assert.match(head, /^HTTP\/1\.1 101/, '101 响应头应原样回传');
 
-  // 隧道已建立:帧字节双向透明。
+  // 隧道开张后只管双向搬帧字节，不拆包裹偷看剧本。
   const echo = await new Promise((resolve, reject) => {
     socket.once('data', (c) => resolve(c.toString()));
     socket.on('error', reject);
@@ -750,7 +750,7 @@ test('WS 隧道:key 错误 → 403,不拨上游', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// 纯函数件
+// 纯函数件：不靠外景也能演
 // ---------------------------------------------------------------------------
 
 test('isPublicIP 分类', () => {
@@ -780,33 +780,33 @@ test('filterRequestHeaders 剥逐跳/控制/身份头', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 打票(X-Relay-Mint)
+// 打票(X-Relay-Mint)：售票窗口也要参加考试
 // ---------------------------------------------------------------------------
 
 const { mintGatewayLabel, mintGatewayTarget, createdModelFromSse, mintPairs, fernetIssuedAt } = _internals;
 
-// 测试票:Fernet 形态(0x80 + 8B 大端秒签发时刻 + 填充),len 取 4 的倍数时
-// base64url 恰好 len 字符 —— 780 字符 = 585 字节,与真实票同构。
+// 测试票穿 Fernet 戏服（0x80 + 8B 大端秒签发时刻 + 填充）；len 取 4 的倍数，
+// base64url 恰为 len 字符。780 字符 = 585 字节，与真票同构，道具尺码不能靠猜。
 function ticketOf(len, tsSec) {
   const bytes = Buffer.alloc((len / 4) * 3);
   bytes[0] = 0x80;
   bytes.writeBigUInt64BE(BigInt(tsSec === undefined ? Math.floor(Date.now() / 1000) : tsSec), 1);
   return bytes.toString('base64url').slice(0, len);
 }
-// __oailb 是 JWT:节点名内嵌在载荷里(chat.gateway.unified-N.api.openai.com)。
+// __oailb 的 JWT 把节点门牌缝在载荷内兜：chat.gateway.unified-N.api.openai.com。
 function fakeJwt(payload) {
   const b = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   return `${b({ alg: 'none', typ: 'JWT' })}.${b(payload)}.sig`;
 }
 
-// 打票假上游:按第几发从 script 取响应描述。描述字段:
-//   status    默认 200
-//   gateway   pair 指向的节点名(JWT 载荷内嵌);null → 不发 pair
-//   cflb/oailb 显式覆盖 cookie 值(测明文节点名)
-//   served    SSE 里实服的模型,默认跟随请求体里的 model
-//   ticketLen 默认 780;0 → 不发票头
-//   ticketTs  票内嵌的签发时刻(Unix 秒),默认当下
-//   body      显式覆盖响应体
+// 打票假上游按发数翻 script 剧本，响应角色表如下：
+//   status    没写剧情就回 200
+//   gateway   pair 的节点门牌（藏在 JWT 载荷）；null → 房卡先扣下，不发 pair
+//   cflb/oailb 直接换 cookie 道具（考明文节点名）
+//   served    SSE 声明哪位模型上台，默认跟请求体的 model 点名走
+//   ticketLen 票的默认身高 780；0 → 不发票头
+//   ticketTs  票的出生时刻（Unix 秒），没填就现生
+//   body      直接更换响应体剧本
 function mintUpstream(script) {
   const hits = [];
   const server = http.createServer((req, res) => {
@@ -848,8 +848,8 @@ function mintUpstream(script) {
   return { server, hits };
 }
 
-// 打票调用:默认每用一个新凭据 —— 票/pair 按凭据缓存,共用凭据会串测试。
-// 需要复用缓存的用例显式传同一个 auth。
+// 打票调用默认换新凭据出场：票/pair 按凭据缓存，合用工牌会把两场戏串起来。
+// 真要测复用缓存，就显式让同一个 auth 连演。
 let mintSeq = 0;
 function mintCall(port, headers, auth) {
   return call(port, {
@@ -907,7 +907,7 @@ test('打票一发命中:返回票+pair JSON;上游收到裸发 ping,凭据照�
 });
 
 test('SSE 打票:上游声明 application/octet-stream 时按 SSE 正文照常验收', async (t) => {
-  // 上游变更实测:200 + octet-stream + attachment,正文仍是 SSE 事件流。
+  // 上游换过戏服：200 + octet-stream + attachment，里面仍在演 SSE 事件流。
   const { server } = mintUpstream([{ contentType: 'application/octet-stream' }]);
   const uport = await serve(t, server);
   const port = await startRelay(t);
@@ -1044,7 +1044,7 @@ test('打票缺 Authorization → 400 mint_no_auth,一发不打', async (t) => {
 test('打票网关名在 __cflb 明文里也能认出', async (t) => {
   const { server } = mintUpstream([{
     cflb: 'v1.chat.gateway.unified-88.api.openai.com',
-    oailb: fakeJwt({ exp: Math.floor(Date.now() / 1000) + 3900 }), // 载荷无节点名
+    oailb: fakeJwt({ exp: Math.floor(Date.now() / 1000) + 3900 }), // 载荷忘带节点门牌
   }]);
   const uport = await serve(t, server);
   const port = await startRelay(t);
@@ -1079,7 +1079,7 @@ test('打票钉边缘:X-Edge-IP 同样作用于打票拨号', async (t) => {
   const { server } = mintUpstream([{}]);
   const uport = await serve(t, server);
   const port = await startRelay(t);
-  // 上游域名故意不可解析 —— 拨通全靠钉 127.0.0.1。
+  // 上游域名故意报假地址，能拨通全靠钉住 127.0.0.1 这扇真门。
   withEnv(t, {
     RELAY_KEY,
     RELAY_UPSTREAM: `http://nonexistent.invalid:${uport}`,
@@ -1125,7 +1125,7 @@ test('打票多模型:默认打 gpt-6-sol/luna/astra 三张票,首发裸打铸 p
   const port = await startRelay(t);
   withEnv(t, { RELAY_KEY, RELAY_UPSTREAM: `http://127.0.0.1:${uport}` });
 
-  // 不传任何 X-Mint-Model*:默认模型集 = 三个。
+  // X-Mint-Model* 一律不点名，默认模型三人组自行登台。
   const r = await call(port, {
     method: 'POST',
     headers: { 'x-relay-mint': '1', authorization: 'Bearer at-multi' },
@@ -1163,7 +1163,7 @@ test('打票缓存:pair 与票在 TTL 内直接复用,跨模型共享同一 pair
   const ticket1 = JSON.parse(r1.body).turn_state;
   assert.equal(hits.length, 1);
 
-  // 同凭据再要同一模型:票没过期,一发都不打。
+  // 同凭据再点同模型，活票还在兜里，售票员不准再开一枪。
   const r2 = await mintCall(port, { 'x-mint-model': 'gpt-6-sol' }, auth);
   const body2 = JSON.parse(r2.body);
   assert.equal(body2.attempts, 0);
@@ -1171,7 +1171,7 @@ test('打票缓存:pair 与票在 TTL 内直接复用,跨模型共享同一 pair
   assert.equal(body2.tickets['gpt-6-sol'].turn_state, ticket1);
   assert.equal(hits.length, 1, 'TTL 内命中缓存不应再打票');
 
-  // 要另一模型:pair 还活着,只需定向打一发,不用再铸 pair。
+  // 换点另一模型，pair 房卡还活着，定向打一发即可，别再造一张房卡。
   const r3 = await mintCall(port, { 'x-mint-model': 'gpt-6-luna' }, auth);
   const body3 = JSON.parse(r3.body);
   assert.equal(body3.attempts, 1);
@@ -1217,8 +1217,8 @@ test('打票缓存:MINT_TICKET_TTL_S=0 或 x-mint-ttl:0 → 不缓存,每次都�
 
 test('打票多模型:一个模型被正面拒绝(400)只算它失败,其余票照给', async (t) => {
   const { server, hits } = mintUpstream([
-    {},                                    // sol:裸打铸 pair + 票
-    { status: 400, gateway: null },        // astra:400,该模型判死
+    {},                                    // sol：空手进场，领 pair + 票
+    { status: 400, gateway: null },        // astra：400 挂停演牌，该模型不再试
   ]);
   const uport = await serve(t, server);
   const port = await startRelay(t);
@@ -1238,7 +1238,7 @@ test('打票多模型:一个模型被正面拒绝(400)只算它失败,其余票�
   assert.equal(hits.length, 2);
 });
 
-// WS 回归：升级前后必须分开处理错误，不能把 HTTP 错误写进已建立的隧道。
+// WS 回归：升级前后各用各的错误出口，隧道都通车了就别往里塞 HTTP 退票单。
 test('WS:拒绝非 websocket 的 Upgrade,不拨上游', async (t) => {
   const { server, hits } = wsUpstream([{}]);
   const uport = await serve(t, server);
@@ -1334,7 +1334,7 @@ test('WS:客户端断开拆掉上游,二进制帧与 ping/pong 字节不改写',
   const port = await startRelay(t);
   withEnv(t, { RELAY_KEY, RELAY_UPSTREAM: `http://127.0.0.1:${uport}` });
   const { socket } = await wsHandshake(port, { headers: { 'X-Relay-Key': RELAY_KEY } });
-  // 隧道不解释帧,这里验证包含 NUL/高位字节的连续控制帧与数据帧无损。
+  // 隧道只搬运不解说；连着来的控制帧、数据帧含 NUL/高位字节，也不能搬丢一粒芝麻。
   const payload = Buffer.from([0x82, 0x02, 0x00, 0xff, 0x89, 0x00, 0x8a, 0x00]);
   const echoed = await new Promise((resolve) => {
     let received = Buffer.alloc(0);
@@ -1368,8 +1368,8 @@ for (const vars of [{ RELAY_KEY: '' }, { ALLOW_PRIVATE_EDGE_IPS: undefined }]) {
 test('WS:标准握手保留 Cookie 与协议,首帧和掩码 ping/pong 往返', { timeout: 3000 }, async (t) => {
   const key = 'dGhlIHNhbXBsZSBub25jZQ==';
   const accept = crypto.createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
-  const firstFrame = Buffer.from([0x81, 0x02, 0x6f, 0x6b]); // 文本 ok
-  const ping = Buffer.from([0x89, 0x81, 1, 2, 3, 4, 0x79]); // 掩码后的 x
+  const firstFrame = Buffer.from([0x81, 0x02, 0x6f, 0x6b]); // 文本角色念 ok
+  const ping = Buffer.from([0x89, 0x81, 1, 2, 3, 4, 0x79]); // x 戴上掩码出场
   const pong = Buffer.from([0x8a, 0x01, 0x78]);
   const upstream = http.createServer();
   upstream.on('upgrade', (req, socket) => {
@@ -1412,7 +1412,7 @@ test('WS:标准握手保留 Cookie 与协议,首帧和掩码 ping/pong 往返', 
   });
 });
 
-// 打票边界使用可控时钟推进有效期，不靠真实等待或访问线上服务。
+// 打票有效期交给可控时钟拨表，不真熬夜，也不去线上借一张票当道具。
 async function mintBoundaryFixture(t, script) {
   let now = Math.floor(Date.now() / 1000) * 1000;
   t.mock.method(Date, 'now', () => now);
@@ -1705,7 +1705,7 @@ test('打票冷却:未配置时使用 30 秒默认间隔', { timeout: 3000 }, as
   const schedule = global.setTimeout;
   t.mock.method(global, 'setTimeout', (callback, delay, ...args) => {
     delays.push(delay);
-    // 只缩短默认冷却计时,其他网络与测试计时器保持原样。
+    // 只快进默认冷却这场戏；网络与其他测试的钟别跟着跑。
     return schedule(callback, delay === 30_000 ? 10 : delay, ...args);
   });
   const result = await f.request();
@@ -1714,7 +1714,7 @@ test('打票冷却:未配置时使用 30 秒默认间隔', { timeout: 3000 }, as
   assert.equal(f.hits.length, 3);
 });
 
-// 模型判定只认完整的 response.created.response.model，不再搜索任意字符串。
+// 模型验名只看完整 response.created.response.model，路边纸条上的 model 不算身份证。
 test('严格模型事件:SSE 空白/多行/CRLF/转义兼容', () => {
   const source = ': heartbeat\r\nevent: response.created\r\n'
     + 'data: {"type": "response.created",\r\n'
@@ -1751,7 +1751,7 @@ function serverMintFrame(opcode, data, fin = true) {
   return Buffer.concat([header, payload]);
 }
 
-// 假上游独立解析客户端掩码帧,避免与生产解析器共享实现而掩盖协议错误。
+// 假上游自己拆客户端掩码帧，不抄生产解析器答案，免得两人错同一道题还互相鼓掌。
 function acceptMintClientFrames(socket, onFrame) {
   let buffer = Buffer.alloc(0);
   socket.on('data', (chunk) => {
@@ -1872,11 +1872,11 @@ test('WS 打票:完整链路模型回退重试、冷却续打及协议缓存隔�
 test('WS 打票:票可从 codex.response.metadata 消息的 headers 取得(101 头不再携带)', async (t) => {
   const ticket = ticketOf(780);
   const f = await wsMintAttempt(t, () => ({
-    ticketLen: 0, // 上游新形态:101 握手头不再带 x-codex-turn-state
+    ticketLen: 0, // 上游换了口袋：101 握手头不再装 x-codex-turn-state
     frames: [
       serverMintFrame(1, JSON.stringify({ type: 'codex.response.metadata',
         headers: { 'x-codex-turn-state': ticket, 'x-codex-plan-type': 'test' } })),
-      serverMintFrame(1, JSON.stringify({ type: 'response.created', response: { id: 'ws-r1', model: 'gpt-6-sol' } })),
+      serverMintFrame(1, JSON.stringify({ type: 'codex.response.metadata', response: { id: 'ws-r1', model: 'gpt-6-sol' } })),
     ],
   }));
   const result = await f.attempt.done;
@@ -1891,13 +1891,37 @@ test('WS 打票:metadata 无票字段时仍判 no_ticket', async (t) => {
     ticketLen: 0,
     frames: [
       serverMintFrame(1, JSON.stringify({ type: 'codex.response.metadata', headers: { 'x-models-etag': 'x' } })),
-      serverMintFrame(1, JSON.stringify({ type: 'response.created', response: { id: 'ws-r1', model: 'gpt-6-sol' } })),
+      serverMintFrame(1, JSON.stringify({ type: 'codex.response.metadata', response: { id: 'ws-r1', model: 'gpt-6-sol' } })),
     ],
   }));
   const result = await f.attempt.done;
   assert.equal(result.reason, 'ok');
   assert.equal(result.ticket, '');
   assert.equal(result.len, 0);
+});
+
+test('WS grade:回放票发挑战,累积 output_text 到 completed', async (t) => {
+  const upstream = websocketMintUpstream(() => ({
+    ticketLen: 0,
+    frames: [
+      serverMintFrame(1, JSON.stringify({ type: 'response.created', response: { id: 'g1', model: 'gpt-6-astra' } })),
+      serverMintFrame(1, JSON.stringify({ type: 'response.output_text.delta', delta: '12, 34, ' })),
+      serverMintFrame(1, JSON.stringify({ type: 'response.output_text.delta', delta: '56' })),
+      serverMintFrame(1, JSON.stringify({ type: 'response.completed', response: { id: 'g1', model: 'gpt-6-astra' } })),
+    ],
+  }));
+  const port = await serve(t, upstream.server);
+  const cfg = { upstream: new URL(`http://127.0.0.1:${port}`), connectTimeoutMs: 200, mint: { transport: 'websocket', attemptTimeoutMs: 200 } };
+  const attempt = _internals.fireWsGradeAttempt(cfg, '', { authorization: 'Bearer g' }, 'gpt-6-astra', '', 'give me numbers', ticketOf(780));
+  t.after(() => attempt.req.destroy());
+  const result = await attempt.done;
+  assert.equal(result.reason, 'ok');
+  assert.equal(result.served, 'gpt-6-astra');
+  assert.equal(result.output, '12, 34, 56');
+  // 客户端拿 grade 帧上考场：挑战 input 是题，client_metadata 里回放的票是准考证。
+  assert.equal(upstream.hits[0].payload.type, 'response.create');
+  assert.equal(upstream.hits[0].payload.client_metadata['x-codex-turn-state'], ticketOf(780));
+  assert.equal(upstream.hits[0].payload.input[0].content[0].text, 'give me numbers');
 });
 
 for (const reject of [401, 400]) {
@@ -1923,7 +1947,7 @@ test('严格模型事件:SSE 跨包忽略无关 model,只在完整 created 到�
     const event = 'event: response.created\r\ndata: {"type":"response.created","response":{"id":"r1", "model": "gpt-6-sol"}}\r\n\r\n';
     res.write(event.slice(0, 81));
     setImmediate(() => res.write(event.slice(81)));
-    // 不发 completed、不结束响应:客户端必须自行提前拆流。
+    // completed 不喊、响应不收，考客户端能否自己提前拆流，别陪木头演通宵。
   });
   const port = await serve(t, server);
   const cfg = { upstream: new URL(`http://127.0.0.1:${port}`), connectTimeoutMs: 200,
@@ -2039,13 +2063,13 @@ for (const status of [401, 400, 429]) {
 }
 
 for (const frame of [
-  Buffer.from([0xc1, 0]), // 未协商 RSV1
-  Buffer.from([0x81, 0x80]), // 服务端不允许掩码
-  Buffer.from([0x09, 0]), // 控制帧不能分片
-  Buffer.from([0x89, 126]), // 控制帧不能超过 125 字节
-  Buffer.from([0x81, 126, 0, 1, 0]), // 非最短长度编码
-  Buffer.from([0x82, 0]), // 协议只允许文本事件
-  Buffer.from([0x81, 126, 0x40, 1]), // 超过单帧上限
+  Buffer.from([0xc1, 0]), // RSV1 没商量就抢座
+  Buffer.from([0x81, 0x80]), // 服务端不准戴掩码假胡子
+  Buffer.from([0x09, 0]), // 控制帧不准切成拼盘
+  Buffer.from([0x89, 126]), // 控制帧过 125 字节就超员
+  Buffer.from([0x81, 126, 0, 1, 0]), // 长度编码绕远路，不合规矩
+  Buffer.from([0x82, 0]), // 本协议只请文本事件上台
+  Buffer.from([0x81, 126, 0x40, 1]), // 单帧超高，门框不放行
 ]) {
   test(`WS 帧边界:立即拒绝 ${frame.toString('hex')}`, () => {
     assert.throws(() => _internals.readMintWsFrame(frame));
@@ -2087,7 +2111,7 @@ test('打票日志:定向打未发新 pair 时按发送 pair 的节点记账', (
   assert.equal(bare.received_gateway, '');
 });
 
-// 真实故障回归：只连假上游，不能用线上反复打票验证重试限制。
+// 真实故障请假上游重演；验证重试限制不能去线上反复打票，别拿真配额当爆米花。
 test('修复回归:跨轮总预算耗尽后有限失败并记录验收原因', { timeout: 1500 }, async (t) => {
   const logs = [];
   t.mock.method(console, 'log', (line) => logs.push(JSON.parse(line)));
@@ -2239,7 +2263,7 @@ test('修复回归:模拟 FC 保留连接，外部调用方断开后仍由服务
   let ended;
   const completed = new Promise((resolve) => { ended = resolve; });
   const gateway = http.createServer((req, res) => {
-    // 刻意不将外部 close 传给 relay，重现 HTTP 触发器保持内部请求的情形。
+    // 故意扣住外部 close 不告诉 relay，重演 HTTP 触发器里客人走了、内部请求还坐着的场面。
     const inner = http.request({ host: '127.0.0.1', port: f.port, method: 'POST', headers: {
       'x-relay-key': RELAY_KEY, 'x-relay-mint': 'unified-88', 'x-mint-model': 'gpt-6-sol',
       'x-mint-attempts': '1', authorization: f.auth,

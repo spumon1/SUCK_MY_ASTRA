@@ -89,7 +89,7 @@ def error_diagnostic(event):
 
 
 def conversation_payload(model, prompt, previous=None):
-    # 与 CPA 的 Codex 转换器对齐：私有端点不支持 max_output_tokens，WS 不带 stream。
+    # 跟 CPA 的 Codex 转换器排同一支队：私有端点不收 max_output_tokens，WS 也别把 stream 带来凑热闹。
     payload = {"type": "response.create", "model": model,
                "instructions": "Follow the user's short output instruction.", "store": False,
                "reasoning": {"effort": "low"}, "parallel_tool_calls": True,

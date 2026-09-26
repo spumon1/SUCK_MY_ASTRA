@@ -1,0 +1,5 @@
+# 代码包只有 index.js 这一位主演；测试、文档、部署描述与本文件都留在后台。
+index.test.js
+*.md
+s.yaml
+.fcignore

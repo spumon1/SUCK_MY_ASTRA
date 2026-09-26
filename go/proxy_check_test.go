@@ -11,28 +11,15 @@ import (
 	"testing"
 )
 
-// The proxy checker's contract, in one sentence: it must tell an operator which
-// exits can reach OpenAI without spending a single unit of account quota and
-// without ever printing a proxy password.
-//
-// Two properties here are load-bearing and easy to break by "improving" the
-// code later:
-//
-//   - The outbound request carries NO credential. The moment someone adds an
-//     Authorization header to make the check "more realistic", this stops being
-//     free and starts counting against an account -- and it would still pass a
-//     naive "did it work" test.
-//   - "Could not connect" and "connected and was refused" stay different
-//     verdicts. Collapsing them sends the operator to the wrong place: the first
-//     is the proxy vendor's problem, the second is the exit's reputation.
+// 代理检查的合同：告诉运营者哪些出口能到 OpenAI，一分账号配额不花，一字代理密码不晒。
+// 两条最怕被“优化”掉：请求绝不带凭据，加 Authorization 装真实就开始烧配额；
+// 连不上与连上被拒要分开，前者找代理商，后者看出口信誉，不能让修水管的去给门卫写检讨。
 
 const opsProxyCheckPath = mgmtResourcePath + "ops/proxy-check"
 
-// --- fakes ---------------------------------------------------------------
+// --- 替身：本地搭台不借真账号 ---
 
-// fakeCheckUpstream stands in for the codex endpoint and records what every
-// caller sent, which is how the "no credential" property is asserted rather
-// than assumed.
+// fakeCheckUpstream 扮 Codex 端点并记每个来客所带物件，零凭据要实查，不靠口头保证。
 type fakeCheckUpstream struct {
 	mu       sync.Mutex
 	status   int
@@ -65,7 +52,7 @@ func (u *fakeCheckUpstream) auths() []string {
 	return append([]string(nil), u.authSeen...)
 }
 
-// fakeTrace stands in for Cloudflare's /cdn-cgi/trace.
+// fakeTrace 扮 Cloudflare /cdn-cgi/trace，假演员也报真格式台词。
 type fakeTrace struct {
 	mu     sync.Mutex
 	ip     string
@@ -90,14 +77,13 @@ func (f *fakeTrace) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip, loc, colo, status := f.ip, f.loc, f.colo, f.status
 	f.mu.Unlock()
 	w.WriteHeader(status)
-	// Real trace documents carry a dozen keys; only three are read, and the extra
-	// ones here prove the parser ignores what it does not recognise.
+	// 真 trace 有十来个键，只读三个；多余键专考解析器不乱认亲。
 	_, _ = w.Write([]byte("fl=1a2b3c\nh=chatgpt.com\nip=" + ip +
 		"\nts=1750000000\nvisit_scheme=https\ncolo=" + colo +
 		"\nloc=" + loc + "\ntls=TLSv1.3\n"))
 }
 
-// setTraceURL points the trace probe at a fake for one test.
+// setTraceURL 给本用例 trace 指向替身，别敲到线上大门。
 func setTraceURL(t *testing.T, rawURL string) {
 	t.Helper()
 	previous := proxyCheckTraceURL
@@ -105,7 +91,7 @@ func setTraceURL(t *testing.T, rawURL string) {
 	t.Cleanup(func() { proxyCheckTraceURL = previous })
 }
 
-// checkConfig is a minimal valid config carrying the given proxy pool.
+// checkConfig 给指定代理池配最小合格菜单。
 func checkConfig(t *testing.T, dir string, proxies ...string) string {
 	t.Helper()
 	var b strings.Builder
@@ -135,11 +121,10 @@ func decodeProxyCheck(t *testing.T, body []byte) proxyCheckResponse {
 	return out
 }
 
-// --- the keyless gate ----------------------------------------------------
+// --- 免密门禁：不用钥匙也得确认 ---
 
 func TestProxyCheckRequiresConfirm(t *testing.T) {
-	// It dials every exit in the pool, so a bare navigation or a link prefetch
-	// must not be able to fire it.
+	// 检查会拨池里每个出口，裸导航和预取不能路过就开全场灯。
 	mustConfigure(t, checkConfig(t, t.TempDir()))
 
 	resp := driveResource(t, opsProxyCheckPath, nil)
@@ -148,12 +133,11 @@ func TestProxyCheckRequiresConfirm(t *testing.T) {
 	}
 }
 
-// --- the verdicts --------------------------------------------------------
+// --- 判决：闭门羹与走错路两码事 ---
 
 func TestProxyCheckVerdictsFollowTheUpstreamStatus(t *testing.T) {
-	// 401 is the success case: no credential was sent, so being told "no
-	// credential" proves the request reached OpenAI rather than dying in the
-	// proxy. Everything else is a distinct diagnosis.
+	// 401 在此算通路成功：没带凭据被告知缺凭据，证明到了 OpenAI 而非死在代理。
+	// 其他结果各有诊断，不能都拿同一张表情包回人。
 	tests := []struct {
 		name    string
 		status  int
@@ -182,8 +166,7 @@ func TestProxyCheckVerdictsFollowTheUpstreamStatus(t *testing.T) {
 			if got.StatusCode != tc.status {
 				t.Fatalf("status_code = %d, want %d", got.StatusCode, tc.status)
 			}
-			// The trace decorates every row regardless of the verdict: an exit
-			// that is refused is exactly the one whose address you want to see.
+			// trace 无论判决都装饰每行，被拒出口尤其要看地址，挨骂的人也得报座位。
 			if got.ExitIP != "203.0.113.7" || got.Country != "GB" || got.Colo != "LHR" {
 				t.Fatalf("trace fields not reported: ip=%q loc=%q colo=%q",
 					got.ExitIP, got.Country, got.Colo)
@@ -193,9 +176,7 @@ func TestProxyCheckVerdictsFollowTheUpstreamStatus(t *testing.T) {
 }
 
 func TestProxyCheckSendsNoCredential(t *testing.T) {
-	// The whole reason this check is safe to run while business traffic and a
-	// probe are both live. If an Authorization header ever appears here, the
-	// check starts costing quota and can trip an account's rate limit.
+	// 业务和探针活着也能安全检查，全靠不带 Authorization；一旦带上就烧配额并可能触发账号限流，白票别变收费票。
 	upstream := newFakeCheckUpstream(t, http.StatusUnauthorized)
 	trace := newFakeTrace(t)
 	setUpstream(t, upstream.server.URL)
@@ -217,11 +198,10 @@ func TestProxyCheckSendsNoCredential(t *testing.T) {
 }
 
 func TestProxyCheckSeparatesUnreachableFromRefused(t *testing.T) {
-	// An exit that cannot be dialled is "dead", never "blocked". They send the
-	// operator to different places, so the distinction is the feature.
+	// 拨不通叫 dead，不叫 blocked；两种病找不同大夫，分清就是功能本身。
 	trace := newFakeTrace(t)
 	setTraceURL(t, trace.server.URL)
-	// .invalid is reserved by RFC 2606 and can never resolve.
+	// .invalid 为 RFC 2606 保留且不解析，道具门牌没有真住户。
 	setUpstream(t, "http://exit.invalid:9/responses")
 
 	pool := newProbeClientPool()
@@ -237,8 +217,7 @@ func TestProxyCheckSeparatesUnreachableFromRefused(t *testing.T) {
 }
 
 func TestProxyCheckSurvivesATraceOutage(t *testing.T) {
-	// The address is decoration. A trace that fails must cost the address and
-	// nothing else -- the verdict belongs to the API request alone.
+	// 地址只是配菜，trace 失败只能少地址，不能改 API 请求判决，配菜糊了不算主菜没熟。
 	upstream := newFakeCheckUpstream(t, http.StatusUnauthorized)
 	setUpstream(t, upstream.server.URL)
 	setTraceURL(t, "http://trace.invalid:9/cdn-cgi/trace")
@@ -255,11 +234,10 @@ func TestProxyCheckSurvivesATraceOutage(t *testing.T) {
 	}
 }
 
-// --- the batch -----------------------------------------------------------
+// --- 批次：一桌一桌验 ---
 
 func TestProxyCheckEmptyPoolChecksTheDirectExit(t *testing.T) {
-	// An empty pool is a real configuration -- probeExits turns it into a single
-	// direct attempt -- so the check has to report on that, not refuse.
+	// 空池是合法配置，probeExits 会变一次直连；检查该给这条路成绩，不可因菜单空白拒绝开灶。
 	upstream := newFakeCheckUpstream(t, http.StatusUnauthorized)
 	trace := newFakeTrace(t)
 	setUpstream(t, upstream.server.URL)
@@ -283,8 +261,7 @@ func TestProxyCheckEmptyPoolChecksTheDirectExit(t *testing.T) {
 }
 
 func TestProxyCheckCountsDistinctExitAddresses(t *testing.T) {
-	// The insight this exists for: a pool of credentials on one gateway can be
-	// many entries wearing one address. Nothing else on the page reveals it.
+	// 这题要揭穿同一网关多凭据可能全穿同一地址外套；页面别处看不出它们是一个出口。
 	upstream := newFakeCheckUpstream(t, http.StatusUnauthorized)
 	trace := newFakeTrace(t)
 	setUpstream(t, upstream.server.URL)
@@ -303,24 +280,22 @@ func TestProxyCheckCountsDistinctExitAddresses(t *testing.T) {
 	if got.Checked != 2 {
 		t.Fatalf("checked = %d, want 2", got.Checked)
 	}
-	// Both exits forward to the same trace, which reports one address.
+	// 两出口转发到同一个 trace，报回同一门牌。
 	if got.DistinctIPs != 1 {
 		t.Fatalf("distinct_ips = %d, want 1 -- two pool entries sharing one address must be visible",
 			got.DistinctIPs)
 	}
-	// Positions are the only handle the page has on entries that mask alike.
+	// 遮罩后长一样的条目，只靠位置认座位，排号别弄丢。
 	if len(got.Results) != 2 || got.Results[0].Index != 1 || got.Results[1].Index != 2 {
 		t.Fatalf("results are not indexed 1..n: %+v", got.Results)
 	}
 }
 
-// --- the thing that must never happen ------------------------------------
+// --- 禁区：失败也不准交出密码 ---
 
 func TestProxyCheckNeverLeaksAProxyPassword(t *testing.T) {
-	// The results render on a page that needs no key, and the summary goes to a
-	// log that gets pasted into tickets. A dead exit is the dangerous case: its
-	// detail carries a transport error, and a transport error quotes the URL it
-	// failed to dial.
+	// 结果在免密页展示，摘要还会被日志贴进工单；死出口最险，传输错常带拨号 URL，
+	// 别把失败诊断变成密码报纸。
 	trace := newFakeTrace(t)
 	setTraceURL(t, trace.server.URL)
 	setUpstream(t, "http://exit.invalid:9/responses")
@@ -347,19 +322,17 @@ func TestProxyCheckNeverLeaksAProxyPassword(t *testing.T) {
 	if got.Results[0].Verdict != proxyVerdictDead {
 		t.Fatalf("verdict = %q, want %q for an unresolvable exit", got.Results[0].Verdict, proxyVerdictDead)
 	}
-	// Masked, not omitted: the operator still needs to see which exit it was.
+	// 要遮罩不是删行；运营者还得知道是哪个出口摔跤。
 	if !strings.Contains(got.Results[0].Proxy, "***@exit.invalid:1080") {
 		t.Fatalf("proxy = %q, want the userinfo replaced wholesale", got.Results[0].Proxy)
 	}
 }
 
-// --- route registration --------------------------------------------------
+// --- 路由注册：免密是选择不是失手 ---
 
 func TestProxyCheckIsRegisteredKeylessWithoutAMenu(t *testing.T) {
-	// A GET management route that declares a Menu is silently re-registered
-	// under the unauthenticated prefix by the host. This one belongs on the
-	// keyless prefix by choice, and must carry no Menu -- otherwise it is
-	// keyless by accident, which is the failure mode that rule exists for.
+	// GET 管理路由带 Menu 会被宿主偷偷注册到未鉴权前缀；本路由有意免密且不带 Menu，
+	// 别把明确的安排演成误开后门。
 	reg := driveManagementRegister(t)
 	var found bool
 	for _, route := range reg.Resources {
@@ -380,10 +353,9 @@ func TestProxyCheckIsRegisteredKeylessWithoutAMenu(t *testing.T) {
 	}
 }
 
-// --- the two pools --------------------------------------------------------
+// --- 两种池：静态与轮换分班 ---
 
-// rotatingTrace serves a different address on every request, which is what a
-// residential gateway actually does.
+// rotatingTrace 每请求报不同地址，模拟住宅网关每次换一件外套。
 type rotatingTrace struct {
 	mu     sync.Mutex
 	n      int
@@ -408,10 +380,8 @@ func (f *rotatingTrace) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestProxyCheckFlagsARotatingEntryDeclaredStatic(t *testing.T) {
-	// Only the provable direction is flagged. Two different addresses from one
-	// entry cannot happen on a fixed exit, so declaring it static is definitely
-	// wrong -- and the cost of getting it wrong is silent: the probe would give
-	// that entry one attempt per 55 minutes instead of ten per ten.
+	// 只标有证据的方向：同条目出现两个地址就不可能固定，设 static 一定错。
+	// 错了会从轮换的每十分钟十次变成静态每 55 分钟一次，静默饿桶才最难看见。
 	upstream := newFakeCheckUpstream(t, http.StatusUnauthorized)
 	setUpstream(t, upstream.server.URL)
 	setTraceURL(t, newRotatingTrace(t).server.URL)
@@ -438,10 +408,9 @@ func TestProxyCheckFlagsARotatingEntryDeclaredStatic(t *testing.T) {
 }
 
 func TestProxyCheckDoesNotFlagASteadyRotatingEntry(t *testing.T) {
-	// The other direction is NOT proof: a small gateway pool repeats an address
-	// by chance. Flagging it would tell the operator to undo a correct setting.
+	// 反过来不能推：小网关池偶然重复地址很正常；标错会劝用户把正确配置改坏，别靠撞衫认双胞胎。
 	upstream := newFakeCheckUpstream(t, http.StatusUnauthorized)
-	trace := newFakeTrace(t) // same address every time
+	trace := newFakeTrace(t) // 每次同一地址，外套不换也照样点名
 	setUpstream(t, upstream.server.URL)
 	setTraceURL(t, trace.server.URL)
 
@@ -461,9 +430,8 @@ func TestProxyCheckDoesNotFlagASteadyRotatingEntry(t *testing.T) {
 }
 
 func TestProxyCheckCountsDistinctAddressesForTheStaticPoolOnly(t *testing.T) {
-	// distinct_ips answers "are several static entries secretly one exit". A
-	// rotating entry is supposed to differ every time, so counting it here would
-	// turn the figure into a restatement of how many rotating entries there are.
+	// distinct_ips 问的是几个静态条目是否暗中共用一出口；轮换本该次次变，
+	// 算进去只会把数字变成轮换条目数的复读机。
 	upstream := newFakeCheckUpstream(t, http.StatusUnauthorized)
 	setUpstream(t, upstream.server.URL)
 	setTraceURL(t, newRotatingTrace(t).server.URL)

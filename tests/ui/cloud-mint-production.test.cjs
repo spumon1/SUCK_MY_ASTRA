@@ -57,7 +57,7 @@ const path = require('node:path');
   assert.equal(await page.locator('#managementKey').inputValue(),'');
   assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
   await page.fill('#gateway','unified-199');
-  // 后台轮询不能覆盖未保存草稿。
+  // 后台轮询只能送信，不能拿未保存草稿擦桌子。
   await page.waitForTimeout(3200);
   assert.equal(await page.locator('#gateway').inputValue(),'unified-199');
   page.once('dialog',dialog=>dialog.dismiss());await page.click('#saveSettings');

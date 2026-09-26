@@ -1,24 +1,8 @@
-// Observation domain: what serving state the upstream actually handed back,
-// per (account, model), and whether we had steered that request with a pooled
-// pair.
-//
-// This exists because the plugin is the only thing that sees both halves. CPA's
-// request logs record the response header but not which credential was chosen;
-// the plugin knows the credential AND what it did to the outgoing request. The
-// pairing is the whole point -- see observationKind below for why an
-// unpaired count would mislead.
-//
-// Nothing here changes a request or a response. It is pure observation of
-// traffic that was happening anyway, which is what makes it safe to run
-// permanently while active probing stays off.
-//
-// What it keeps is deliberately shallow: lifetime counts since Since, the same
-// counts per hour for the last two days, and a bounded ring of recent events.
-// The hourly ring exists because lifetime totals cannot answer "is this worse
-// than yesterday", which is the actual question. Anything finer -- per-request
-// history, retention past two days, arbitrary ranges -- belongs in the decision
-// log, which any cron can roll up at no storage cost. A plugin that grows a
-// metrics database has stopped being a plugin.
+// 观察域给每个（账号、模型）记上游实际状态，也记本次是否由池 pair 引导。
+// CPA 请求日志有响应头却没选中凭据；插件两边都看得见，所以能把菜和点菜的人对上。
+// 这里只旁观原本就在跑的流量，不改请求响应；主动探测关着也能长期开这本账。
+// 记录刻意浅：Since 起累计、最近两天逐小时计数、有界近期事件。累计值回答不了“今天比昨天差吗”，
+// 细到逐请求、超过两天或任意区间的查询请去决策日志汇总，别让小插件长成大数据库。
 
 package main
 
@@ -34,149 +18,88 @@ import (
 )
 
 const (
-	// observationsFileName sits at the top of store_dir, beside index.json and
-	// runtime.json. scanStoreRecords only reads <auth_id>/<model>.json under the
-	// account subdirectories, so a top-level file cannot be mistaken for a
-	// bucket.
+	// observationsFileName 放 store_dir 顶层，与 index.json、runtime.json 邻居。
+	// scanStoreRecords 只读账号子目录 <auth_id>/<model>.json，顶层观察账不会被误认成一桶凭据。
 	observationsFileName = "observations.json"
 
-	// observationsVersion guards the snapshot format. On a mismatch the file is
-	// ignored and collection restarts from empty -- deliberately, and there will
-	// never be migration code here. This is a discardable observation snapshot,
-	// not contract data: the cost of dropping it is losing counts, and the cost
-	// of carrying migrations for it forever is higher.
-	//
-	// 2: added the hourly history and split injected-other out of
-	// natural_other, which changes what an existing natural_other means.
+	// observationsVersion 守快照版本，不匹配就忽略并从空账重记，不写迁移。
+	// 这只是可丢弃的观察计数，不是契约数据，养永久迁移链比重记更费粮。
+	// 版本 2 加小时历史，并把 injected-other 从 natural_other 分出，旧数含义因此变了。
 	observationsVersion = 2
 
-	// observationsRecentMax bounds the live feed. It rides on the status
-	// document, which the dashboard polls, so this is also a bound on that
-	// document's size (~12 KB at 100).
+	// observationsRecentMax 限近期播报，也限面板轮询状态文档的体积；100 条约 12 KB，舞台再热闹也不无限加座。
 	observationsRecentMax = 100
 
-	// observationsBucketMax bounds the tally. A malformed or hostile model id
-	// would otherwise grow the map without limit; past this the least recently
-	// seen bucket is dropped.
+	// observationsBucketMax 限桶数，防错误或恶意模型 ID 撑爆 map；满了请最久未见的桶先退席。
 	observationsBucketMax = 256
 
-	// observationsHourlyMax bounds the history kept per bucket: two days, which
-	// is enough to ask whether today is worse than yesterday and short enough
-	// that the snapshot stays small. Only hours with traffic take a slot, so an
-	// idle bucket costs nothing and the worst case is bounded by this times
-	// observationsBucketMax.
+	// observationsHourlyMax 每桶最多留两天小时记录，够比今天昨天，不给账本无止境加页。
+	// 有流量的小时才占位，空闲桶不记空账；最坏规模由它乘 observationsBucketMax 封顶。
 	observationsHourlyMax = 48
 
-	// observationLearnMin is how many times an unrecognised signed length must
-	// appear in one bucket before the tally accepts it as that bucket's own
-	// normal class. The upstream's classes are not stable constants -- on
-	// 2026-09-22 it unified the turn-state format and every bucket's signature
-	// moved (gpt-6-astra went 292 -> 780 in place), so a fixed whitelist would
-	// file healthy traffic under "other" forever after every format change.
-	// Two sightings is the smallest count that separates a recurring class from
-	// a stray oddity.
+	// observationLearnMin 是陌生签名长度晋升本桶 normal 所需次数，不能把上游观测当永恒常量。
+	// 2026-09-22 格式统一时 gpt-6-astra 从 292 变 780，死白名单会把健康新格式永远扔进 other。
+	// 见两次是最小的重复证据：一次算生面孔，两次才考虑是新制服。
 	observationLearnMin = 2
 
-	// observationLensMax bounds the candidate-length table kept per bucket.
-	// Lengths arrive as arbitrary ints; without a cap a hostile or buggy peer
-	// could grow the map without limit. The rarest entry is dropped first.
+	// observationLensMax 限每桶候选长度表；长度可为任意整数，满了先赶最罕见项，防怪客无限占桌。
 	observationLensMax = 8
 )
 
-// observationsFlushInterval is the floor between disk writes. The snapshot is
-// whole-state rather than append-only, so writing more often buys nothing but a
-// shorter loss window on a hard kill; a crash loses at most this much.
-//
-// A var rather than a const so the tests can force a flush instead of waiting a
-// minute. Nothing in production reassigns it.
+// observationsFlushInterval 是整份快照写盘的最短间隔，写更勤只缩短硬杀时丢账窗口。
+// 用变量让测试强制 flush，不必等一分钟；生产不重赋值，算盘节奏不随客人拍桌改。
 var observationsFlushInterval = 60 * time.Second
 
-// The three things the upstream can do with the turn-state on a response.
-// Deliberately about the UPSTREAM's act, not about our interpretation of it:
-// "limited" says a 312 was signed, nothing about model quality. See the
-// dashboard copy for the operational reading laid on top.
+// 这里分上游对 turn-state 做的三种事，不把我们的解读冒充事实。
+// limited 只说签出了 312，不等于已证明模型质量；运营解释看面板文案，别见黄灯就宣布天黑。
 const (
-	observationNormal  = "normal"  // template_length, or a length this bucket has learned
-	observationLimited = "limited" // replace_length: a degraded state was signed
-	observationSilent  = "silent"  // no state signed at all
-	observationOther   = "other"   // a signed length this bucket has not seen before
+	observationNormal  = "normal"  // template_length 或本桶学会的长度，认熟面孔不只看旧名册
+	observationLimited = "limited" // replace_length：上游已签降级，黄牌有凭据才挂
+	observationSilent  = "silent"  // 未签任何状态，静默不是随口报平安
+	observationOther   = "other"   // 本桶没认过的已签长度，先记生面孔
 )
 
-// bucketObservation is one (account, model) cell.
-//
-// Counts are split by whether WE had steered the request with a pooled pair,
-// because a combined rate is not a degradation rate and reporting one would
-// mislead. The two sides answer different questions: the natural side is what
-// the upstream does to unpinned traffic, and the steered side is the evidence
-// that judges the pair itself -- a steered response signed normal is what
-// stamps a pool entry good (markRouteCookieOutcomeLocked).
-//
-// Read them this way:
-//
-//	NaturalNormal    upstream signed a good state, unprompted -- it is serving us
-//	NaturalLimited   upstream signed a degraded state, unprompted -- throttled
-//	InjectedSilent   we steered and the upstream signed nothing.
-//	InjectedLimited  we steered and it degraded us anyway. The actionable alarm:
-//	                 either the pair went stale, or the account itself is
-//	                 throttled -- the two are told apart by the natural side.
-//	InjectedNormal   we steered and it signed a fresh good state regardless.
-//	InjectedOther    we steered and it signed something unrecognised -- e.g. a
-//	                 length outside the configured classes, which is what the
-//	                 per-plan drift in FINDINGS.md looks like on this page.
+// bucketObservation 是一个（账号、模型）账格，按我们是否真的用池 pair 引导分开统计。
+// 混成总比例并不是降级率。natural 看未引导流量，injected 则给 pair 本身积累证据，
+// 引导后正常会由 markRouteCookieOutcomeLocked 给池项好评。
+// NaturalNormal 是自然签正常；NaturalLimited 是自然签降级；InjectedSilent 是引导后未签状态；
+// InjectedLimited 是引导仍降级，可能 pair 旧了也可能账号限流，须结合 natural 区分；
+// InjectedNormal 是引导后新签正常；InjectedOther 是引导后签未知长度，如 FINDINGS.md 的套餐漂移。
+// 两桌账分清，才不会把厨师的问题算到点菜客人身上。
 type bucketObservation struct {
 	AuthID string `json:"auth_id"`
 	Model  string `json:"model"`
 
 	observationCounts
 
-	// Last* describe the most recent observation of any kind, silent ones
-	// included. So this answers "is traffic flowing through this bucket",
-	// which is a different question from "has the upstream told us anything",
-	// and the dashboard needs both to tell injection blindness apart from an
-	// account nobody is using.
+	// Last* 记最近任意观察，静默也算，回答“这桶有没有流量”。
+	// 面板还要另问“上游有没有说状态”，才能分清注入后静默与根本无人来吃饭。
 	LastKind  string `json:"last_kind"`
 	LastLen   int    `json:"last_len"`
 	LastWrote bool   `json:"last_wrote"`
 	LastAt    string `json:"last_at"`
 
-	// LastSigned* describe the most recent observation in which the upstream
-	// actually put a state on the wire -- whether or not we had injected into
-	// that request. This is what the dashboard ages.
-	//
-	// Not LastNatural*, and the difference is load bearing: a 292 signed on a
-	// request we injected into is still the upstream saying it serves this
-	// account normally. Ageing only the unprompted readings would file that
-	// evidence away as "blind", which is the opposite of what it shows.
+	// LastSigned* 记最近真正带状态的观察，不管是否注入，面板据此算证据年龄。
+	// 不能只算 LastNatural*：注入后的 292 仍是上游正常服务证据，不能把亮着的灯登记成瞎。
 	LastSignedKind  string `json:"last_signed_kind,omitempty"`
 	LastSignedAt    string `json:"last_signed_at,omitempty"`
 	LastSignedWrote bool   `json:"last_signed_wrote,omitempty"`
 
-	// LastNatural* narrow that to the unprompted readings. Kept because the
-	// injected/natural split is the whole reason these counts mean anything,
-	// and an operator reading one row has to know which side it came from.
+	// LastNatural* 只记未引导观察；两桌账分开是统计有意义的根本，不能上菜后忘记哪桌点的。
 	LastNaturalKind string `json:"last_natural_kind,omitempty"`
 	LastNaturalAt   string `json:"last_natural_at,omitempty"`
 
-	// Hourly is the history: one entry per hour that saw traffic, oldest
-	// first, capped at observationsHourlyMax. An idle bucket carries none.
+	// Hourly 只收有流量的小时，旧在前，最多 observationsHourlyMax；没客的时辰不用写空菜单。
 	Hourly []hourlyObservation `json:"hourly,omitempty"`
 
-	// SignedLens counts sightings of each signed length this bucket has shown
-	// that matches neither configured class -- the learning table behind the
-	// "other -> normal" promotion. Bounded at observationLensMax entries. Only
-	// candidate normals land here: replace_length classifies before it could
-	// ever be counted, so the degraded signature can never be learned away.
+	// SignedLens 统计不属配置两类的签名长度，供 other -> normal 学习，最多 observationLensMax 项。
+	// replace_length 已提前判为降级，永不进候选，不能靠多来几次把黄牌洗成嘉宾证。
 	SignedLens map[int]int `json:"signed_lens,omitempty"`
 }
 
-// observationCounts is the seven-way split of what happened, used for the
-// lifetime tally and for each hour of history alike.
-//
-// One type and one add() for both, because the alternative -- two switches
-// over the same cases -- fails by having a new kind wired into one and not the
-// other, and that shows up only as history that quietly disagrees with the
-// total. Embedded untagged, so these serialise flat: a caller reads
-// observed.natural_normal, not observed.counts.natural_normal.
+// observationCounts 是累计与逐小时共用的七路账，一个类型一个 add，免得两份 switch 漏同步。
+// 无标签嵌入让 JSON 扁平：读 observed.natural_normal，不是 observed.counts.natural_normal。
+// 一本算盘管两本账，别让历史和总账各唱各的戏。
 type observationCounts struct {
 	NaturalNormal  int64 `json:"natural_normal"`
 	NaturalLimited int64 `json:"natural_limited"`
@@ -188,14 +111,8 @@ type observationCounts struct {
 	InjectedOther   int64 `json:"injected_other"`
 }
 
-// add books one observation.
-//
-// The (silent, not-steered) pair never arrives -- recordObservation drops it
-// as noise before this is reached -- so the last case is (other, not
-// steered). Every steered case is named explicitly rather than falling
-// through, because "we steered and got back something unrecognised" filed
-// under NaturalOther would put our own traffic on the unprompted side of the
-// split and corrupt the only counts that can be read as a rate.
+// add 记一条观察；silent 且未引导早被 recordObservation 当噪声挡住，末支只可能 other 且未引导。
+// 每种引导情况都显式列出，不能把 InjectedOther 滑进 NaturalOther，污染唯一能看比例的分桌账。
 func (c *observationCounts) add(wrote bool, kind string) {
 	switch {
 	case wrote && kind == observationSilent:
@@ -215,8 +132,7 @@ func (c *observationCounts) add(wrote bool, kind string) {
 	}
 }
 
-// addAll sums another set in. TestObservationCountsAddAllCoversEveryField walks
-// the type to prove no counter is missed here.
+// addAll 合并整组计数；TestObservationCountsAddAllCoversEveryField 挨字段点名，谁也别躲桌底逃账。
 func (c *observationCounts) addAll(o observationCounts) {
 	c.NaturalNormal += o.NaturalNormal
 	c.NaturalLimited += o.NaturalLimited
@@ -227,27 +143,19 @@ func (c *observationCounts) addAll(o observationCounts) {
 	c.InjectedOther += o.InjectedOther
 }
 
-// hourlyObservation is one hour of the same counts.
-//
-// The lifetime totals answer "how many since we started", which is the wrong
-// shape for the question an operator actually has -- is this worse than it was
-// yesterday. Only hours with traffic get an entry.
+// hourlyObservation 记一个小时的同类计数，只在有流量时开账。
+// 累计回答开业至今多少，小时记录才回答今天是否比昨天差，老黄历不能当今日菜单。
 type hourlyObservation struct {
-	Hour string `json:"hour"` // RFC3339, truncated to the hour, UTC
+	Hour string `json:"hour"` // UTC 的 RFC3339 整点，分钟秒钟请去隔壁候场
 	observationCounts
 }
 
-// hourSlot returns the counters for now's hour, appending a slot if this is
-// the first observation in it and dropping the oldest once the ring is full.
-//
-// The returned pointer aims into the slice, so it is only valid until the next
-// append. Every caller uses it immediately, under the lock.
+// hourSlot 取当前小时计数，首条则新增，满了丢最旧。返回指针指向 slice，下一次 append 后可能失效。
+// 所有调用者都在锁内立刻用，别拿旧座号跑去扩建后的宴会厅找人。
 func (b *bucketObservation) hourSlot(now time.Time) *observationCounts {
 	hour := now.UTC().Truncate(time.Hour).Format(time.RFC3339)
 
-	// Observations arrive in time order, so the current hour is the last entry
-	// essentially always. The scan behind it covers a clock stepping backwards,
-	// which would otherwise open a second slot for an hour already present.
+	// 正常时当前小时在末项；往前扫是防时钟回拨，不让同一时辰多开一张重复饭票。
 	for i := len(b.Hourly) - 1; i >= 0; i-- {
 		if b.Hourly[i].Hour == hour {
 			return &b.Hourly[i].observationCounts
@@ -261,10 +169,8 @@ func (b *bucketObservation) hourSlot(now time.Time) *observationCounts {
 	return &b.Hourly[len(b.Hourly)-1].observationCounts
 }
 
-// rollup sums the hours falling inside window. Hours are whole, so a 24h
-// window covers the last 24 hour-slots rather than exactly 24 hours -- close
-// enough for "is today worse than yesterday", and the alternative is keeping
-// per-request timestamps this deliberately does not keep.
+// rollup 汇总窗口内完整小时槽；24h 是最近 24 个小时槽，不是精确到秒的 24 小时。
+// 足够比较今天昨天，不为较这几秒而把逐请求时间戳全请进仓库。
 func (b bucketObservation) rollup(now time.Time, window time.Duration) observationCounts {
 	cutoff := now.UTC().Add(-window)
 	var out observationCounts
@@ -278,10 +184,8 @@ func (b bucketObservation) rollup(now time.Time, window time.Duration) observati
 	return out
 }
 
-// observationSummary is a bucketObservation stripped of the key fields, for
-// hanging off a status row that already carries auth_id and model. Repeating
-// them there would put two sources of truth for the same key on one published
-// document.
+// observationSummary 去掉账号、模型键，挂到已有这些键的状态行。
+// 同一文档别放两套户口本，免得同一个人出现两个生日。
 type observationSummary struct {
 	observationCounts
 
@@ -297,14 +201,8 @@ type observationSummary struct {
 	LastNaturalKind string `json:"last_natural_kind,omitempty"`
 	LastNaturalAt   string `json:"last_natural_at,omitempty"`
 
-	// Recent24h is the hourly history rolled into one figure per counter. The
-	// lifetime totals above can only answer "how many since we started", and
-	// an operator comparing today with yesterday cannot get there from a pair
-	// of numbers that only ever grow.
-	//
-	// The hours themselves are not published. They are on disk for whoever
-	// wants to chart them; putting 48 slots per bucket on a document the
-	// dashboard polls would grow it by more than the panel can use.
+	// Recent24h 把小时历史汇成各计数，弥补累计只涨不减、没法比较今昔的毛病。
+	// 小时原账落盘供画图，不把每桶 48 槽都塞进轮询文档，面板吃不了这么大一盆菜。
 	Recent24h observationCounts `json:"recent_24h"`
 }
 
@@ -324,10 +222,8 @@ func (b bucketObservation) summary(now time.Time) observationSummary {
 	}
 }
 
-// observationEvent is one row of the live feed. Every field is structured --
-// no free text. The status document is anonymously readable and a free-text
-// channel on it is a leak waiting to be written; see probe_run.lines for the
-// one that already exists and the constraint it carries.
+// observationEvent 是实时播报一行，只收结构化字段，不开自由文本留言板。
+// 状态文档匿名可读，随意文本容易漏秘密；probe_run.lines 已有相应约束，这里不再开侧门。
 type observationEvent struct {
 	At     string `json:"at"`
 	AuthID string `json:"auth_id"`
@@ -335,16 +231,13 @@ type observationEvent struct {
 	Len    int    `json:"len"`
 	Wrote  bool   `json:"wrote"`
 	Kind   string `json:"kind"`
-	// Served is the model the SSE payload declared when it differs from the
-	// requested one -- the unified format's downgrade signature (the upstream
-  // safety-buffering fallback actually serving the turn). Empty on every
-	// length-classified event.
+	// Served 只在 SSE 声明模型与请求不同的降级事件里填写，代表统一格式下的安全缓冲回退模型。
+	// 按长度分类的事件留空，不拿猜测给演员补名字。
 	Served string `json:"served,omitempty"`
 }
 
-// observationSnapshot is the whole persisted state, rewritten atomically. It is
-// not appended to: a torn append would need recovery logic, and a 20 KB
-// rewrite once a minute does not.
+// observationSnapshot 是原子重写的全状态，不做追加。
+// 每分钟约 20 KB 重写很轻，没必要为半截追加再养一队修账先生。
 type observationSnapshot struct {
 	Version   int                 `json:"version"`
 	Since     string              `json:"since"`
@@ -353,35 +246,23 @@ type observationSnapshot struct {
 	Recent    []observationEvent  `json:"recent"`
 }
 
-// observations holds the live tally.
-//
-// Its own mutex, deliberately NOT state.mu. handleStatus already avoids holding
-// state.mu and the probe runner's lock at once, and adding a third lock under
-// state.mu would reintroduce exactly that ordering hazard. Nothing in here ever
-// takes state.mu, so it cannot participate in a cycle.
+// observations 用自己的锁，绝不用 state.mu。handleStatus 已避开 state.mu 与探测锁同时持有，
+// 不能再塞第三把锁重演死锁相声；本域从不取 state.mu，因此不进那个环。
 var observations = struct {
 	mu      sync.Mutex
 	since   time.Time
 	byKey   map[string]*bucketObservation
 	recent  []observationEvent
 	dirty   bool
-	lastOut time.Time // last successful flush
-	writing bool      // a flush goroutine is in flight
-	dir     string    // store_dir this tally was loaded for
+	lastOut time.Time // 最近成功落盘时刻，账真送到才盖章
+	writing bool      // 正有 flush goroutine 送账，别重开一班车
+	dir     string    // 本账所属 store_dir，不和隔壁仓库认错亲
 }{byKey: make(map[string]*bucketObservation)}
 
-// classifyObservation maps a response's turn-state length onto what the
-// upstream did. Lengths come from config because they are observations about
-// the upstream rather than protocol constants -- they differ by plan: a
-// prolite account signed 292 while a self_serve_business_prolite account
-// signed 332 on normal responses (both measured 2026-09-22), and the unified
-// format the upstream rolled out the same day moved whole accounts to 780.
-// This is the static half of the classifier: the per-bucket learned half sits
-// in noteSignedLen, which promotes a recurring unrecognised length to normal
-// so a format change reads as one "other" sighting instead of a permanent
-// misclassification. An "other" streak on visibly healthy traffic still means
-// the signature keeps changing, not that the account is failing -- see
-// FINDINGS.md.
+// classifyObservation 用配置长度判断上游动作，它们是实测值不是协议铁律。
+// 2026-09-22 正常 prolite 为 292，self_serve_business_prolite 为 332，同日统一格式又把账号推向 780。
+// 这里是静态半边，noteSignedLen 给重复未知长度学成本桶正常，免得换制服就永久关进 other。
+// 健康流量连续 other 仍可能只是签名反复变化，不等于账号坏了，详见 FINDINGS.md。
 func classifyObservation(cfg pluginConfig, valueLen int) string {
 	switch valueLen {
 	case 0:
@@ -395,24 +276,16 @@ func classifyObservation(cfg pluginConfig, valueLen int) string {
 	}
 }
 
-// noteSignedLen counts one sighting of an unrecognised signed length and
-// reports whether it has recurred enough to stand as this bucket's normal
-// class. The count is taken before the verdict, so a length promotes on its
-// SECOND appearance -- the first is filed as "other", which is what a brand
-// new signature should look like on the feed.
-//
-// Only ever called on lengths that already classified "other": the configured
-// degraded signature is decided before this runs, so it can neither be
-// learned nor promoted. The caller holds observations.mu.
+// noteSignedLen 先给未知长度记次数再判定，所以第二次晋升，第一次仍是 other。
+// 只接静态分类已判 other 的值，配置降级长度早被拦走，不可能混进学堂洗白。
+// 调用方持 observations.mu，给新制服登记也得先锁账本。
 func (b *bucketObservation) noteSignedLen(l int) bool {
 	if b.SignedLens == nil {
 		b.SignedLens = make(map[int]int, observationLensMax)
 	}
 	b.SignedLens[l]++
 	if len(b.SignedLens) > observationLensMax {
-		// Drop the rarest candidate: a length seen once and never again is the
-		// noise this table exists to absorb. Ties go to the smaller length so
-		// eviction is deterministic rather than map-order dependent.
+		// 淘汰最罕见候选；同次数选更小长度，保持确定性，不让 map 遍历顺序当抽签主持。
 		rarest, rarestN := 0, 0
 		for cand, n := range b.SignedLens {
 			if cand == l {
@@ -427,27 +300,16 @@ func (b *bucketObservation) noteSignedLen(l int) bool {
 	return b.SignedLens[l] >= observationLearnMin
 }
 
-// recordObservation notes one response's turn-state length reading.
-//
-// wrote reports whether the request hook actually put a pooled pair on the way
-// out -- not whether it wanted to. A dry_run decision is not a write, and
-// counting it as one would make the whole steered/natural split meaningless in
-// the mode an operator uses precisely to watch without touching anything.
-//
-// Called before the harvest path's own checks, so a response that carries no
-// state at all still lands here: "we steered and the upstream then signed
-// nothing" says the pair was accepted and no new state was owed -- a reading
-// that is invisible if silence is not recorded.
+// recordObservation 记录响应长度；wrote 只认请求钩子真写了池 pair，不认“本来想写”。
+// dry_run 不算写，不然观察模式的 natural/injected 分账就成了假账。
+// 在采集自己的检查前调用，无状态也记录：引导后上游未新签是有意义的静默，别把无台词的镜头剪掉。
 func recordObservation(cfg pluginConfig, authID, model string, valueLen int, wrote bool) {
 	recordEvent(authID, model, classifyObservation(cfg, valueLen), valueLen, wrote, "")
 }
 
-// recordDowngrade notes the unified format's degraded signature: the SSE
-// payload declared a served model different from the requested one (the
-// safety-buffering fallback answering the turn). Since the format moved, the
-// turn-state length no longer carries the throttle bit -- every refusal path
-// mints a normal 780 -- so degradation is read off the served-model field and
-// filed under "limited", the same kind a 312 used to mean.
+// recordDowngrade 记录统一格式下的降级证据：SSE 声明 served 与 requested 不同，即安全缓冲模型接手。
+// 格式统一后拒绝路径也铸正常 780，长度不再携带限流信号，改看 served-model，并记为 limited。
+// 和旧 312 归同类账，但证据换了，不能拿旧尺量新衣。
 func recordDowngrade(authID, model, served string, tsLen int, wrote bool) {
 	if strings.TrimSpace(served) == "" {
 		return
@@ -455,21 +317,17 @@ func recordDowngrade(authID, model, served string, tsLen int, wrote bool) {
 	recordEvent(authID, model, observationLimited, tsLen, wrote, served)
 }
 
-// recordEvent is the shared tail of both reading types: attribute the event to
-// its (account, model) bucket, split the counter by kind and steered, age the
-// cell, and push it onto the live feed. served is "" for length-classified
-// events and the declared model on downgrade events.
+// recordEvent 为两种读数共用收尾：归账号模型桶、按 kind 与 steered 分账、更新时间、推近期播报。
+// 长度事件 served 为空，降级事件填声明模型；对不上号就别硬给演员排座。
 func recordEvent(authID, model, kind string, valueLen int, wrote bool, served string) {
 	authID = strings.TrimSpace(authID)
 	model = strings.TrimSpace(model)
 	if authID == "" || model == "" {
-		// Unattributable. Counting it against some placeholder bucket would put
-		// one account's throttling on another's row.
+		// 归属不明就不计；塞进占位桶会把甲的限流挂到乙门口，宁缺账也不乱认亲。
 		return
 	}
 	if kind == observationSilent && !wrote {
-		// Neither side did anything: no template went out, none came back. Most
-		// traffic looks like this and it says nothing about serving state.
+		// 双方都没动静：没送模板，也没收到状态。大部分流量如此，静默本身不透露服务状态。
 		return
 	}
 
@@ -484,9 +342,7 @@ func recordEvent(authID, model, kind string, valueLen int, wrote bool, served st
 		observations.byKey[key] = cell
 	}
 	if kind == observationOther && cell.noteSignedLen(valueLen) {
-		// The static classes do not know this signature, but the bucket itself
-		// does: it has signed this length before. Recurring means it is the
-		// upstream's current format here, not a stray.
+		// 静态表不认识，本桶却反复见过该长度；这是上游当前制服，不是偶然穿错的戏服。
 		kind = observationNormal
 	}
 
@@ -498,11 +354,8 @@ func recordEvent(authID, model, kind string, valueLen int, wrote bool, served st
 	cell.LastWrote = wrote
 	cell.LastAt = now.UTC().Format(time.RFC3339)
 
-	// Anything that is not silence is the upstream telling us something, and it
-	// counts as current evidence whether or not we had injected into that
-	// request. Silence is the one reading that says nothing on its own -- under
-	// injection it means our template was taken, which is not a state anyone
-	// signed.
+	// 非静默就是上游给出的新证据，不管本次是否注入都算。
+	// 静默本身不带签署状态；注入下的接受信号也不能冒充上游新签的证明。
 	if kind != observationSilent {
 		cell.LastSignedKind = kind
 		cell.LastSignedAt = cell.LastAt
@@ -534,14 +387,12 @@ func recordEvent(authID, model, kind string, valueLen int, wrote bool, served st
 	observations.mu.Unlock()
 
 	if due && dir != "" {
-		// Off the response path. Holding a hook open for a disk write would put
-		// file latency on every upstream response.
+		// 磁盘写放到响应路径外，不能每个上游响应都坐在柜台等账本晾干。
 		go flushObservations(dir)
 	}
 }
 
-// evictObservationBucketLocked drops the least recently seen cell once the map
-// is full. The caller holds observations.mu.
+// evictObservationBucketLocked 在满表时请最久未见的桶离席；调用方持 observations.mu。
 func evictObservationBucketLocked() {
 	if len(observations.byKey) < observationsBucketMax {
 		return
@@ -557,8 +408,7 @@ func evictObservationBucketLocked() {
 	}
 }
 
-// observationsSnapshot copies the tally out for the status document, sorted so
-// the dashboard's rows do not reshuffle between polls.
+// observationsSnapshot 为状态文档复制并排序，面板轮询时别让各行像抢凳子一样换位。
 func observationsSnapshot() ([]bucketObservation, []observationEvent, string) {
 	observations.mu.Lock()
 	defer observations.mu.Unlock()
@@ -574,8 +424,7 @@ func observationsSnapshot() ([]bucketObservation, []observationEvent, string) {
 		return buckets[i].Model < buckets[j].Model
 	})
 
-	// Newest first: the feed is read top-down by someone asking "what just
-	// happened", not "what happened first".
+	// 最新在前；来客问的是刚发生什么，不是先翻开业第一天的旧账。
 	recent := make([]observationEvent, 0, len(observations.recent))
 	for i := len(observations.recent) - 1; i >= 0; i-- {
 		recent = append(recent, observations.recent[i])
@@ -588,8 +437,7 @@ func observationsSnapshot() ([]bucketObservation, []observationEvent, string) {
 	return buckets, recent, since
 }
 
-// flushObservations writes the snapshot. The copy happens under the lock and
-// the write outside it, so a slow disk cannot stall a response hook.
+// flushObservations 锁内复制、锁外写盘；磁盘慢可以慢，别拉响应钩子一起排队。
 func flushObservations(dir string) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -627,8 +475,7 @@ func flushObservations(dir string) {
 	if errMarshal == nil {
 		errWrite := atomicWrite(filepath.Join(dir, observationsFileName), append(data, '\n'))
 		if errWrite != nil {
-			// Not fatal and not retried: the tally lives in memory and the next
-			// flush rewrites the whole thing anyway.
+			// 失败不致命也不立即重试；内存账仍在，下次整份重写，别为一张回执当场掀桌。
 			log.Printf(logPrefix+"could not write %s: %v", observationsFileName, errWrite)
 			observations.mu.Lock()
 			observations.dirty = true
@@ -642,9 +489,8 @@ func flushObservations(dir string) {
 	observations.mu.Unlock()
 }
 
-// loadObservations restores the tally for dir, or starts a fresh one. Called
-// from configure, so a reconfigure that changes store_dir moves the tally with
-// it rather than mixing two stores' counts.
+// loadObservations 为 dir 恢复计数或开新账，由 configure 调用。
+// store_dir 换了就跟着换账，不把两家店的营业额混成一家。
 func loadObservations(dir string) {
 	dir = strings.TrimSpace(dir)
 
@@ -652,8 +498,7 @@ func loadObservations(dir string) {
 	defer observations.mu.Unlock()
 
 	if observations.dir == dir && !observations.since.IsZero() {
-		// Same store, already loaded. A reconfigure must not reset counts the
-		// operator is watching.
+		// 同一存储已加载就保留计数，重新配置不能顺手把操作者眼前的账擦了。
 		return
 	}
 
@@ -662,10 +507,8 @@ func loadObservations(dir string) {
 	observations.recent = nil
 	observations.since = time.Now()
 	observations.dirty = false
-	// Start the clock now rather than at the zero time, so the first
-	// observation after a load does not trigger an immediate write. Batching
-	// from the first tick is the point: a restart should not cost a disk write
-	// per response until the interval catches up.
+	// 从当前时刻起算 flush 节奏，不从零时刻算起。
+	// 否则刚加载第一条就立刻写盘；重启不是每条响应都要交一次入场费。
 	observations.lastOut = time.Now()
 
 	if dir == "" {
@@ -674,8 +517,7 @@ func loadObservations(dir string) {
 
 	raw, errRead := os.ReadFile(filepath.Join(dir, observationsFileName))
 	if errRead != nil || len(raw) == 0 {
-		// Absent on first run, and that is the normal case -- not worth a log
-		// line every time a fresh store_dir is configured.
+		// 首次无文件是正常开张，配置新 store_dir 不必每次为白纸大声报案。
 		return
 	}
 	var snap observationSnapshot
@@ -704,8 +546,7 @@ func loadObservations(dir string) {
 	}
 }
 
-// flushObservationsNow writes synchronously, for shutdown and reconfigure where
-// there is no later flush to rely on.
+// flushObservationsNow 同步落盘，专供关闭或重配；最后一班车不能指望下一班来送账。
 func flushObservationsNow() {
 	observations.mu.Lock()
 	dir := observations.dir
@@ -714,10 +555,8 @@ func flushObservationsNow() {
 	flushObservations(dir)
 }
 
-// deleteObservation drops one bucket's tally and its recent-feed rows. It is
-// the per-bucket half of the dashboard's clear button: the pool has no
-// per-bucket state, so the only thing "clear this bucket" can mean is "forget
-// what we observed for it". Returns whether a row existed.
+// deleteObservation 删一个桶的计数与近期事件，返回原行是否存在。
+// 池本身不按桶存状态，所以面板“清此桶”只是忘掉该桶观测，不是去全局池拆椅子。
 func deleteObservation(authID, model string) bool {
 	key := bucketKey(authID, model)
 	observations.mu.Lock()
@@ -731,8 +570,7 @@ func deleteObservation(authID, model string) bool {
 	return true
 }
 
-// clearAllObservations drops every tally row and the feed. The pool-wide half
-// of the same clear button.
+// clearAllObservations 清全部计数和播报，是同一清理按钮的全范围版本，一本账整本翻新。
 func clearAllObservations() {
 	observations.mu.Lock()
 	defer observations.mu.Unlock()
@@ -741,8 +579,7 @@ func clearAllObservations() {
 	observations.dirty = true
 }
 
-// dropObservationEventsLocked removes a bucket's rows from the recent feed.
-// The caller holds observations.mu.
+// dropObservationEventsLocked 移除某桶近期事件；调用方持 observations.mu，清桌前先稳住账本。
 func dropObservationEventsLocked(events []observationEvent, key string) []observationEvent {
 	out := events[:0]
 	for _, e := range events {

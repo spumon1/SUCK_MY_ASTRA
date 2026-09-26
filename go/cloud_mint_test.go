@@ -84,7 +84,7 @@ func TestCloudMintLogNeverLeaksTicketOrCookie(t *testing.T) {
 	}
 }
 
-// 云端结果只从实际选中的账号派生，禁止猜测账号或写回凭据。
+// 云端结果只认宿主选中的账号工牌；不猜身份，更不替凭据改户口。
 func TestCloudMintHookPreservesCallerTicket(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.CloudMint = defaultCloudMintConfig()
@@ -96,8 +96,8 @@ func TestCloudMintHookPreservesCallerTicket(t *testing.T) {
 	}
 }
 
-// 云端打票只接管可归属的 Codex 请求；模型名为空、含别名分隔符、
-// 凭据解析失败等归属不明的流量必须原样放行，不能被 503 误伤。
+// 云端打票只接有归属的 Codex 请求；模型名空白、带别名分隔符或凭据解析失败，
+// 身份不明就原样放行，503 不能兼职乱抓人的门卫。
 func TestCloudMintPassesThroughUnattributableRequests(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.CloudMint = defaultCloudMintConfig()
@@ -125,7 +125,7 @@ func TestCloudMintPassesThroughUnattributableRequests(t *testing.T) {
 			}
 		})
 	}
-	// 确认是 Codex 凭据但模型名无法打票的请求仍须按约定 503，不放行也不改写。
+	// 已认出 Codex 凭据但模型名不能打票时，按约定回 503；不偷放行，也不给请求整容。
 	resolverErr = nil
 	cloudCredentialResolver = func(pluginapi.RequestInterceptRequest) (cloudMintCredentials, error) {
 		return cloudMintCredentials{AuthID: "a", AccessToken: "t"}, nil

@@ -1,13 +1,7 @@
-// Store domain: the pieces of the on-disk layout this plugin still owns.
-//
-// The template store this file used to implement is gone: the plugin no longer
-// reuses X-Codex-Turn-State at all (FINDINGS.md) -- the reusable credential is
-// the account-agnostic __cflb/__oailb routing pair, whose pool lives in
-// route-cookies.json and is handled by route_cookies.go. What remains here is
-// the atomic write primitive the other top-level files still use, the bucket
-// key the observation tally is still keyed on, and a one-shot reader that
-// folds cookie fields out of the legacy per-bucket records into the pool so an
-// upgrade does not start cold.
+// 存储这间旧铺还管三样：原子写文件、观察桶键、旧桶 Cookie 的一次性迁入。
+// 原来的模板仓库已撤柜：插件不再复用 X-Codex-Turn-State（见 FINDINGS.md），
+// 可复用的是与账号无关的 __cflb/__oailb pair，由 route_cookies.go 管 route-cookies.json。
+// 升级时从旧桶捡回仍有效的路由 Cookie，免得新店开张连一把椅子都没有。
 
 package main
 
@@ -19,10 +13,8 @@ import (
 	"strings"
 )
 
-// atomicWrite writes via a temporary file in the same directory and renames, so
-// a reader never sees a half-written document. os.CreateTemp already creates
-// with 0600 and rename preserves the mode, which is the permission the store
-// needs.
+// atomicWrite 在同目录临时文件里写完再 rename，读者只见整盘菜，不见半截萝卜。
+// os.CreateTemp 自带 0600，rename 保留权限，符合仓库的保密要求。
 func atomicWrite(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, errTemp := os.CreateTemp(dir, ".tmp-*")
@@ -30,8 +22,7 @@ func atomicWrite(path string, data []byte) error {
 		return errTemp
 	}
 	name := tmp.Name()
-	// Harmless after a successful rename; the point is to not leave litter
-	// behind on any of the failure paths below.
+	// rename 成功后再清理也无害；失败分支更要收摊，不能留下临时文件满地摆摊。
 	defer func() { _ = os.Remove(name) }()
 
 	if _, errWrite := tmp.Write(data); errWrite != nil {
@@ -48,19 +39,14 @@ func atomicWrite(path string, data []byte) error {
 	return os.Rename(name, path)
 }
 
-// bucketKey joins the two halves with a NUL, which cannot appear in either, so
-// no pair of distinct (account, model) can collide onto one key. Kept for the
-// observation tally, which is still keyed by bucket.
+// bucketKey 用两边都不可能含有的 NUL 串起账号和模型，防止不同搭档撞成同一张桌号。
+// 观察计数仍按桶记账，所以这把钥匙还没退休。
 func bucketKey(authID, model string) string {
 	return authID + "\x00" + model
 }
 
-// legacyRouteCookieEntries reads the cookie fields out of bucket records
-// written by the pre-pool format (<store_dir>/<auth_id>/<model>.json carrying
-// route_cookies). The records themselves are never written any more; this only
-// folds their still-live pairs into the pool on load, and is deliberately
-// forgiving -- a malformed or vanished file is skipped, never fatal, because
-// the worst case is a pool one entry poorer.
+// legacyRouteCookieEntries 从旧 <store_dir>/<auth_id>/<model>.json 的 route_cookies 捞回活 pair。
+// 不再写旧记录，只在加载时迁入池；文件坏了或没了就跳过，不让一粒沙停掉整辆车。
 func legacyRouteCookieEntries(dir string) []routeCookieEntry {
 	authDirs, errRead := os.ReadDir(dir)
 	if errRead != nil {
@@ -105,12 +91,8 @@ func legacyRouteCookieEntries(dir string) []routeCookieEntry {
 	return out
 }
 
-// bucketRelPath is the path sanitiser the management surface uses on
-// caller-supplied auth_id/model. The store no longer lays files out per
-// bucket, but the rule survives for its second job: anything interpolated into
-// a filename or an outbound call must not be able to walk out of its
-// directory. It returns the safe "<auth>/<model>.json" form, or an error that
-// names which half was unsafe.
+// bucketRelPath 替管理入口检查 auth_id/model：桶目录布局虽已退休，防越界门卫继续上班。
+// 用于文件名或出站请求的值不能钻出目录；合法则回 <auth>/<model>.json，非法则指出哪半边闯祸。
 func bucketRelPath(authID, model string) (string, error) {
 	safe := func(s string) bool {
 		if s == "" || len(s) > 256 {

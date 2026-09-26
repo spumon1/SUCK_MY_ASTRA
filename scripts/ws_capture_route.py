@@ -105,7 +105,7 @@ def main():
             raise ProbeError("configured_proxy_missing")
         cookie, report["capture"] = capture_dialogue(url, headers, args.model, proxy=proxy)
         private = root / ("captured-route-" + tag + ".json")
-        # 新文件限定 0600，不覆盖旧 Cookie；报告中只留下指纹。
+        # 新文件穿 0600 防护衣，旧 Cookie 不动；报告只按指纹点名，不让秘密上台。
         with os.fdopen(os.open(private, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
             json.dump({"cookies": dict(part.split("=", 1) for part in cookie.split("; ")),
                        "gateway": report["capture"]["gateway"]}, file)

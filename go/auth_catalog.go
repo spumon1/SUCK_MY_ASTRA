@@ -1,19 +1,8 @@
-// Credential catalog: what Codex accounts the host knows about, and the short
-// cache the harvest path reads them through.
-//
-// This lives on its own because the dependency ran the wrong way. The functions
-// below were in management.go, which made the request interceptor -- the
-// hottest path in the plugin -- reach into the management surface to answer
-// "which account is this". Management is meant to expose capabilities, not
-// supply them. The catalog is the capability; management and the interceptors
-// are two consumers of it.
-//
-// Moving the file does not by itself enforce that: this is all one package and
-// nothing stops a future edit from reaching back the other way. What it does is
-// put the boundary somewhere a reader can see it.
-//
-// Moved verbatim out of management.go and main.go in edd3de3; the type was
-// renamed from statusAccount in b9da52e. No behaviour changed in either.
+// 凭据花名册：宿主认识哪些 Codex 账号，采集路径就在这里点名，外加一口短命缓存。
+// 原来这套能力挤在 management.go，热路径要找管理台借花名册，像厨师向收银员借锅。
+// 现在花名册提供能力，管理台与拦截器各自来读；同属一个 package，搬家不等于编译器设门禁，
+// 但至少把边界画给后来人看。edd3de3 从 management.go、main.go 原样迁出，
+// b9da52e 将 statusAccount 改名；两次都没改行为。
 
 package main
 
@@ -26,29 +15,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// codexAuth is one Codex credential as the host reports it: the filename it is
-// stored under, and whether it can serve a request right now (a disabled
-// credential and an unavailable one are both reported as not enabled -- see
-// listCodexAuths for why the distinction is not kept).
-//
-// It carries no json tags and is never serialised. It was called statusAccount
-// while it lived in management.go, which read as though the catalog existed to
-// fill the status page; the status page is one caller. soleEnabledCodexAuth on
-// the request path is another, and that one is not a status concern at all.
+// codexAuth 是宿主报来的一位 Codex 伙计：凭据文件名，加上眼下能不能接客。
+// 禁用和 unavailable 都算不能上班，区别见 listCodexAuths。没有 JSON 标签，也不序列化。
+// 旧名 statusAccount 容易让人以为只给状态页打工；其实 soleEnabledCodexAuth 的请求路径也用它。
 type codexAuth struct {
 	AuthID  string
 	Enabled bool
 }
 
-// The credential list is cached for the harvest path, which would otherwise ask
-// the host once per upstream response. The window is deliberately tiny: the one
-// thing that changes during a probe run is exactly which account is enabled, and
-// attributing an observation to an account that was switched off two seconds ago is
-// the failure this cache must not cause.
-//
-// handleStatus deliberately does not use it. The dashboard is read by a person
-// deciding what to do next, it is requested rarely, and it should show the
-// credential states as they are rather than as they were.
+// 花名册只缓存 2 秒，免得每个上游响应都拉宿主出来点名。
+// 探测期间账号开关会变，缓存不能把刚下班的伙计硬记成当班，所以窗口宁短勿长。
+// handleStatus 不借这本旧账：面板访问少，操作者要的是眼前状态，不是两秒前的合影。
 const authListCacheTTL = 2 * time.Second
 
 var (
@@ -58,23 +35,17 @@ var (
 	authListFetched time.Time
 )
 
-// codexAuthLister returns the current Codex credentials. It is a package
-// variable rather than a direct call so tests can inject a fixed list and
-// exercise the attribution fallbacks on both the harvest and substitution
-// paths -- above all the two-accounts case, where refusing to guess is what
-// keeps one account's tally off another account's row. Production leaves
-// it pointed at the real host-backed lister.
+// codexAuthLister 列出当前 Codex 凭据。留成包变量，是给测试一个换演员的入口。
+// 采集与替换路径都要验归属兜底，尤其双账号时宁可不猜，也别把甲的账记到乙头上。
+// 生产环境仍用宿主提供的真名单，不请替身。
 var codexAuthLister = listCodexAuths
 
-// authCatalogLister is the same seam for the FULL credential list. The
-// steering gate needs the non-Codex entries too: "in the list under another
-// provider" and "not in the list" are different answers, and the first one is
-// the credential the pool must never be steered onto.
+// authCatalogLister 给完整凭据目录留同样的测试入口，非 Codex 也得点名。
+// “别家提供商的客人”和“查无此人”不是一回事；前者绝不能被池里的 Cookie 拉错包间。
 var authCatalogLister = listAuthCatalog
 
-// cachedCodexAuths is codexAuthLister behind a short cache. The lookup happens
-// under the mutex so a burst of concurrent responses produces one call rather
-// than one each.
+// cachedCodexAuths 给 codexAuthLister 加短缓存，并把查询放在互斥锁里排队。
+// 一群响应同时敲门，只让宿主答一次，不上演百人齐声查户口。
 func cachedCodexAuths() ([]codexAuth, error) {
 	authListMu.Lock()
 	defer authListMu.Unlock()
@@ -93,8 +64,8 @@ var (
 	authCatalogFetched time.Time
 )
 
-// cachedAuthCatalog is authCatalogLister behind the same short window the codex
-// list uses. It serves the steering gate, the hottest read the catalog has.
+// cachedAuthCatalog 复用 Codex 名单的短缓存窗口，为路由门卫提供高频查询。
+// 花名册可以暂存，门卫不能每看一人就重印一本。
 func cachedAuthCatalog() ([]pluginapi.HostAuthFileEntry, error) {
 	authCatalogMu.Lock()
 	defer authCatalogMu.Unlock()
@@ -106,11 +77,8 @@ func cachedAuthCatalog() ([]pluginapi.HostAuthFileEntry, error) {
 	return authCatalogCache, authCatalogErr
 }
 
-// resetAuthCache clears the cached credential views so the next lookup goes
-// back to the listers immediately. It exists for tests: after injecting a new
-// lister they must drop the 2-second cache, or a stale entry from a previous
-// case would answer instead. Not used in production, where the caches are
-// meant to persist for their full window.
+// resetAuthCache 清空两份凭据视图，下次直接找 lister 重新点名。
+// 测试换名单后必须赶走那份 2 秒旧账，免得上场演员替本场答题；生产不调用，缓存正常活满窗口。
 func resetAuthCache() {
 	authListMu.Lock()
 	authListCache = nil
@@ -124,8 +92,7 @@ func resetAuthCache() {
 	authCatalogMu.Unlock()
 }
 
-// listAuthCatalog returns every credential the host knows about, unfiltered --
-// the raw material both the Codex-only list and the steering gate derive from.
+// listAuthCatalog 取宿主全部凭据，不筛人：Codex 名单和路由门卫都从这锅原料分菜。
 func listAuthCatalog() ([]pluginapi.HostAuthFileEntry, error) {
 	var listed struct {
 		Files []pluginapi.HostAuthFileEntry `json:"files"`
@@ -136,8 +103,7 @@ func listAuthCatalog() ([]pluginapi.HostAuthFileEntry, error) {
 	return listed.Files, nil
 }
 
-// listCodexAuths returns every Codex credential the host knows about, sorted by
-// name, with the enabled state it reports.
+// listCodexAuths 把宿主的 Codex 凭据按名字排队，启用状态照实报，不给缺勤者补签到。
 func listCodexAuths() ([]codexAuth, error) {
 	files, errList := listAuthCatalog()
 	if errList != nil {
@@ -152,9 +118,8 @@ func listCodexAuths() ([]codexAuth, error) {
 		if name == "" {
 			continue
 		}
-		// An unavailable credential cannot answer a request either, so it is
-		// reported the same way a disabled one is: the operator's question is
-		// "can this bucket be filled right now", not "which flag is set".
+		// unavailable 和 disabled 都不能接请求，这里统一记为未启用。
+		// 操作者问的是“这桶现在能不能装”，不是“究竟哪块告示牌挂歪了”。
 		out = append(out, codexAuth{AuthID: name, Enabled: !file.Disabled && !file.Unavailable})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].AuthID < out[j].AuthID })
@@ -166,16 +131,13 @@ func isCodexAuth(file pluginapi.HostAuthFileEntry) bool {
 		strings.EqualFold(strings.TrimSpace(file.Type), "codex") {
 		return true
 	}
-	// Provider is not always populated on file-backed credentials; the naming
-	// convention is the fallback the harvester uses too.
+	// 文件型凭据未必填 Provider，缺这一栏时才看命名惯例，和采集器认人用同一把尺。
 	name := strings.ToLower(strings.TrimSpace(file.Name))
 	return strings.HasPrefix(name, "codex-") && strings.HasSuffix(name, ".json")
 }
 
-// soleEnabledCodexAuth returns the name of the only enabled Codex credential.
-// It reports the enabled count alongside so a refusal can say why, and returns
-// an empty name whenever the count is anything but one -- the caller must not
-// guess, so "none" and "several" are the same answer here.
+// soleEnabledCodexAuth 只在恰有一个启用的 Codex 凭据时报名字，同时报人数方便解释拒绝。
+// 零人或多人都回空名：独苗才可点名，挤满一屋不能靠闭眼抓阄。
 func soleEnabledCodexAuth() (string, int, error) {
 	accounts, errList := cachedCodexAuths()
 	if errList != nil {
@@ -196,18 +158,11 @@ func soleEnabledCodexAuth() (string, int, error) {
 	return name, 1, nil
 }
 
-// selectedAuthIsCodex reports whether the credential the scheduler picked is a
-// Codex account, judged by the host's own records rather than by what the file
-// happens to be named. The stable auth index is matched first, then the
-// reported id/name -- the same pair CPA publishes as selected_auth_index and
-// selected_auth_id.
-//
-// resolved=false means the catalog itself could not be read; the caller then
-// falls back to the filename convention, the only signal left. resolved=true
-// with codex=false covers both "the entry exists under another provider" and
-// "the catalog knows no such credential": the scheduler can only select what
-// the host registered, so absence is a race or an inconsistency, never a
-// licence to guess.
+// selectedAuthIsCodex 按宿主档案判断调度器选中的账号是不是 Codex，不凭文件名看面相。
+// 先匹配稳定 auth index，再匹配 id/name，对应 selected_auth_index、selected_auth_id。
+// resolved=false 表示目录读不到，才退回仅存的文件名线索。
+// resolved=true 且 codex=false 包括别家提供商和目录中不存在两种情况；
+// 调度器只能选已登记账号，失踪说明竞争或不一致，不是给猜谜发许可证。
 func selectedAuthIsCodex(authID, authIndex string) (codex, resolved bool) {
 	files, errList := cachedAuthCatalog()
 	if errList != nil {
@@ -226,13 +181,9 @@ func selectedAuthIsCodex(authID, authIndex string) (codex, resolved bool) {
 	return false, true
 }
 
-// entryIsCodex judges one catalog entry. Provider is authoritative whenever the
-// host reports one -- a codex-named file holding another provider's credential
-// must NOT pass, or OpenAI's routing cookies would ride onto the wrong
-// upstream. Type is the fallback when provider is empty, and the filename
-// convention applies only when the host reports neither, the case where the
-// convention is all there is. This is deliberately stricter than isCodexAuth's
-// any-signal OR: that one fills a dashboard, this one guards a credential.
+// entryIsCodex 查单条档案：Provider 有值就一锤定音；文件名像 Codex 也不能冒充。
+// 否则 OpenAI 路由 Cookie 会被送进别家厨房。Provider 空才看 Type，两者都空才看文件名。
+// 它比 isCodexAuth 的“任一线索命中”更严：那位负责面板点名，这位负责凭据守门。
 func entryIsCodex(file pluginapi.HostAuthFileEntry) bool {
 	if provider := strings.ToLower(strings.TrimSpace(file.Provider)); provider != "" {
 		return provider == "codex"

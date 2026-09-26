@@ -1,49 +1,37 @@
-// In-plugin offline harvester: collects __cflb/__oailb routing pairs straight
-// from the upstream, without routing through CPA or touching any CPA state.
+// 插件里的离线采集员直接向上游收 __cflb/__oailb 路由 pair；
+// 不借 CPA 的柜台过账，也不碰它的状态。
 //
-// # Why direct, and why that is safe
+// # 为什么自己跑腿，而不是把整间店翻过来
 //
-// The earlier design harvested by driving CPA: it disabled every Codex account
-// but one (so a harvest on CPA's own response hook could be attributed), PATCHed
-// a proxy into the credential, POSTed to CPA's /v1/responses, and restored all
-// of that afterwards. It cost a real incident when a run died mid-flip and left
-// credentials disabled, and it could never run alongside business traffic.
+// 旧方案为让 CPA 响应钩子认出账号，先禁用其余 Codex 账号，
+// 再 PATCH 代理到凭据、POST CPA 的 /v1/responses，最后逐项恢复。
+// 曾有一次中途散场，凭据留在禁用状态，真把营业掀了桌；也无法与业务并行。
 //
-// This harvester instead reads each account's own access_token out of its
-// credential file (a read-only management call, never a write) and calls
-// https://chatgpt.com/backend-api/codex/responses directly, as that account,
-// through that account's own exit. CPA never sees the request. What the
-// response carries is a GLOBAL routing credential -- a minted pair works for
-// any account -- so which credential minted it does not matter, and every
-// account stays enabled.
+// 现在只用只读管理调用，从账号自己的凭据文件读取 access_token，
+// 经该账号出口直连 https://chatgpt.com/backend-api/codex/responses。
+// CPA 看不到这次请求。响应给的是 GLOBAL 路由凭据：pair 可供任意账号使用，
+// 哪个账号铸出来不影响入池，所有账号照常营业。
 //
-// Three rules make it safe to run against live credentials:
-//   - It never writes anything to CPA. The only CPA calls are two GETs:
-//     auth-files (the account list) and auth-files/download (one token).
-//   - It never refreshes a token. An expired token is skipped and left for CPA
-//     to refresh in its own business; refreshing here could rotate the refresh
-//     token and break live traffic. (Access tokens were measured good for days,
-//     so this costs almost nothing.)
-//   - Steering and collection now coexist in one process: the business role
-//     reads the pool on the request hook while this goroutine fills it.
+// 拿着真实凭据，也得守三条柜台规矩：
+//   - 绝不写 CPA；只发两个 GET：auth-files 取名单，auth-files/download 取 token。
+//   - 绝不刷新 token；过期就跳过，留给 CPA 在正常业务中刷新。
+//     这里刷新可能轮换 refresh token，把线上客人的凳子抽走。
+//     access token 实测能活数天，这点克制代价很小。
+//   - 采集与引导同进程各做各的：business 请求钩子读池，本 goroutine 往池里补货。
 //
-// # Renewal
+// # 续期不是等锅冷了再找柴
 //
-// A minted pair is declared for one hour (oailb Max-Age=3600, cflb Expires=+1h,
-// the oailb JWT itself signs iat+3900s) and measured serving well past the old
-// ~240s ticket window. The run does not stop after the first fill: it keeps a
-// background loop that mints fresh pairs once the pool's best entry drops under
-// probeRenewThreshold of life left, so the pool stays warm for as long as CPA
-// serves traffic. That is the operator's "到期前自动续一遍".
+// pair 的 HTTP 声明为一小时：oailb Max-Age=3600、cflb Expires=+1h，
+// oailb JWT 自己签的是 iat+3900s；实测可用时间远超旧票的 ~240s 窗口。
+// 首轮补满不收摊：池中最长寿条目的余量低于 probeRenewThreshold 就后台补 pair，
+// 只要 CPA 还营业就保持池子有货，这才是“到期前自动续一遍”。
 //
-// # What must never leak out of this file
+// # 这些东西不能拿到台前当道具
 //
-// probeRunState.Lines is rendered on a page that needs no key. No token,
-// turn-state value, cookie value, or proxy userinfo may reach it: proxies
-// render through probeShowProxy/maskProxyURL, account names through
-// maskAuthLabel (they carry a customer email), and everything bound for Lines
-// passes probeRedact as a second line of defence. The management key this file
-// reads is never logged.
+// probeRunState.Lines 会显示在无需密钥的页面上。
+// token、turn-state、cookie 原值和代理 userinfo 都不能登台：代理经
+// probeShowProxy/maskProxyURL，含客户邮箱的账号名经 maskAuthLabel，
+// 所有写入 Lines 的文字再过 probeRedact 这道门。读到的管理密钥也绝不记日志。
 package main
 
 import (
@@ -65,143 +53,100 @@ import (
 	"time"
 )
 
-// The two read-only management routes this harvester uses. Named here rather
-// than inline so a correction for a different CPA build is a one-line change.
-// Nothing else is called on CPA -- there is deliberately no write route in this
-// file any more.
+// 采集员只认这两条只读管理路由，集中挂牌便于不同 CPA 构建改一处就换门牌。
+// 不调用其他 CPA 路由，尤其没有写路由；跑堂不能顺手改账本。
 const (
 	probeRouteAuthFiles    = "/v0/management/auth-files"
 	probeRouteAuthDownload = "/v0/management/auth-files/download"
 )
 
-// The upstream endpoint and the client identity a probe presents. Both are vars
-// so a test can point them at an httptest server; production never writes them.
-// probeUserAgent mirrors a real codex-tui build, and the call goes out as the
-// same account CPA uses, from the same box -- so the upstream sees nothing it
-// would not see from ordinary Codex traffic.
+// 上游端点与探针身份用 var 留给测试换成 httptest 的假柜台，生产不改。
+// probeUserAgent 对齐真实 codex-tui 构建；同机器、同 CPA 账号发请求，
+// 上游看到的仍是普通 Codex 流量这身衣服，不另戴一顶神秘帽子。
 var (
 	probeUpstreamURL = "https://chatgpt.com/backend-api/codex/responses"
 	probeUserAgent   = "codex-tui/0.154.0 (Ubuntu 24.04; x86_64) OVH (codex-tui; 0.154.0)"
 )
 
 const (
-	// probeMaxLines bounds the transcript. Keeping the last forty lines is enough
-	// to say where a run is and why, and it means the run state cannot grow
-	// without limit in a process meant to stay up for weeks.
+	// probeMaxLines 给流水账封顶，只留最近四十行交代进度与缘由。
+	// 进程要开张数周，不能让账本胖到把柜台压塌。
 	probeMaxLines = 40
 
-	// probeFireTimeout bounds one upstream call. Only the response headers are
-	// wanted and they arrive before the SSE body, so this is generous; it exists
-	// to stop a hung exit pinning a goroutine.
+	// probeFireTimeout 管住单次上游调用，只等先于 SSE 正文到达的响应头。
+	// 时间给得宽，仍得有闹钟，免得故障出口把 goroutine 留作人质。
 	probeFireTimeout = 60 * time.Second
 	probeMgmtTimeout = 30 * time.Second
 
-	// probeMaxAccountsInFlight bounds how many CREDENTIALS are worked at once, not
-	// how many requests are open. Each account is driven by a single goroutine
-	// that walks its buckets one at a time, so this is also the ceiling on
-	// simultaneous upstream requests -- and, more importantly, it guarantees one
-	// account never has two requests in flight.
+	// probeMaxAccountsInFlight 数的是同时工作的凭据，不是随意放飞的请求。
+	// 每账号只派一个 goroutine，逐桶办理，因此也是同时在途请求的上限，
+	// 尤其保证同一账号不会两路同时敲门。
 	//
-	// That distinction is the whole point. The rate limit upstream enforces is
-	// per account: on 2026-09-18 a run fired six buckets x ten exits with no
-	// pacing, 60 requests in four seconds, ~7.5/s against each of two accounts,
-	// and the upstream answered 21 of them with 429 -- a rate limit this probe
-	// inflicted on itself, on credentials that had been answering normally a
-	// moment earlier.
+	// 上游限速认账号，不认我们嗓门：2026-09-18 曾把六桶 × 十出口连着打，
+	// 四秒发 60 请求，两个账号各约 ~7.5/s，结果 21 次 429。
+	// 本来正常营业的凭据，被探针自己敲成了关门谢客。
 	probeMaxAccountsInFlight = 4
 
-	// probeMaxBodyBytes caps what is read from a response. Only headers matter, so
-	// this is just a small polite drain that lets a socket be reused without
-	// pulling an SSE stream into the heap.
+	// probeMaxBodyBytes 只允许少量排空正文，照顾 socket 复用。
+	// 要的是响应头，不是把整条 SSE 长卷搬进堆内存当桌布。
 	probeMaxBodyBytes = 1 << 10
 
-	// probeMgmtMaxBodyBytes caps management-API responses (auth-files, token
-	// download). CPA's auth-files entries carry quota/cooldown/recent-request
-	// payloads, so a handful of credentials is already tens of KB -- the old
-	// 64KB cap truncated mid-document and surfaced as "unexpected end of JSON".
-	// The documents are generated by our own CPA, so the cap only needs to stop
-	// a misconfigured base_url pulling an unbounded response into memory.
+	// probeMgmtMaxBodyBytes 限制 auth-files 与 token 下载的响应大小。
+	// CPA 名单带配额、冷却、近期请求，几个凭据就有数十 KB；旧 64KB 上限
+	// 曾把 JSON 拦腰切断，报成 “unexpected end of JSON”，切菜刀背了语法锅。
+	// 正文来自自家 CPA，上限主要防错配 base_url 把无底洞灌进内存。
 	probeMgmtMaxBodyBytes = 4 << 20
 )
 
-// Renewal cadence. Vars so tests can shrink them; production never writes them.
-// The pool is topped up once its best live entry has under probeRenewThreshold
-// of life left, checked every probeRenewInterval. The cadence deliberately
-// OVERLAPS the pair's declared hour rather than renewing at the edge:
-// minting at T+(ttl-threshold) means the outgoing pair still has real life in
-// hand, so a failed renewal costs overlap margin instead of a dead pool.
-// Cost is one call per exit per renewal window, which is what keeps fresh
-// pairs in the pool.
+// 续期节奏用 var 让测试拨快时钟，生产不动这口钟。
+// 每隔 probeRenewInterval 检查最长寿 pair，余量低于 probeRenewThreshold 就补货。
+// 在 T+(ttl-threshold) 动身，与声明的一小时窗口重叠，不能等最后一秒才借梯子。
+// 续期失败先消耗重叠余量，不立即变成空池；每个续期窗口每出口一次调用。
 var (
 	probeRenewInterval  = 20 * time.Second
 	probeRenewThreshold = 120 * time.Second
 
-	// probeExitCooldown is the minimum gap between two upstream calls on the same
-	// (exit, account, model) triple when the call did NOT produce a pair, and
-	// it is the whole answer to the defect this replaced: a target that could not
-	// be filled was re-fired every tick forever. Measured on 2026-09-18, that was
-	// 540 upstream calls an hour, every one of them a 312, all against
-	// credentials that were already being throttled -- which is precisely the
-	// pattern a rate limiter punishes.
+	// probeExitCooldown 管未产出 pair 的 (exit, account, model) 三人小队。
+	// 同一组合两次上游调用至少隔这段时间，不能每 tick 去敲同一扇空门。
+	// 2026-09-18 实测旧逻辑每小时打 540 次，全是 312，凭据本就在限流，
+	// 还不断上门问为什么不接客，正是限速器要挡的动静。
 	//
-	// A SUCCESSFUL mint does not rest this long: it shortens to
-	// probeSuccessRest, because the exit that just minted is exactly
-	// the exit the renewal wants to redial when the pool ages out. The 55
-	// minutes below is for a spent-or-throttled triple only -- an IP that just
-	// answered 312 has nothing to give this window, so it sits out a
-	// conservative hour-ish.
+	// 成功铸票则缩短为 probeSuccessRest：续期还要请这位有货的老伙计。
+	// 下面 55 分钟只让耗尽或限流的组合坐冷板凳；刚回 312 的 IP 保守歇近一小时。
 	probeExitCooldown = 55 * time.Minute
 
-	// probeExitPause spaces the exits of one target apart. Without it a ten-entry
-	// pool is ten back-to-back requests on one credential in about a second,
-	// which is exactly how the 2026-09-18 run earned its 429s -- and the bigger
-	// the pool the worse it gets, so the pool the operator added to improve
-	// coverage was making the burst sharper instead.
+	// probeExitPause 让同一目标的出口依次留出空拍。
+	// 十个出口若一秒内轮流敲同一凭据，便重演 2026-09-18 的 429；
+	// 池子越大锣鼓越急，本想扩大覆盖，反把突发越敲越响。
 	//
-	// Two seconds costs nothing that matters: a triple is retried at most once
-	// per probeExitCooldown, so a pass that takes a minute instead of four
-	// seconds is invisible, while the burst it removes is not.
+	// 间隔两秒不伤筋骨：同一组合最多每 probeExitCooldown 重试一次，
+	// 一轮走一分钟还是四秒影响很小，消掉那阵突发才有用。
 	probeExitPause = 2 * time.Second
 
-	// probeRotatingAttempts is how many upstream calls one target may spend on
-	// the rotating pool in a single visit, and probeRotatingCooldown is how
-	// long that target rests afterwards if none of them produced a pair.
+	// probeRotatingAttempts 是每次访问轮换池的调用预算，
+	// 全未产出 pair 时按 probeRotatingCooldown 歇场。
 	//
-	// These exist because a rotating proxy breaks the assumption the static
-	// cooldown is built on. There, one URL is one IP, a 312 means that IP is
-	// throttled, and re-dialing it inside the window is pointless -- so one
-	// attempt per 55 minutes is exactly right. A rotating URL hands out a
-	// different residential address on every connection (measured 2026-09-19:
-	// twenty consecutive requests through one entry, twenty distinct addresses),
-	// so the very retry the static rule forbids is the one thing that can clear a
-	// 312. Applying the static window to a rotating pool throws away all but 1/N
-	// of what it provides.
+	// 静态代理一 URL 一 IP，312 后每 55 分钟一次才有意义；轮换门牌却不一样。
+	// 2026-09-19 实测同一入口连续二十次请求拿到二十个住宅地址，
+	// 下一次重拨才有机会离开返回 312 的地址。套静态冷却只用到轮换能力的 1/N。
 	//
-	// The numbers are the operator's: ten attempts, then ten minutes. That is up
-	// to 60 calls per target per hour, which is a real cost and is deliberately
-	// chosen -- note it does NOT raise the instantaneous rate, which is what
-	// actually earned the 429s on 2026-09-18: one goroutine per account and
-	// probeExitPause between calls still cap a single credential at roughly one
-	// request every two seconds.
+	// 用户选定十次尝试后等十分钟，即每目标每小时最多 60 次，账要明白记。
+	// 这不提高瞬时速率：仍每账号一个 goroutine，每次隔 probeExitPause，
+	// 单凭据大约两秒一次，不重演 2026-09-18 的突发 429。
 	//
-	// What is knowingly absent is an escalating backoff. An account throttled at
-	// the account level answers 312 (not 429) indefinitely, and nothing here will
-	// notice or slow down; the only automatic brake is the 429 path. That was the
-	// operator's call.
+	// 没有递增退避是明确取舍，不是藏着灵药：账号级限流若一直回 312 而非 429，
+	// 这里不会自动察觉并减速；自动刹车只认 429 路径。
 	probeRotatingAttempts = 10
 	probeRotatingCooldown = 10 * time.Minute
 
-	// probeAccountBackoff is how long a credential is left alone after the
-	// upstream signals an account-level refusal (429, or a rejected token).
-	// Distinct from probeExitCooldown because the signal is distinct: a 312 says
-	// "this exit's IP is throttled for this account", which the next exit may not
-	// be, but a 429 says "you are asking too often" -- and answering that by
-	// dialing a different IP is the one response guaranteed to make it worse.
+	// probeAccountBackoff 让收到账号级拒绝（429 或 token 被拒）的凭据歇场。
+	// 它不等于 probeExitCooldown：312 指向这个账号、模型下的出口 IP，
+	// 另一个出口可能可用；429 是账号被嫌问得太勤，换门牌继续敲只会更吵。
 	probeAccountBackoff = 10 * time.Minute
 )
 
-// probeRunState is the snapshot the dashboard polls. It carries progress and
-// prose and no credential of any kind: see the file comment on Lines.
+// probeRunState 是面板轮询的场记快照，只带进度与说明，不带任何凭据。
+// Lines 不是保险柜，脱敏规矩见文件开头。
 type probeRunState struct {
 	Running    bool     `json:"running"`
 	StartedAt  string   `json:"started_at,omitempty"`
@@ -213,27 +158,24 @@ type probeRunState struct {
 	Error      string   `json:"error,omitempty"`
 }
 
-// probeRunner holds the single in-process run. There is deliberately only one at
-// a time: the run owns the renewal loop, and a second run would start a second
-// loop minting the same pairs on the same credentials for no gain. The run
-// no longer mutates any CPA state -- the harvest is a direct call to the
-// upstream -- so a stop is a clean cancel with nothing to put back.
+// probeRunner 只容纳一个进程内任务；续期循环由它独占，
+// 另开一队只会拿同一凭据重复铸同样的 pair，忙得热闹却不添菜。
+// 采集直连上游，不再改 CPA 状态，所以停止只需取消，没有账要回填。
 var probeRunner struct {
 	mu     sync.Mutex
 	run    probeRunState
 	cancel context.CancelFunc
 }
 
-// probeTarget is one (account, payload-model) pair the harvester intends to
-// fire. The minted pair itself is model-agnostic -- model only fills the
-// upstream payload, so every target uses the first configured model.
+// probeTarget 是准备出门的 (account, payload-model) 搭档。
+// pair 不绑模型，模型只给上游载荷填名牌，因此各目标使用首个已配模型。
 type probeTarget struct {
 	account string
 	model   string
 }
 
-// probeCredential is one account's usable state, read once from its credential
-// file. It holds a secret (accessToken) and must never be logged.
+// probeCredential 从账号文件读一次可用状态，口袋里有 accessToken 秘密。
+// 这位不能登日志公告栏。
 type probeCredential struct {
 	name        string
 	accessToken string
@@ -242,9 +184,8 @@ type probeCredential struct {
 	expiresAt   time.Time
 }
 
-// probeRunStart validates the run and launches it in the background. It returns
-// nil once the goroutine is on its way, or an error explaining the refusal --
-// and a refusal changes nothing at all.
+// probeRunStart 先验入场手续再启动后台 goroutine，动身后返回 nil。
+// 不准开场就返回拒绝原因，柜台原状不动一笔。
 func probeRunStart() error {
 	state.mu.Lock()
 	cfg := state.config
@@ -257,9 +198,8 @@ func probeRunStart() error {
 
 	switch {
 	case len(accounts) == 0:
-		// No fallback to "all of them": minting spends one upstream request per
-		// account and per renewal, so "nothing selected means everything" is the one
-		// mistake that quietly burns quota on credentials the operator did not pick.
+		// 没选账号不能翻译成“全店都请”：每账号、每次续期都花一个上游请求。
+		// 把空名单当全名单，会悄悄替用户没点名的凭据付配额账。
 		return fmt.Errorf("probe_accounts is empty, so there is nothing to probe; refusing to widen an empty selection to every credential")
 	case len(models) == 0:
 		return fmt.Errorf("models is empty, so there is no payload to mint with")
@@ -285,10 +225,8 @@ func probeRunStart() error {
 	return nil
 }
 
-// probeRunCancel asks the running probe to stop. It returns false when nothing
-// was running. Cancellation ends the initial sweep and the renewal loop; there
-// is no credential state to restore, because the offline harvest never changed
-// any.
+// probeRunCancel 通知初始扫描与续期循环收摊，无任务时返回 false。
+// 离线采集没改过凭据，停场无需再把别人的椅子搬回原位。
 func probeRunCancel() bool {
 	probeRunner.mu.Lock()
 	defer probeRunner.mu.Unlock()
@@ -300,8 +238,8 @@ func probeRunCancel() bool {
 	return true
 }
 
-// probeRunSnapshot returns a copy of the run state, Lines included. The copy is
-// what makes it safe to hand to a JSON encoder while the run keeps appending.
+// probeRunSnapshot 连 Lines 一起复制快照再交给 JSON 编码器。
+// 任务继续添账时，编码器读自己的那本，不抢同一支笔。
 func probeRunSnapshot() probeRunState {
 	probeRunner.mu.Lock()
 	defer probeRunner.mu.Unlock()
@@ -310,20 +248,17 @@ func probeRunSnapshot() probeRunState {
 	return out
 }
 
-// probeRunUpdate mutates the run state under the one mutex that guards it.
+// probeRunUpdate 拿到守护状态的那把互斥锁才改账，别两位掌柜同时涂数字。
 func probeRunUpdate(mutate func(run *probeRunState)) {
 	probeRunner.mu.Lock()
 	defer probeRunner.mu.Unlock()
 	mutate(&probeRunner.run)
 }
 
-// probeRunLog appends one line to the transcript and mirrors it to the process
-// log.
+// probeRunLog 向流水账添一行，并同步到进程日志。
 //
-// Every line goes through probeRedact first. Callers are expected to have masked
-// any proxy URL already, with maskProxyURL, and any account name with
-// maskAuthLabel; this is the second line of defence, not the first, and it
-// exists because Lines is served to a reader who has presented no key.
+// 每行先过 probeRedact；调用方仍应先用 maskProxyURL 与 maskAuthLabel
+// 遮好代理和账号。这是第二道门，不是第一道：Lines 的读者没有出示密钥。
 func probeRunLog(format string, args ...any) {
 	line := probeRedact(fmt.Sprintf(format, args...))
 	probeRunUpdate(func(run *probeRunState) {
@@ -332,8 +267,7 @@ func probeRunLog(format string, args ...any) {
 	log.Printf("%sprobe %s", logPrefix, line)
 }
 
-// probeRunFail records the reason a run stopped. The first error wins: what went
-// wrong first is what the operator needs, and anything after it is a consequence.
+// probeRunFail 只记最早把任务绊倒的原因，后来摔倒的杯碟别抢主因的座位。
 func probeRunFail(errRun error) {
 	if errRun == nil {
 		return
@@ -348,8 +282,8 @@ func probeRunFail(errRun error) {
 	log.Printf("%sprobe error: %s", logPrefix, message)
 }
 
-// probeRunFinish marks the run over. It is the outermost defer in probeSweep and
-// runs once the renewal loop has returned on cancel.
+// probeRunFinish 在 probeSweep 最外层 defer 收尾。
+// 续期循环取消并返回才算散场，不能演员还在后台就先熄灯。
 func probeRunFinish() {
 	probeRunner.mu.Lock()
 	defer probeRunner.mu.Unlock()
@@ -362,25 +296,22 @@ func probeRunFinish() {
 	}
 }
 
-// probeAppendLine adds one timestamped line and keeps the transcript bounded.
+// probeAppendLine 给新行盖时间戳并限制流水账长度，不把收据养成无底长卷。
 func probeAppendLine(lines []string, line string) []string {
 	lines = append(lines, time.Now().UTC().Format("15:04:05")+" "+line)
 	if len(lines) > probeMaxLines {
-		// Copied rather than resliced: a reslice would keep the whole original
-		// backing array alive, which is the opposite of the point.
+		// 真复制，不只改切片边界；后者仍吊着整块底层数组，像说搬家却把旧楼背走。
 		lines = append([]string(nil), lines[len(lines)-probeMaxLines:]...)
 	}
 	return lines
 }
 
-// probeSweep is the whole run: read credentials, mint one pair per account once,
-// then stay up renewing them. It is the only goroutine this file starts.
+// probeSweep 总管这场戏：读凭据、每账号首轮铸 pair，再留守续期。
+// 这是本文件启动整场任务的 goroutine，别把首轮上菜误认成关门。
 func probeSweep(ctx context.Context, cfg pluginConfig, accounts, models, proxies, rotating []string) {
-	// Registered first, so it runs last: the run is not "finished" until the
-	// renewal loop below has returned.
+	// 先登记的 defer 最后走；下面续期循环没返回，收工锣就不能响。
 	defer probeRunFinish()
-	// A panic in a native plugin takes the whole CPA process with it, so this
-	// goroutine catches its own.
+	// 原生插件的 panic 会掀翻整个 CPA 进程，这个 goroutine 得自己接住飞来的盘子。
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			probeRunFail(fmt.Errorf("probe panicked: %v", recovered))
@@ -397,8 +328,7 @@ func probeSweep(ctx context.Context, cfg pluginConfig, accounts, models, proxies
 		probeRunFail(fmt.Errorf("could not list Codex credentials: %w", errList))
 		return
 	}
-	// A selected account CPA does not know about would make the run quietly cover
-	// less than was asked for, so it stops instead.
+	// 选中名单里若有 CPA 不认识的账号就停场，不能少请一位却假装全员到齐。
 	known := make(map[string]bool, len(auths))
 	for _, auth := range auths {
 		known[auth.Name] = true
@@ -423,10 +353,8 @@ func probeSweep(ctx context.Context, cfg pluginConfig, accounts, models, proxies
 	probeRunLog("offline harvest: %d account(s) to mint a pair each, %d static exit(s) + %d rotating entr(ies)", len(targets), len(proxies), len(rotating))
 	if len(targets) > 0 {
 		if cooling := probeFireBatch(ctx, cfg, pool, creds, targets, idxOf, proxies, rotating, true); cooling > 0 {
-			// Said once per pass rather than per target per tick: the common case
-			// after a recent sweep is that most exits are still inside the
-			// window, and an operator who just pressed the button needs to be told
-			// why nothing happened.
+			// 每轮只解释一次，不按目标、tick 反复报幕。
+			// 刚扫描完多数出口仍在冷却，用户按了按钮要知道为何没动静，不需要听复读戏。
 			probeRunLog("%d target(s) skipped: every exit already tried within the %s cooldown", cooling, probeExitCooldown)
 		}
 	} else {
@@ -438,17 +366,14 @@ func probeSweep(ctx context.Context, cfg pluginConfig, accounts, models, proxies
 		return
 	}
 
-	// The run does not end here. Steering needs live pairs for as long as CPA
-	// serves traffic, so the goroutine stays up and mints fresh pairs before
-	// the pool's best entry expires -- the operator's "到期前自动续一遍". It
-	// runs until the run is cancelled or the plugin reloads.
+	// 首轮结束不等于散席；CPA 仍营业，引导就仍需活 pair。
+	// 池中最长寿条目快到期前自动补一遍，直到任务取消或插件重载才收摊。
 	probeRunLog("initial fill done; renewal active — the pool re-mints automatically within %s of the best entry's expiry", probeRenewThreshold)
 	probeRunUpdate(func(run *probeRunState) { run.Current = "renewal active" })
 	probeRenewLoop(ctx, pool)
 }
 
-// probeAccountIndex maps each selected account to its position, which is the
-// index probeExits uses to assign the proxy pool in order.
+// probeAccountIndex 给选中账号排座次，probeExits 按此顺序分配代理入口。
 func probeAccountIndex(accounts []string) map[string]int {
 	idx := make(map[string]int, len(accounts))
 	for i, name := range accounts {
@@ -457,16 +382,13 @@ func probeAccountIndex(accounts []string) map[string]int {
 	return idx
 }
 
-// probeFireBatch harvests a set of targets concurrently, bounded by
-// probeMaxAccountsInFlight. countDone advances the progress bar (the initial fill wants
-// it; a renewal tick does not, having no fixed Total). It is the shared fan-out
-// for both callers so the concurrency rule lives in one place.
+// probeFireBatch 统一并发出场口，受 probeMaxAccountsInFlight 约束。
+// 首轮 countDone 推进进度条；续期没有固定 Total，就不拿它虚报进度。
+// 两边共走这一扇门，免得各自给并发上限开后门。
 func probeFireBatch(ctx context.Context, cfg pluginConfig, pool *probeClientPool, creds map[string]probeCredential, targets []probeTarget, idxOf map[string]int, proxies, rotating []string, countDone bool) int {
-	// Grouped by credential, and each credential gets ONE goroutine that walks its
-	// targets in turn. Fanning out over targets instead let several targets of the
-	// same account fire at once, which is how one credential saw ~7.5 requests a
-	// second and answered with 429. One goroutine per account means one request
-	// per account at a time, and probeExitPause spaces even those apart.
+	// 按凭据分组，每个只派一个 goroutine 依次办目标，不能按目标乱放队伍。
+	// 旧方式让同账号同时出门，曾达到 ~7.5 请求/秒而收到 429。
+	// 现在同账号同刻一请求，再用 probeExitPause 留空拍，队伍不挤成一团。
 	byAccount := make(map[string][]probeTarget, len(creds))
 	var order []string
 	for _, target := range targets {
@@ -482,9 +404,8 @@ func probeFireBatch(ctx context.Context, cfg pluginConfig, pool *probeClientPool
 	for _, account := range order {
 		cred, ok := creds[account]
 		if !ok {
-			// Its credential was unreadable or expired and already logged; count
-			// its targets done so the progress bar reaches Total rather than
-			// hanging short.
+			// 凭据不可读或已过期的原因已记账；目标仍计入 done。
+			// 失败也要点名退场，进度条才到 Total，不会永远欠一把椅子。
 			if countDone {
 				missing := len(byAccount[account])
 				probeRunUpdate(func(run *probeRunState) { run.Done += missing })
@@ -516,42 +437,32 @@ func probeFireBatch(ctx context.Context, cfg pluginConfig, pool *probeClientPool
 	return int(cooling.Load())
 }
 
-// probeHarvestBucket mints a pair for one account by walking its exit
-// sequence: every exit that is out of cooldown gets one try, and the walk
-// stops at the first pooled pair. It is the one harvest path; the initial fill
-// and the renewal loop both call it, and the claim guard keeps them off each
-// other's targets.
+// probeHarvestBucket 沿账号出口队列取 pair：冷却已过的出口各试一次，
+// 首个成功入池即收队。初始补池与续期共用这条路，claim 防止彼此抢同一桌。
 //
-// It reports whether any upstream call was actually made. A target whose every
-// exit is still inside probeExitCooldown returns false without a word, which is
-// what keeps the renewal loop from narrating the same skip once a minute.
+// 返回是否真发过上游请求；全部出口还在 probeExitCooldown 就安静返回 false，
+// 免得续期循环每分钟朗诵同一份“今日歇业”。
 func probeHarvestBucket(ctx context.Context, cfg pluginConfig, pool *probeClientPool, cred probeCredential, model string, proxies, rotating []string, accountIdx int) bool {
 	key := bucketKey(cred.name, model)
 	if !probeClaim(key) {
-		// Another fire (the other loop, or an overtaking renewal tick) is already
-		// on this exact target. Firing a second upstream call for it would spend
-		// quota to overwrite a value with a near-identical one.
+		// 同一目标已经有人跑腿，可能是另一个循环或先到的续期 tick。
+		// 再发一次只会花配额拿近乎相同的值互相覆盖，不叫双倍勤快。
 		return false
 	}
 	defer probeRelease(key)
 
 	short := maskAuthLabel(cred.name)
 	if !probeAccountReady(cred.name, time.Now()) {
-		// The upstream asked for this credential to be left alone. Silent: the
-		// renewal loop would otherwise say so once a minute per bucket.
+		// 上游已请此凭据休息，就静默跳过；别让续期每分钟逐桶喊它起床。
 		return false
 	}
 
-	// Static exits first. Each one is a distinct IP with its own once-per-window
-	// budget, and an unspent budget simply expires -- so the perishable resource
-	// goes first and the rotating pool, which can be tapped at any time, picks up
-	// whatever is left.
+	// 静态出口先上桌：每 IP 每窗口一次预算，过窗未用便作废；
+	// 轮换池随时能领新地址，留它接剩下的活，不先浪费易过期的那份。
 	//
-	// The empty pool must NOT become a direct attempt when a rotating pool exists.
-	// An empty probe_proxies has always meant "go out over the box's own egress",
-	// which is right when nothing else is configured and quite wrong once the
-	// operator has moved their whole pool to probe_proxies_rotating: it would send
-	// the harvest out over the server's own address behind their back.
+	// 有轮换池时，空静态池绝不能偷偷变成直连。
+	// probe_proxies 为空原指本机出口，仅在没有其他配置时合理；
+	// 用户把池全挪去 probe_proxies_rotating 后，不能背着他又从服务器地址出门。
 	staticExits := probeExits(proxies, accountIdx)
 	if len(proxies) == 0 && len(rotating) > 0 {
 		staticExits = nil
@@ -562,15 +473,13 @@ func probeHarvestBucket(ctx context.Context, cfg pluginConfig, pool *probeClient
 		if ctx.Err() != nil {
 			return fired
 		}
-		// Space the exits apart. Only after a real attempt -- skipping a cooling
-		// exit costs nothing and should not be paced.
+		// 只给真正发出的尝试留空拍；跳过冷却出口不花请求，别空站着数拍子。
 		if fired && !probeSleep(ctx, probeExitPause) {
 			return fired
 		}
 		now := time.Now()
 		if !probeCooldownReady(exit, cred.name, model, now) {
-			// Spent within the window. Silent on purpose: saying so would put one
-			// line per bucket per tick into a forty-line transcript.
+			// 这个窗口已花过预算，安静略过；否则四十行流水账很快被逐桶逐 tick 的唠叨挤满。
 			continue
 		}
 		client, errClient := pool.get(exit)
@@ -579,39 +488,30 @@ func probeHarvestBucket(ctx context.Context, cfg pluginConfig, pool *probeClient
 			continue
 		}
 
-		// Marked before the call rather than after: a request that times out, or
-		// whose goroutine dies, still spent an attempt on this triple, and the
-		// guarantee being kept is that the upstream sees at most one call per
-		// triple per window.
+		// 调用前先记预算，不能吃完才记账。
+		// 请求超时或 goroutine 中途退场也已经花了一次，保证同组合每窗口至多一次上游调用。
 		probeCooldownMark(exit, cred.name, model, now)
 		fired = true
 
 		res, errFire := probeFireUpstream(ctx, client, cred, model)
 		if errFire != nil {
-			// A transport failure means this exit did not carry the request at all;
-			// the next one might.
+			// 传输没走通说明这条出口没把请求送到；换下一位跑堂还有机会。
 			probeRunLog("%s %s: exit %s failed at transport, trying next: %s", short, model, probeShowProxy(exit), probeRedact(errFire.Error()))
 			continue
 		}
 		switch probeConsume(cfg, cred.name, short, model, res, exit) {
 		case probeOutcomeStored:
-			// The exit that just minted is the one the renewal wants again at
-			// T+(ttl-threshold), so its rest is shortened from the spent-triple
-			// window to exactly that. Leaving the full 55 minutes in place would
-			// make the pair unrenewable: it dies at its declared deadline.
+			// 刚铸成功的出口到 T+(ttl-threshold) 还得回来续期，休息应对齐该时刻。
+			// 若仍罚坐满 55 分钟，pair 按声明到期时就没人接班了。
 			probeCooldownSet(exit, cred.name, model, time.Now().Add(probeSuccessRest(cfg)))
 			return true
 		case probeOutcomeAccountLimited:
-			// Account-level refusal: every remaining exit carries the same
-			// credential, so walking on would only deepen it.
+			// 账号级拒绝不是门牌故障；剩下出口带的仍是同一凭据，再走只会添乱。
 			probeAccountSetBackoff(cred.name, time.Now())
 			return fired
 		}
-		// Not stored -- a 312. That is THIS EXIT's IP being
-		// throttled for this account and model, not the bucket being unfillable,
-		// so the next exit is a different IP and gets its turn. This is the fix
-		// for the defect where a 312 ended the attempt outright and the rest of
-		// the pool was never dialed at all.
+		// 没记成功而回 312，指向这个账号与模型下的当前出口 IP，不代表整桶没救。
+		// 下一出口换 IP 后仍应轮到它；旧逻辑见 312 就收摊，整池其他门都没敲过。
 	}
 
 	if len(rotating) > 0 {
@@ -624,19 +524,12 @@ func probeHarvestBucket(ctx context.Context, cfg pluginConfig, pool *probeClient
 	return fired
 }
 
-// probeHarvestRotating spends up to probeRotatingAttempts calls on the rotating
-// pool for one bucket, cycling through the configured entries.
+// probeHarvestRotating 每桶最多花 probeRotatingAttempts 次，轮流用配置入口。
+// 常见入口是同一网关的不同凭据，轮用分担负载，每次调用仍拿新地址；
+// 起点取账号索引，让并行账号别齐步冲向同一柜台。
 //
-// Cycling rather than picking one entry matters when the entries are separate
-// credentials on one gateway, which is the common shape: it spreads the load
-// across them while every individual call still gets a fresh address. The
-// starting offset is the account index so two accounts working at once do not
-// march in lockstep through the same entry.
-//
-// The budget is claimed up front, at the failure window, and only upgraded to
-// the full window once a template is actually stored. Claiming first is the same
-// guarantee the static path makes -- a run that is cancelled or dies midway has
-// still spent these attempts, and must not come back and spend them again.
+// 先按失败窗口占预算，实际存入模板后才调整成功窗口。
+// 取消或中途退场也算花过尝试，与静态路径一样先记账，不能回来再点一份免单。
 func probeHarvestRotating(ctx context.Context, cfg pluginConfig, pool *probeClientPool, cred probeCredential, short, model string, rotating []string, accountIdx int) (stored, fired bool) {
 	now := time.Now()
 	if !probeCooldownReady(probeRotatingExit, cred.name, model, now) {
@@ -666,20 +559,16 @@ func probeHarvestRotating(ctx context.Context, cfg pluginConfig, pool *probeClie
 		}
 		switch probeConsume(cfg, cred.name, short, model, res, exit) {
 		case probeOutcomeStored:
-			// Same renewal alignment as the static path: the gateway that just
-			// minted is wanted again at T+(ttl-threshold), not in an hour.
+			// 与静态队伍同一张续期钟表：刚铸成的网关在 T+(ttl-threshold) 再来，不必等一小时。
 			probeCooldownSet(probeRotatingExit, cred.name, model, time.Now().Add(probeSuccessRest(cfg)))
 			return true, fired
 		case probeOutcomeAccountLimited:
-			// A 429 is the credential being told to slow down. No address the
-			// gateway can hand out changes that, so the remaining attempts would
-			// only deepen it.
+			// 429 是让凭据慢点说话，不是让它换地址换口音；剩余尝试继续只会加重拒绝。
 			probeAccountSetBackoff(cred.name, time.Now())
 			return false, fired
 		}
-		// A 312: this address is throttled for this bucket. Unlike a static exit,
-		// the next attempt through the very same entry is a different address, so
-		// it is worth making -- that is the entire reason this pool is separate.
+		// 312 说明这次地址在该桶受限；轮换入口下次能换地址，值得继续。
+		// 静态门牌与轮换柜台分开记账，就是为了不把两位跑堂认成同一个人。
 	}
 	if fired {
 		probeRunLog("%s %s: rotating pool gave %d address(es), none of them a %d; resting this bucket for %s",
@@ -688,16 +577,12 @@ func probeHarvestRotating(ctx context.Context, cfg pluginConfig, pool *probeClie
 	return false, fired
 }
 
-// probeConsume decides what one upstream response means. The harvest target is
-// the __cflb/__oailb pair itself: a 200 that set one is a stored result, and a
-// degraded or failed response that set one still feeds the pool -- the pair is
-// minted at the edge and does not depend on the serving state the turn got.
+// probeConsume 判定响应该让出口队伍继续还是收场。
+// 要收的是 __cflb/__oailb pair：200 带 pair 可记成功；降级或失败带的 pair 也入池，
+// 因为 pair 是边缘铸的，不靠本轮服务状态吃饭。
 //
-// Whatever the verdict, the pair goes into the GLOBAL pool keyed by its own
-// value -- account-agnostic, so which credential happened to mint it does not
-// matter. The outcome it reports is what tells the caller to stop walking the
-// exits: anything else means this exit did not produce and the next one
-// deserves a turn.
+// pair 始终按自身值进入 GLOBAL 池，不绑铸造账号。
+// 但入池与出口记成功是两本账：返回结果决定是否停止换出口，别把收据当奖状。
 func probeConsume(cfg pluginConfig, name, short, model string, res probeFireResult, exit string) probeOutcome {
 	if len(res.cookies.pairs) > 0 {
 		state.mu.Lock()
@@ -706,14 +591,13 @@ func probeConsume(cfg pluginConfig, name, short, model string, res probeFireResu
 	}
 	switch res.status {
 	case http.StatusTooManyRequests:
-		// The credential is being told to slow down. Every remaining exit would
-		// carry the same credential, so the walk stops here and the account
-		// rests; continuing is what escalated a 312 into a wall of 429s.
+		// 凭据被要求降速，所有剩余出口仍拿同一凭据；到此收队让账号休息。
+		// 继续硬敲曾把零星 312 敲成整墙 429，不是勤奋，是添堵。
 		probeRunLog("%s %s: http=429 — upstream is rate limiting this credential, not this exit; stopping the walk and resting the account for %s",
 			short, model, probeAccountBackoff)
 		return probeOutcomeAccountLimited
 	case http.StatusUnauthorized, http.StatusForbidden:
-		// A rejected token is equally not the exit's fault.
+		// token 被拒也不是出口的错，换辆轿子不能换掉乘客的身份。
 		probeRunLog("%s %s: http=%d — the credential was refused, no exit can change that; resting the account for %s",
 			short, model, res.status, probeAccountBackoff)
 		return probeOutcomeAccountLimited
@@ -724,18 +608,15 @@ func probeConsume(cfg pluginConfig, name, short, model string, res probeFireResu
 	}
 	stateLen := len(res.stateValue)
 	if stateLen == cfg.ReplaceLength {
-		// The upstream answered degraded for this exit's IP. Any pair it set was
-		// still pooled above -- the edge mints the pair regardless of serving
-		// state -- but the exit earns no success: the next exit is a different
-		// node and gets its turn.
+		// 当前 IP 回了降级；响应里的 pair 已在上面入池，边缘照样会铸它。
+		// 出口本身不记成功，下一出口换节点继续试，别把收下房卡误算成赢了比赛。
 		probeRunLog("%s %s: http=200 via %s answered degraded (len=%d)%s — this exit's IP is throttled, trying next",
 			short, model, probeShowProxy(exit), stateLen, pooledSuffix(res.cookies.pairs))
 		return probeOutcomeTryNext
 	}
 	if len(res.cookies.pairs) == 0 {
-		// A 200 with no Set-Cookie pair is the response a steered request gets --
-		// we fire bare precisely so the edge assigns a node and mints one, so a
-		// bare request coming back pairless means the edge declined to mint.
+		// 200 却无 Set-Cookie pair，通常是已引导请求的样子。
+		// 这里故意裸发求新节点和 pair，裸发仍空手回来，就表示边缘没给新房卡。
 		probeRunLog("%s %s: http=200 via %s but no __cflb/__oailb was set", short, model, probeShowProxy(exit))
 		return probeOutcomeTryNext
 	}
@@ -748,9 +629,8 @@ func probeConsume(cfg pluginConfig, name, short, model string, res probeFireResu
 	return probeOutcomeStored
 }
 
-// pooledSuffix renders the trailing note for a degraded response that still
-// contributed a pair, so the transcript says the cookie was kept rather than
-// implying the 312 discarded it.
+// pooledSuffix 给降级响应补一张小收据：pair 已收进池。
+// 不能让流水账误报“312 把 cookie 也一起扔了”。
 func pooledSuffix(pairs map[string]string) string {
 	if len(pairs) == 0 {
 		return ""
@@ -758,11 +638,8 @@ func pooledSuffix(pairs map[string]string) string {
 	return fmt.Sprintf(" (pair still pooled: %s)", orDash(gatewayLabel(pairs)))
 }
 
-// probeSuccessRest is how long a triple rests after a successful mint: until
-// its template wants renewing (ttl - probeRenewThreshold), which is when the
-// renewal loop queues the bucket anyway. Capped at probeExitCooldown: with a
-// long configured ttl the renewal boundary can land PAST the spent-triple
-// window, and a success must never rest longer than a failure.
+// probeSuccessRest 让成功组合休息到 ttl - probeRenewThreshold，正好接上续期。
+// 上限仍是 probeExitCooldown；ttl 配得再长，成功者也不能比失败者罚坐更久。
 func probeSuccessRest(cfg pluginConfig) time.Duration {
 	rest := cfg.ttl() - probeRenewThreshold
 	if rest < probeExitPause {
@@ -774,9 +651,8 @@ func probeSuccessRest(cfg pluginConfig) time.Duration {
 	return rest
 }
 
-// probeDownloadCreds reads each selected account's usable state once. An account
-// whose token is unreadable or already expired is dropped, with a line saying
-// which -- never a stack trace with a token in it.
+// probeDownloadCreds 每个选中账号读一次可用状态。
+// token 不可读或过期就退队并记脱敏原因，不把带 token 的堆栈当公告贴。
 func probeDownloadCreds(ctx context.Context, client *probeClient, accounts []string, now time.Time) map[string]probeCredential {
 	creds := make(map[string]probeCredential, len(accounts))
 	for _, name := range accounts {
@@ -794,11 +670,9 @@ func probeDownloadCreds(ctx context.Context, client *probeClient, accounts []str
 			probeRunLog("%s: credential unusable: %s", short, probeRedact(errParse.Error()))
 			continue
 		}
-		// Never refresh. An expired access token is skipped and left for CPA to
-		// refresh in the course of its own business; the next cycle reads the fresh
-		// one. Refreshing here could rotate the refresh token and pull the
-		// credential out from under live CPA traffic -- the one thing this whole
-		// offline design exists to avoid.
+		// 这里绝不刷新。access token 过期交给 CPA 在正常业务中刷新，下轮再读新值。
+		// 擅自刷新可能轮换 refresh token，把线上凭据从客人手里抽走；
+		// 离线采集整套规矩就是不掀别人正在吃的桌子。
 		if !cred.expiresAt.IsZero() && !cred.expiresAt.After(now) {
 			probeRunLog("%s: access token expired; skipping (not refreshed here — CPA refreshes it, next cycle harvests)", short)
 			continue
@@ -808,10 +682,9 @@ func probeDownloadCreds(ctx context.Context, client *probeClient, accounts []str
 	return creds
 }
 
-// probeRenewLoop keeps the store warm. Every probeRenewInterval it re-reads the
-// live scope (so an edit on the dashboard takes effect without a restart), finds
-// the in-scope buckets that are missing or under probeRenewThreshold of life,
-// and re-harvests them. It returns on cancel.
+// probeRenewLoop 每 probeRenewInterval 重读有效 scope，面板改动无需重启便能入戏。
+// 找出范围内缺货或余量低于 probeRenewThreshold 的桶补货，取消就退场。
+// 柜台保持热乎，不能只照开张时那份名单办事。
 func probeRenewLoop(ctx context.Context, pool *probeClientPool) {
 	ticker := time.NewTicker(probeRenewInterval)
 	defer ticker.Stop()
@@ -849,16 +722,13 @@ func probeRenewLoop(ctx context.Context, pool *probeClientPool) {
 		var due []probeTarget
 		involved := make(map[string]bool)
 		for _, account := range accounts {
-			// A credential the upstream told us to leave alone is skipped whole.
+			// 上游已点名让该凭据歇场，整位跳过，不拉它换张桌继续演。
 			if !probeAccountReady(account, now) {
 				continue
 			}
-			// The pair is model-agnostic, so the bucket dimension collapses to
-			// "mint once per usable credential": one model fills the payload.
+			// pair 不绑模型，桶维度收成“每个可用凭据铸一次”；模型只给载荷报个名。
 			model := models[0]
-			// Queue it only if some exit is actually allowed to fire. Without
-			// this the loop would download credentials once a minute only to
-			// find every triple still cooling.
+			// 真有出口能出门才排队，否则每分钟下载凭据，最后却发现全在冷却，白搬账本。
 			if !probeBucketHasEligibleExit(proxies, rotating, idxOf[account], account, model, now) {
 				continue
 			}
@@ -875,8 +745,7 @@ func probeRenewLoop(ctx context.Context, pool *probeClientPool) {
 		probeRunUpdate(func(run *probeRunState) {
 			run.Current = fmt.Sprintf("minting fresh pair(s), best entry has %s left", left.Round(time.Second))
 		})
-		// Download only the accounts that actually have something due, in scope
-		// order so the index still lines up with the proxy assignment.
+		// 只下载确有到期工作的账号，仍按 scope 座次取，免得代理分配认错人。
 		var accountList []string
 		for _, account := range accounts {
 			if involved[account] {
@@ -890,10 +759,8 @@ func probeRenewLoop(ctx context.Context, pool *probeClientPool) {
 	}
 }
 
-// probePoolSecondsLeft reports the longest life any pooled pair has left, and
-// whether any usable pair exists at all. The pool is global, so "the pool
-// needs a mint" is a single number, not a per-bucket question: the renewal
-// loop fires when the best entry crosses under probeRenewThreshold.
+// probePoolSecondsLeft 报池中最长剩余寿命及是否有可用 pair。
+// 全局池只需一只续期钟，不是每桶一只；最佳条目低于 probeRenewThreshold 才敲补货锣。
 func probePoolSecondsLeft(cfg pluginConfig, now time.Time) (time.Duration, bool) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -906,12 +773,9 @@ func probePoolSecondsLeft(cfg pluginConfig, now time.Time) (time.Duration, bool)
 	return time.Duration(best) * time.Second, best > 0
 }
 
-// probePendingTargets lists the targets a manual run fires. The pair is
-// account-agnostic and one usable credential is enough to mint it, but walking
-// every selected account still earns its keep: each account's mint lands on
-// whatever node the edge assigns, so more credentials means a pool spread over
-// more nodes. The model is only payload -- the pair carries no model binding --
-// so every target uses the first configured model.
+// probePendingTargets 列手动任务的目标。pair 不绑账号，一个可用凭据就能铸，
+// 但逐个走选中账号仍有用：边缘可能分配不同节点，让池子多几扇门。
+// 模型只是载荷名牌，pair 不绑它，因此每目标取首个配置模型，不另排模型大戏。
 func probePendingTargets(cfg pluginConfig, accounts, models []string) []probeTarget {
 	model := ""
 	if len(models) > 0 {
@@ -924,12 +788,9 @@ func probePendingTargets(cfg pluginConfig, accounts, models []string) []probeTar
 	return out
 }
 
-// probeExits is the order one account tries the pool in: its assigned exit first
-// (index i % N), then the rest in order, wrapping once. That satisfies both
-// readings of "assign the pool in order" -- account i starts at exit i -- and
-// gives every account a full fallback sequence if its first exit is down. An
-// empty pool yields a single direct attempt (the empty string), which the client
-// pool builds as a no-proxy transport.
+// probeExits 先走账号分配出口（索引 i % N），再顺序绕一圈尝遍其他出口。
+// 账号 i 从出口 i 起步，首门不通还有整队备选；不是只给名牌不给后路。
+// 空池给一个空字符串的直连尝试，客户端池会用无代理 transport 接待。
 func probeExits(proxies []string, accountIdx int) []string {
 	if len(proxies) == 0 {
 		return []string{""}
@@ -942,11 +803,8 @@ func probeExits(proxies []string, accountIdx int) []string {
 	return out
 }
 
-// probeActive prevents two harvests of the same bucket at once -- the initial
-// fill and the renewal loop share one harvest path, and a slow upstream call
-// could otherwise let a renewal tick fire a bucket a previous one is still on.
-// The key is bucketKey, so the guard is per (account, model), never global: two
-// different buckets still fire in parallel.
+// probeActive 不让初始补池与续期同时采同桶，慢上游也不能让后个 tick 插队。
+// 守门键是 bucketKey，即 (account, model)，不是全店大锁；不同桶仍能并行出门。
 var probeActive = struct {
 	mu  sync.Mutex
 	set map[string]bool
@@ -968,47 +826,31 @@ func probeRelease(key string) {
 	delete(probeActive.set, key)
 }
 
-// probeCooldown records when each (exit, account, model) triple last had an
-// upstream call spent on it.
+// probeCooldown 记录 (exit, account, model) 组合何时能再次出门。
+// 312 指向该账号、模型下当前 IP，不能替其他出口判歇业；全试完才算本窗口无路。
 //
-// The exit belongs in the key because a 312 is the IP being throttled for that
-// account and model, not the bucket being unfillable -- which is the entire
-// reason a pool of exits exists. So a 312 on one exit says nothing about the
-// next one, and only when every exit has had its turn is the bucket genuinely
-// out of options for this window.
-//
-// Keying on the exit URL has a second, useful property: correcting a typo in a
-// proxy changes the string, so the fixed exit is a new triple with no cooldown
-// and is retried at once instead of sitting out the window.
-// The table stores the moment a triple becomes eligible again, not the moment it
-// was last fired. Storing the deadline is what lets one table serve two very
-// different windows: a static exit (and any success) rests for
-// probeExitCooldown, while a rotating pool that ran out of attempts without a
-// 292 rests only probeRotatingCooldown -- see probeHarvestRotating for why those
-// are not the same question.
+// 出口 URL 入键还有用：修正代理拼写就成新组合，可立即重试，不让改好的门牌罚站。
+// 表中存准许重试的截止时刻，不是上次敲门时刻，才能容纳不同休息窗口。
+// 静态路径先按 probeExitCooldown 记账，成功再对齐 probeSuccessRest；
+// 轮换池耗完预算仍没拿到 292 时只等 probeRotatingCooldown，细节见 probeHarvestRotating。
 var probeCooldown = struct {
 	mu    sync.Mutex
 	until map[string]time.Time
 }{until: map[string]time.Time{}}
 
-// probeRotatingExit is the pseudo-exit the rotating pool's cooldown is keyed on.
-// It cannot collide with a real entry: a URL cannot contain a NUL byte, and the
-// key separator is NUL.
+// probeRotatingExit 是轮换池冷却账上的虚拟出口。
+// URL 不含 NUL，键分隔符却是 NUL，因此不会与真入口撞名。
 //
-// Keying the rotating pool on (account, model) rather than on each URL is the
-// whole point of the split. A rotating URL is not an exit, it is a gateway to a
-// fresh IP per request, so "this URL was already tried" says nothing useful --
-// the next request through it is a different address. What is genuinely scarce
-// there is the account's tolerance, and that is what this key measures.
+// 冷却按 (account, model) 共记，不按 URL 分桌：轮换 URL 是发新 IP 的柜台，
+// “试过这门牌”不代表下次还是那地址；要省的是账号耐受，不是门牌油漆。
 const probeRotatingExit = "\x00rotating"
 
 func probeCooldownKey(exit, account, model string) string {
 	return exit + "\x00" + account + "\x00" + model
 }
 
-// probeCooldownReady reports whether this triple may be fired now. A triple that
-// has never been fired is always ready, which is what makes a newly added exit
-// eligible the moment it appears in the pool.
+// probeCooldownReady 看这组现在能否出门；没打过的一律就绪。
+// 新出口一入池就能排上，不必先坐一轮冷板凳。
 func probeCooldownReady(exit, account, model string, now time.Time) bool {
 	probeCooldown.mu.Lock()
 	defer probeCooldown.mu.Unlock()
@@ -1016,24 +858,21 @@ func probeCooldownReady(exit, account, model string, now time.Time) bool {
 	return !seen || !now.Before(until)
 }
 
-// probeCooldownMark rests a triple for the standard window. This is the static
-// path's only marker: one exit, one IP, one attempt per window.
+// probeCooldownMark 给组合记标准休息窗口。
+// 静态路线上一出口、一 IP、每窗口一次，账本不认二次领号。
 func probeCooldownMark(exit, account, model string, now time.Time) {
 	probeCooldownSet(exit, account, model, now.Add(probeExitCooldown))
 }
 
-// probeCooldownSet rests a triple until an explicit deadline, which the rotating
-// path needs because its two outcomes deserve different windows.
+// probeCooldownSet 按明确截止时刻休息；轮换路径成功与失败各有钟点，不能齐喊散场。
 func probeCooldownSet(exit, account, model string, until time.Time) {
 	probeCooldown.mu.Lock()
 	defer probeCooldown.mu.Unlock()
 	probeCooldown.until[probeCooldownKey(exit, account, model)] = until
 }
 
-// probeAccountRest holds credentials the upstream has told us to leave alone.
-// Keyed by account only: a 429 is about the credential, not about the exit it
-// happened to arrive through, so every bucket and every exit of that account
-// waits together.
+// probeAccountRest 收下被上游点名休息的凭据，只按账号记。
+// 429 不认它从哪扇出口进来，因此该账号所有桶、所有出口一起歇场，不能换桌逃点名。
 var probeAccountRest = struct {
 	mu    sync.Mutex
 	until map[string]time.Time
@@ -1052,32 +891,27 @@ func probeAccountSetBackoff(account string, now time.Time) {
 	probeAccountRest.until[account] = now.Add(probeAccountBackoff)
 }
 
-// probeOutcome is what one upstream answer means for the rest of the walk.
+// probeOutcome 是响应给出口队伍的口令：收队、换门，还是整位账号休息。
 type probeOutcome int
 
 const (
-	// probeOutcomeStored: a template landed, this bucket is done.
+	// probeOutcomeStored：模板到柜台了，这桶收工，不再四处敲门。
 	probeOutcomeStored probeOutcome = iota
-	// probeOutcomeTryNext: this exit did not work out, but another might.
+	// probeOutcomeTryNext：此门没办成，下一扇门仍可请教。
 	probeOutcomeTryNext
-	// probeOutcomeAccountLimited: the credential itself was refused. Stop the
-	// walk and rest the account -- trying more exits is what turned a handful of
-	// 312s into 21 429s.
+	// probeOutcomeAccountLimited：凭据本身被拒，收队并让账号歇场。
+	// 硬换出口曾把几次 312 堆成 21 次 429，不再重演这场砸锅戏。
 	probeOutcomeAccountLimited
 )
 
-// probeBucketHasEligibleExit reports whether any exit is allowed to fire for this
-// bucket. The renewal loop checks this before queueing anything: without it, a
-// scope whose every triple is cooling would still download credentials and claim
-// buckets once a minute just to discover it may do nothing.
+// probeBucketHasEligibleExit 先看桶有没有可出门的出口，再让续期排队。
+// 若所有组合都冷却，就别每分钟下载凭据、占桶，然后宣布“今天没活”。
 func probeBucketHasEligibleExit(proxies, rotating []string, accountIdx int, account, model string, now time.Time) bool {
-	// The rotating pool carries one shared key per (account, model), so it is a
-	// single extra question rather than one per entry.
+	// 轮换池每 (account, model) 共用一把键，只多问一次，不挨个入口重复点名。
 	if len(rotating) > 0 && probeCooldownReady(probeRotatingExit, account, model, now) {
 		return true
 	}
-	// Mirrors probeHarvestBucket: with a rotating pool configured, an empty static
-	// list is not an invitation to go out over the box's own address.
+	// 与 probeHarvestBucket 同规矩：有轮换池而静态名单空，不表示允许从本机后门直连。
 	if len(proxies) == 0 && len(rotating) > 0 {
 		return false
 	}
@@ -1089,8 +923,7 @@ func probeBucketHasEligibleExit(proxies, rotating []string, accountIdx int, acco
 	return false
 }
 
-// probeSleep waits for the given duration and reports whether the run is still
-// wanted. It returns false as soon as the run is cancelled.
+// probeSleep 等指定时长并报告任务是否还要演；收到取消立即返回 false，不等锣敲完。
 func probeSleep(ctx context.Context, wait time.Duration) bool {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
@@ -1102,31 +935,24 @@ func probeSleep(ctx context.Context, wait time.Duration) bool {
 	}
 }
 
-// --- upstream ------------------------------------------------------------
+// --- 上游柜台：请求出门，响应交账 -------------------------------------------
 
-// probeFireResult is what one upstream answer gave us: the status, the
-// turn-state it signed (possibly empty), and the routing pair it set. The
-// pair is harvested on every status, not just 200 -- the upstream rotates
-// __cflb/__oailb independently of whether it minted a state.
+// probeFireResult 收上游状态、可能为空的 turn-state 与路由 pair。
+// 所有状态都采 pair，不只 200；__cflb/__oailb 的轮换不以本轮铸 state 为前提，
+// 别因票没出场就把房卡一起挡在门外。
 type probeFireResult struct {
 	status     int
 	stateValue string
 	cookies    routeCookieSet
 }
 
-// probeFireUpstream makes one direct call to the upstream as one account and
-// returns what the response carried. It reads only the headers: the turn-state
-// and the Set-Cookie pair are there, and the SSE body is drained just enough to
-// let the socket be reused before being dropped -- generating the completion
-// would spend quota this probe has no use for. A transport error is returned as
-// an error so the caller can fall through to the next exit; an HTTP status is
-// not.
+// probeFireUpstream 用账号身份直连一次，只取响应头里的 turn-state 与 Set-Cookie pair。
+// SSE 正文少量排空帮助 socket 复用后丢弃，不生成无用 completion 浪费配额。
+// 传输失败返回 error，让调用方换出口；HTTP 状态则作为响应交账，不混为 error。
 //
-// The request goes out BARE, with no pooled pair attached, on purpose: a
-// request that carries a live pair is pinned to that pair's node and the edge
-// sets no new cookies for it -- measured 2026-09-22, steered requests come back
-// with zero Set-Cookie pair. Minting is the whole point of this call, so the
-// edge must be free to assign a node itself.
+// 请求故意 BARE，不带池里 pair：有效 pair 会钉住节点，边缘不再发新 cookie。
+// 2026-09-22 实测 steered 请求没有 Set-Cookie pair；这趟为铸新卡而来，
+// 得让边缘自己分配节点，不能带旧房卡又要求门卫假装没见过。
 func probeFireUpstream(ctx context.Context, client *http.Client, cred probeCredential, model string) (probeFireResult, error) {
 	payload := map[string]any{
 		"model":  model,
@@ -1178,9 +1004,8 @@ func probeFireUpstream(ctx context.Context, client *http.Client, cred probeCrede
 	}, nil
 }
 
-// probeUUID returns a random v4 UUID for the Session-Id header, using the
-// crypto/rand source already linked in. A failed read is near-impossible; the
-// fallback keeps a probe firing rather than aborting on an unreachable branch.
+// probeUUID 用已链接的 crypto/rand 为 Session-Id 造随机 v4 UUID。
+// 随机读取几乎不会失败；兜底避免这条冷门分支把整场探针喊停。
 func probeUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -1191,12 +1016,11 @@ func probeUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// --- credential parsing --------------------------------------------------
+// --- 凭据拆封：读得清，秘密不登台 -------------------------------------------
 
-// probeParseCredential pulls the usable state out of a downloaded credential
-// file: the access token, the account id (from the token's own claims, which is
-// what the upstream expects in Chatgpt-Account-Id), the account's own exit, and
-// the token's expiry. Nothing here is logged.
+// probeParseCredential 从下载文件取 access token、账号出口、到期时间，
+// 以及 token claims 内的账号 id，供上游 Chatgpt-Account-Id 使用。
+// 柜台只拆封办事，这些内容不拿去记日志。
 func probeParseCredential(name string, blob map[string]any) (probeCredential, error) {
 	token := strings.TrimSpace(stringField(blob, "access_token"))
 	if token == "" {
@@ -1215,8 +1039,8 @@ func probeParseCredential(name string, blob map[string]any) (probeCredential, er
 	return cred, nil
 }
 
-// probeJWTClaims decodes a JWT's middle segment. The claims it reads -- exp and
-// the account id -- are not secret; the token as a whole is, and is never logged.
+// probeJWTClaims 解 JWT 中段，读 exp 与账号 id；这些 claims 不是秘密。
+// 整张 token 才是钥匙，不能因为看懂门牌就把钥匙登报。
 func probeJWTClaims(token string) map[string]any {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -1233,9 +1057,8 @@ func probeJWTClaims(token string) map[string]any {
 	return claims
 }
 
-// probeAccountID reads the chatgpt_account_id the upstream expects. It prefers
-// the token's own auth claim (authoritative) and falls back to the file's
-// top-level account_id.
+// probeAccountID 取上游要求的 chatgpt_account_id。
+// 先认 token 自己的 auth claim，缺了才看文件顶层 account_id，不让替身抢主演名牌。
 func probeAccountID(claims, blob map[string]any) string {
 	if claims != nil {
 		if auth, ok := claims["https://api.openai.com/auth"].(map[string]any); ok {
@@ -1247,9 +1070,8 @@ func probeAccountID(claims, blob map[string]any) string {
 	return strings.TrimSpace(stringField(blob, "account_id"))
 }
 
-// probeTokenExpiry reads the token's exp claim. A token with no readable exp
-// returns ok=false and is treated as usable -- the upstream is the real arbiter,
-// and a 401 there is handled like any other non-200.
+// probeTokenExpiry 读 exp；读不到就 ok=false，暂按可用送上游裁定。
+// 本地没看清钟表不等于宣布过期；上游 401 仍按非 200 路径处理。
 func probeTokenExpiry(claims map[string]any) (time.Time, bool) {
 	if claims == nil {
 		return time.Time{}, false
@@ -1261,8 +1083,7 @@ func probeTokenExpiry(claims map[string]any) (time.Time, bool) {
 	return time.Unix(int64(exp), 0), true
 }
 
-// stringField reads a string value from a decoded JSON object, tolerating a
-// missing or non-string field by returning "".
+// stringField 从 JSON 对象拿字符串；字段缺席或穿错类型就回 ""，不硬把它拉上台。
 func stringField(blob map[string]any, key string) string {
 	if value, ok := blob[key].(string); ok {
 		return value
@@ -1270,7 +1091,7 @@ func stringField(blob map[string]any, key string) string {
 	return ""
 }
 
-// --- CPA read client -----------------------------------------------------
+// --- CPA 只读柜台：查账，不改账 ---------------------------------------------
 
 type probeAuthFile struct {
 	Name      string          `json:"name"`
@@ -1285,8 +1106,8 @@ type probeHTTPResult struct {
 	body   []byte
 }
 
-// probeClient is the harvester's read-only connection to CPA's management API.
-// It fetches the account list and each credential's token; it never writes.
+// probeClient 只读 CPA 管理 API，取账号名单与各凭据 token。
+// 借看账本，不顺手改账。
 type probeClient struct {
 	baseURL string
 	mgmtKey string
@@ -1294,11 +1115,9 @@ type probeClient struct {
 }
 
 func newProbeClient(cfg pluginConfig) *probeClient {
-	// configure already fills an empty probe_base_url with defaultProbeBaseURL, so
-	// this only catches a config built in-process -- a test, or a future caller
-	// that skips configure. It reuses main.go's constant rather than repeating the
-	// literal: two defaults that could drift apart is how a probe ends up talking
-	// to the wrong port.
+	// configure 已把空 probe_base_url 补成 defaultProbeBaseURL。
+	// 这里只兜测试或未来绕过 configure 的进程内配置，仍复用 main.go 常量。
+	// 默认端口别抄两份各唱各的，免得探针敲到隔壁店。
 	base := strings.TrimRight(strings.TrimSpace(cfg.ProbeBaseURL), "/")
 	if base == "" {
 		base = defaultProbeBaseURL
@@ -1306,22 +1125,17 @@ func newProbeClient(cfg pluginConfig) *probeClient {
 	return &probeClient{
 		baseURL: base,
 		mgmtKey: strings.TrimSpace(cfg.ProbeManagementKey),
-		// Proxy is nil on purpose: this client talks to CPA's own loopback
-		// listener, and honouring the box's http_proxy/all_proxy would send a
-		// loopback call out through an exit that cannot reach it and come back as a
-		// bogus 502. The per-exit clients for the upstream calls live in
-		// probeClientPool, built the same way for the same reason.
+		// Proxy 故意为 nil：只访问 CPA 回环监听，不跟本机 http_proxy/all_proxy 出远门。
+		// 把回环请求送进外部出口会够不到目标，反报假 502。
+		// 上游的逐出口客户端在 probeClientPool，也按同样原则明确构建，不借错轿子。
 		http: &http.Client{Transport: &http.Transport{Proxy: nil}},
 	}
 }
 
-// call issues one request and returns the status alongside the body.
+// call 发一次请求，把状态与正文一起交账。
 //
-// A non-2xx comes back as a result, not as an error: 401 and 404 must stay
-// distinguishable -- 401 is a rejected management key, 404 is a path this CPA
-// build does not serve -- and collapsing them into "the call failed" sends
-// whoever is debugging this down the wrong road. Only a transport failure is an
-// error.
+// 非 2xx 是结果，不是 error：401 是管理钥匙不对，404 是该 CPA 构建没这扇路由门。
+// 两者若都报“调用失败”，查案就会跑错街；只有传输故障才返回 error。
 func (c *probeClient) call(ctx context.Context, method, path, token string, payload any, timeout time.Duration) (probeHTTPResult, error) {
 	var body io.Reader
 	if payload != nil {
@@ -1353,12 +1167,9 @@ func (c *probeClient) call(ctx context.Context, method, path, token string, payl
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	// Bounded read, but the bound is generous: CPA's auth-files document in
-	// v7.3.4 carries rich per-credential entries (recent_requests, quota,
-	// model_quotas, cooldowns), so a modest account fleet already overflows a
-	// small cap -- and a truncated body surfaces confusingly as a JSON syntax
-	// error. Read one byte past the cap so "too large" is reported as such
-	// rather than mistaken for a malformed document.
+	// 读取有上限，但别用小碟装整桌菜：v7.3.4 的 auth-files 条目有
+	// recent_requests、quota、model_quotas、cooldowns，少量账号也能撑破小上限。
+	// 额外读一字节识别超限，明确报“太大”，别把自己切断的正文诬成 JSON 语法错。
 	raw, errRead := io.ReadAll(io.LimitReader(response.Body, probeMgmtMaxBodyBytes+1))
 	if errRead != nil {
 		return probeHTTPResult{status: response.StatusCode}, errRead
@@ -1370,8 +1181,7 @@ func (c *probeClient) call(ctx context.Context, method, path, token string, payl
 	return probeHTTPResult{status: response.StatusCode, body: raw}, nil
 }
 
-// probeExplainStatus names which of the three things went wrong, in the words
-// that point at the fix.
+// probeExplainStatus 分清三类故障再报原因，修门、换钥匙、找路由不能同喊一声“坏了”。
 func probeExplainStatus(result probeHTTPResult, what string) error {
 	switch result.status {
 	case http.StatusUnauthorized:
@@ -1384,10 +1194,8 @@ func probeExplainStatus(result probeHTTPResult, what string) error {
 	return fmt.Errorf("%s: HTTP %d %s", what, result.status, probeTruncate(probeRedact(string(result.body)), 200))
 }
 
-// listCodexAuths returns CPA's Codex credentials, .bak copies excluded.
-//
-// The filter is provider when CPA reports one, the naming convention otherwise.
-// A .bak file is an operator's backup copy and must never be probed.
+// listCodexAuths 取 CPA 的 Codex 凭据，有 provider 先认它，没有才认命名约定。
+// .bak 是用户留的替身备份，永不拉来探测跑龙套。
 func (c *probeClient) listCodexAuths(ctx context.Context) ([]probeAuthFile, error) {
 	result, errCall := c.call(ctx, http.MethodGet, probeRouteAuthFiles, c.mgmtKey, nil, probeMgmtTimeout)
 	if errCall != nil {
@@ -1422,9 +1230,8 @@ func (c *probeClient) listCodexAuths(ctx context.Context) ([]probeAuthFile, erro
 	return out, nil
 }
 
-// downloadAuth fetches one credential file whole. It is the only call that ever
-// carries a token back into this process, so its body is never logged; callers
-// pull the fields they need through probeParseCredential and drop the rest.
+// downloadAuth 整份取回凭据文件，这是唯一把 token 带回进程的调用。
+// 正文绝不写日志；调用方经 probeParseCredential 只取所需，余下收起，不摊开示众。
 func (c *probeClient) downloadAuth(ctx context.Context, name string) (map[string]any, error) {
 	path := probeRouteAuthDownload + "?name=" + url.QueryEscape(name)
 	result, errCall := c.call(ctx, http.MethodGet, path, c.mgmtKey, nil, probeMgmtTimeout)
@@ -1441,11 +1248,10 @@ func (c *probeClient) downloadAuth(ctx context.Context, name string) (map[string
 	return blob, nil
 }
 
-// --- per-exit upstream clients -------------------------------------------
+// --- 逐出口客户端：一扇门配一位熟路跑堂 -------------------------------------
 
-// probeClientPool holds one http.Client per exit, built once and shared across
-// every fire that uses that exit. A scope of four accounts sharing two exits
-// opens two transports, not eight.
+// probeClientPool 每出口建一个 http.Client，所有走该出口的请求复用。
+// 四账号共用两出口只开两套 transport，不是八套；别给每位客人另盖厨房。
 type probeClientPool struct {
 	mu      sync.Mutex
 	clients map[string]*http.Client
@@ -1455,10 +1261,9 @@ func newProbeClientPool() *probeClientPool {
 	return &probeClientPool{clients: map[string]*http.Client{}}
 }
 
-// get returns the client for one exit, building it once. An empty proxyURL is a
-// direct connection -- and deliberately does NOT honour the box's
-// http_proxy/all_proxy env, for the same reason newProbeClient does not: those
-// exits are for the traffic CPA relays, not for a probe reaching out on its own.
+// get 每出口只建一次客户端；proxyURL 为空就是明确直连。
+// 与 newProbeClient 一样不继承 http_proxy/all_proxy：那是 CPA 转发业务的出口，
+// 独立探针不偷偷借用别人订的轿子。
 func (p *probeClientPool) get(proxyURL string) (*http.Client, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1471,13 +1276,10 @@ func (p *probeClientPool) get(proxyURL string) (*http.Client, error) {
 		if errParse != nil {
 			return nil, fmt.Errorf("exit is not a valid URL: %w", errParse)
 		}
-		// net/http understands the "socks5" scheme but not the "socks5h" spelling,
-		// and an unrecognised scheme is dialed as an HTTP proxy -- which a SOCKS
-		// server answers with a protocol error, so the exit would look permanently
-		// dead. The two differ only in where the target hostname is resolved, and
-		// Go's socks5 dialer already hands the hostname to the proxy (what socks5h
-		// asks for), so normalising is exact rather than approximate. The operator's
-		// pool contains both spellings.
+		// net/http 认 socks5，不认 socks5h；未知 scheme 会被当 HTTP 代理，
+		// SOCKS 服务因此报协议错，看起来像出口永久关门，其实只是叫错了接头暗号。
+		// 两种写法区别仅在域名由谁解析；Go socks5 已把主机名交给代理，
+		// 正好符合 socks5h，因此规范化是语义等价，不是蒙混过关。用户池内两种写法都有。
 		if strings.EqualFold(parsed.Scheme, "socks5h") {
 			parsed.Scheme = "socks5"
 		}
@@ -1496,32 +1298,29 @@ func (p *probeClientPool) closeIdle() {
 	}
 }
 
-// --- redaction -----------------------------------------------------------
+// --- 脱敏柜台：能讲笑话，不能晒钥匙 -----------------------------------------
 
 var (
-	// Userinfo in any URL, which here means a proxy's credentials. Matched on the
-	// scheme://...@ shape rather than against the configured list: a URL echoed
-	// back inside an upstream error body has to be caught too, and that one is
-	// never in any list we hold.
+	// 按 scheme://...@ 找所有 URL 的 userinfo，也就是此处代理凭据。
+	// 不只查配置名单：上游错误里可能回显陌生 URL，那位也得蒙好脸再上日志。
 	probeURLAuthRE = regexp.MustCompile(`(?i)\b([a-z0-9+.\-]+://)[^/\s@]+@`)
-	// A Fernet token base64url-encodes a leading 0x80 version byte, which always
-	// renders as the literal prefix "gAAAAA" (FINDINGS.md). That makes a
-	// turn-state greppable without decoding anything.
+	// Fernet 的 0x80 版本字节经 base64url 后露出 gAAAAA 前缀，见 FINDINGS.md。
+	// 认这截衣角就能筛 turn-state，不必先解码整件外套。
 	probeTokenRE = regexp.MustCompile(`gAAAAA[A-Za-z0-9_\-=]{16,}`)
-	// Any Bearer credential echoed back at us, ours included.
+	// 回显的所有 Bearer 凭据都拦住，包括自家的；熟人也不能举钥匙登台。
 	probeBearerRE = regexp.MustCompile(`(?i)\b(bearer\s+)[A-Za-z0-9._\-]{16,}`)
 )
 
-// probeRedact strips anything credential-shaped out of text bound for Lines, the
-// run error, or the process log.
+// probeRedact 把送往 Lines、任务错误与进程日志的疑似凭据抹去。
+// 这几张公告栏都不是保险柜。
 func probeRedact(text string) string {
 	text = probeTokenRE.ReplaceAllString(text, "<turn-state redacted>")
 	text = probeBearerRE.ReplaceAllString(text, "${1}<redacted>")
 	return probeURLAuthRE.ReplaceAllString(text, "${1}***@")
 }
 
-// probeShowProxy renders one exit safe to display, distinguishing "no exit set"
-// from an exit that happens to mask to an empty string.
+// probeShowProxy 把出口遮好再展示；未设置出口与脱敏后恰好为空要分清，
+// 不能把没来的演员和戴面具的演员写成同一个人。
 func probeShowProxy(raw string) string {
 	if masked := maskProxyURL(raw); masked != "" {
 		return masked
@@ -1529,8 +1328,8 @@ func probeShowProxy(raw string) string {
 	return "(direct)"
 }
 
-// probeTruncate bounds a quoted body, saying how much was dropped so nobody
-// reads a cut-off JSON document as a malformed one.
+// probeTruncate 限制引用正文长度并说明删去多少。
+// 截短是账本装不下，不要让读者误认上游交来一张天生破损的 JSON。
 func probeTruncate(text string, limit int) string {
 	if len(text) <= limit {
 		return text

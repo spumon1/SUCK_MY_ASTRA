@@ -65,7 +65,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </main>
 <script>
 'use strict';
-// 纯本地示例：不调用 fetch / WebSocket，不写入存储或 CPA 配置。
+// 这是本地纸糊舞台：不调用 fetch / WebSocket，也不往存储或 CPA 配置里塞道具。
 const records=[
  {account:'账号 A · #D2q8fLk1',model:'gpt-6-sol',transport:'SSE',state:'ready',label:'已就绪',gateway:'unified-88',finger:'Y89E_-KZ',length:780,left:218},
  {account:'账号 A · #D2q8fLk1',model:'gpt-6-astra',transport:'SSE',state:'cooldown',label:'冷却中 · 18s',gateway:'unified-88',finger:'',left:0},
@@ -118,7 +118,7 @@ function updateEnabled(){byId('enabledStatus').textContent=savedSettings.enabled
 function render(){
  const query=byId('search').value.trim().toLowerCase();
  const rows=records.filter(r=>(byId('status').value==='all'||r.state===byId('status').value)&&(byId('transport').value==='all'||r.transport===byId('transport').value)&&[r.account,r.model,r.finger].join(' ').toLowerCase().includes(query));
- // HTML 仅来自固定虚构数据；用户输入和可编辑配置不拼进 HTML。
+ // HTML 只请固定虚构数据上台；用户输入与可编辑配置不许拼进来抢戏。
  byId('rows').innerHTML=rows.map(r=>`<tr><td><div class="account">${r.account}</div><div class="model mono">${r.model}</div></td><td class="tiny">${r.transport}</td><td><span class="pill ${r.state==='cooldown'?'amber':r.state==='minting'?'neutral':''}">${r.label}</span></td><td class="mono muted">${r.gateway}</td><td>${r.finger?`<span class="mono">#${r.finger}</span><div class="tiny">票长 ${r.length}</div>`:'<span class="tiny">尚无有效票</span>'}</td><td>${r.left?`<span class="mono">${r.left}s</span><div class="bar"><i style="width:${r.left/240*100}%"></i></div>`:'<span class="tiny">—</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">没有符合条件的示例记录</td></tr>';
  byId('rowCount').textContent=`显示 ${rows.length} / 4 个示例桶`;
 }

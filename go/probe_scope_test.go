@@ -12,27 +12,18 @@ import (
 	"time"
 )
 
-// Tests for the probe-scope configuration: probe_accounts, probe_proxies, and
-// the masking that keeps a proxy's userinfo out of everywhere it must not go.
-//
-// The load-bearing property in this file is the firewall: probe scope steers a
-// probe run and nothing else. If any of these lists ever started filtering
-// substitution, an account left off the list would silently stop being served
-// while its bucket sat live on disk -- a failure that looks like the upstream
-// misbehaving, not like a config change.
-//
-// Every proxy string here is fabricated and points at .invalid, which is
-// reserved by RFC 2606 and can never resolve.
+// 探测范围考 probe_accounts、probe_proxies 和代理 userinfo 遮罩。
+// 防火墙只让范围指挥探测，不能干涉替换；否则名单外账号明明有活 bucket 却停服，
+// 看起来像上游闹脾气，实则配置越界抢了方向盘。
+// 所有代理都是虚构 .invalid 地址，RFC 2606 保留且不会解析，片场不借真出口。
 
 const (
-	// A password we can grep the output for. Deliberately distinctive: the
-	// assertions below check it appears nowhere, so it must not collide with
-	// anything a formatter might legitimately emit.
+	// 密码故意起个显眼艺名，便于 grep 抓泄漏；不能撞上格式器合法输出，不然群众演员也被误抓。
 	testProxySecret = "s3cr3t-never-log-me"
 	testProxyWithPW = "socks5h://prober:" + testProxySecret + "@exit.invalid:1080"
 )
 
-// --- masking -------------------------------------------------------------
+// --- 遮罩：秘密不上镜 ---
 
 func TestMaskProxyURLNeverEchoesUserinfo(t *testing.T) {
 	tests := []struct {
@@ -44,10 +35,8 @@ func TestMaskProxyURLNeverEchoesUserinfo(t *testing.T) {
 		{"user without password still masked", "http://prober@exit.invalid:8080", "http://***@exit.invalid:8080"},
 		{"no userinfo passes through", "socks5://exit.invalid:1080", "socks5://exit.invalid:1080"},
 		{"empty stays empty", "", ""},
-		// The important one. A value malformed enough that net/url rejects it is
-		// exactly the one likely to be a password with a stray character in it,
-		// so "we could not parse it, here it is verbatim" would publish the thing
-		// this function exists to hide.
+		// net/url 都拒绝的坏值，可能正是密码多了个怪字符；不能说“解析不了原样给你”，
+		// 那等于门卫找不到口袋就把整件衣服挂到街上。
 		{"unparsable is not echoed", "://" + testProxySecret, "<unparsable proxy url>"},
 		{"schemeless is not echoed", "exit.invalid:1080", "<unparsable proxy url>"},
 	}
@@ -65,9 +54,7 @@ func TestMaskProxyURLNeverEchoesUserinfo(t *testing.T) {
 }
 
 func TestMaskProxyURLsKeepsPositions(t *testing.T) {
-	// Order is the probe's try order, so a masked list has to line up with the
-	// real one entry for entry -- otherwise "the second proxy failed" on the
-	// dashboard points at a different exit than the one that actually failed.
+	// 列表顺序就是尝试顺序，遮罩后逐项对齐；页面说第二个代理失败，别指到第三扇门。
 	in := []string{testProxyWithPW, "http://exit2.invalid:8080", "://broken"}
 	got := maskProxyURLs(in)
 	if len(got) != len(in) {
@@ -83,7 +70,7 @@ func TestMaskProxyURLsKeepsPositions(t *testing.T) {
 	}
 }
 
-// --- validation ----------------------------------------------------------
+// --- 校验：菜单错字也得点名 ---
 
 func TestNormaliseProbeScopeDropsAndReportsBadEntries(t *testing.T) {
 	accounts, models, proxies, _, problems := normaliseProbeScope(
@@ -105,20 +92,16 @@ func TestNormaliseProbeScopeDropsAndReportsBadEntries(t *testing.T) {
 		t.Fatalf("proxies = %v, want just the one valid entry", maskProxyURLs(proxies))
 	}
 
-	// Five rejects: one account shape, one account traversal, one model with a
-	// space, one unsupported scheme, one unparsable URL. The two empty strings
-	// are dropped silently -- a blank line in a textarea is not a mistake worth
-	// reporting. Counted rather than matched on wording so the messages stay
-	// editable.
+	// 五项应拒：账号形状、账号穿越、模型空格、不支持 scheme、不可解析 URL。
+	// 两条空白静默去掉，textarea 空行不必训话。只数错误不绑文案，台词还能润色。
 	if len(problems) != 5 {
 		t.Fatalf("expected 5 complaints, got %d: %v", len(problems), problems)
 	}
 }
 
 func TestProbeScopeProblemsNeverContainAPassword(t *testing.T) {
-	// Every rejected proxy produces a complaint, and a complaint is a string
-	// that ends up in the status document and in the log. Neither may carry the
-	// userinfo of the entry that was rejected.
+	// 每个拒收代理都要报错，错误会进状态文档与日志；两处都不能带它的 userinfo，
+	// 被拒也不是公开秘密的理由。
 	_, _, _, _, problems := normaliseProbeScope(
 		nil, nil,
 		[]string{
@@ -126,8 +109,7 @@ func TestProbeScopeProblemsNeverContainAPassword(t *testing.T) {
 			"://" + testProxySecret,
 			"gopher://prober:" + testProxySecret + "@exit.invalid:70",
 		},
-		// The rotating list is held to the same rule, and its complaints must be
-		// just as free of userinfo -- it is the same masking path or it is a leak.
+		// 轮换列表守同一条规矩，报错也无 userinfo；不走同一遮罩门，就等着漏风。
 		[]string{"gopher://prober:" + testProxySecret + "@rotate.invalid:70"},
 	)
 	if len(problems) == 0 {
@@ -141,9 +123,7 @@ func TestProbeScopeProblemsNeverContainAPassword(t *testing.T) {
 }
 
 func TestConfigureNeverFailsOnBadProbeScope(t *testing.T) {
-	// Probe scope is not load bearing for substitution. A typo in it must not
-	// stop the plugin registering, or a probe-time mistake would take the
-	// business role down with it.
+	// 探测范围不承重于替换；错字不能让插件注册失败，探针绊一跤不该拖业务下楼。
 	dir := t.TempDir()
 	cfg := fmt.Sprintf(`role: business
 store_dir: %q
@@ -172,13 +152,11 @@ probe_proxies:
 	}
 }
 
-// --- probe scope does not invalidate the pool ------------------------------
+// --- 改探测范围不清池：勾选框不是拆迁队 ---
 
 func TestProbeScopeChangeKeepsThePool(t *testing.T) {
-	// Editing the scope on the dashboard is the commonest reason configure runs
-	// at all. Clearing there would throw away live pairs every time the
-	// operator ticked a box -- and a cleared pool looks exactly like "the probe
-	// never ran".
+	// 页面改范围常触发 configure；若顺手清池，每勾一格就扔活 pair，
+	// 最后看着像探针从未开工，不能拿配置笔当橡皮擦。
 	base := defaultConfig()
 	base.Role = roleBusiness
 	base.StoreDir = "/data/turn-state-store"
@@ -202,9 +180,7 @@ func TestProbeScopeChangeKeepsThePool(t *testing.T) {
 		})
 	}
 
-	// The control: a rule that really does invalidate the pool still must --
-	// a different store_dir means a different store, and its pool file is not
-	// this one's.
+	// 对照组仍须真失效：换 store_dir 就是换仓库，别把旧库房卡带到新库冒认。
 	moved := base
 	moved.StoreDir = base.StoreDir + "-moved"
 	if !poolInvalidatedBy(base, moved) {
@@ -212,17 +188,15 @@ func TestProbeScopeChangeKeepsThePool(t *testing.T) {
 	}
 }
 
-// --- the firewall --------------------------------------------------------
+// --- 防火墙：探测名单不是业务黑名单 ---
 
 func TestBusinessSteersForAnAccountOutsideTheProbeScope(t *testing.T) {
-	// §2.4, pool edition: with probe_accounts and probe_proxies configured, the
-	// business path must still steer for a Codex account that is NOT in the
-	// list. The lists say which credentials the next probe run may borrow; they
-	// say nothing about which accounts may use the pool.
+	// §2.4 池版本：配了 probe_accounts/probe_proxies，名单外 Codex 业务仍要引导。
+	// 名单只说下一次探测可借谁的凭据，不限制谁来用全局房卡。
 	dir := t.TempDir()
 	const (
-		served = "codex-served.json" // steered, absent from the scope
-		scoped = "codex-scoped.json" // the only account in probe_accounts
+		served = "codex-served.json" // 名单没它仍可引导，业务客人不看探针花名册
+		scoped = "codex-scoped.json" // probe_accounts 唯一被点名的演员
 		model  = "gpt-5.6-sol"
 	)
 
@@ -249,8 +223,7 @@ probe_proxies:
 }
 
 func TestProbeScopeNeverCreatesABucket(t *testing.T) {
-	// The mirror of the test above: naming an account in probe_accounts does not
-	// conjure a bucket for it. Only a probe run writes the store.
+	// 反向也成立：probe_accounts 写上名字不等于凭空造 bucket，只有探测运行才写仓库。
 	dir := t.TempDir()
 	const (
 		scoped = "codex-scoped.json"
@@ -282,13 +255,9 @@ probe_proxies:
 	}
 }
 
-// --- the keyless scope save ----------------------------------------------
-//
-// Saving the scope is what used to force a management key onto the dashboard:
-// the host gives a plugin no way to persist its own config, so the only writable
-// path was CPA's authenticated PATCH. These lock in the replacement -- the
-// plugin writes its own scope file over a keyless route -- and, above all, that
-// it did not become a way to wipe a proxy list by accident.
+// --- 免密保存范围：自己收好配置纸条 ---
+// 宿主不给插件自存配置，旧路只有 CPA 鉴权 PATCH，逼页面带管理密钥。
+// 现在插件经免密路由写自己的范围文件；重点是不能把“没传代理列表”听成“全部清场”。
 
 const opsScopePath = mgmtResourcePath + "ops/scope"
 
@@ -324,7 +293,7 @@ func TestScopeSaveRequiresFields(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, scopeConfig(t, dir))
 
-	// No fields: this must not be read as "replace everything with nothing".
+	// 没 fields 就不能当“全换成空”，没点菜不等于撤全桌。
 	resp := driveResource(t, opsScopePath, confirmed(nil))
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 when fields is missing", resp.StatusCode)
@@ -363,7 +332,7 @@ func TestScopeSaveWritesFileAndAppliesLive(t *testing.T) {
 		t.Fatalf("saved=%t targets_total=%d, want true and 4 (2 accounts x 2 models)", out.Saved, out.TargetsTotal)
 	}
 
-	// Live without waiting for the host's next reconfigure.
+	// 保存后立刻生效，不等宿主下次 configure 才开灶。
 	state.mu.Lock()
 	liveAccounts := append([]string(nil), state.config.ProbeAccounts...)
 	state.mu.Unlock()
@@ -371,7 +340,7 @@ func TestScopeSaveWritesFileAndAppliesLive(t *testing.T) {
 		t.Fatalf("in-memory config not updated: %v", liveAccounts)
 	}
 
-	// And on disk, so it survives a restart.
+	// 同时落盘，重启也得认这张订单。
 	saved, errLoad := loadProbeScope(dir)
 	if errLoad != nil || saved == nil {
 		t.Fatalf("scope file not written: %v", errLoad)
@@ -382,9 +351,8 @@ func TestScopeSaveWritesFileAndAppliesLive(t *testing.T) {
 }
 
 func TestScopeSaveOnlyReplacesNamedFields(t *testing.T) {
-	// The whole reason `fields` is required. Saving a model selection must not
-	// clear a proxy list the page never sent -- those credentials exist nowhere
-	// else once they are gone.
+	// 必须有 fields：只存模型不能清掉页面压根没发的代理列表；
+	// 这些凭据丢了没别处找，空手来客不是拆迁通知。
 	dir := t.TempDir()
 	mustConfigure(t, scopeConfig(t, dir))
 
@@ -407,7 +375,7 @@ func TestScopeSaveOnlyReplacesNamedFields(t *testing.T) {
 		t.Fatalf("the account list did not survive a models-only save: %v", saved.Accounts)
 	}
 
-	// An explicit clear still works.
+	// 显式清空仍要能清，真喊散场就别装听不见。
 	resp = driveResource(t, opsScopePath, confirmed(url.Values{"fields": {"proxies"}}))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("explicit clear: status = %d", resp.StatusCode)
@@ -419,9 +387,8 @@ func TestScopeSaveOnlyReplacesNamedFields(t *testing.T) {
 }
 
 func TestSavedScopeOverridesConfigYAML(t *testing.T) {
-	// CPA rewrites config.yaml on its own, so a reconfigure after a save is not
-	// hypothetical. If config.yaml won, the operator would watch their selection
-	// revert with nothing on screen to explain it.
+	// CPA 会自己重写 config.yaml，保存后再 configure 并非假设；
+	// 若旧文件赢，新选择会无声回滚，用户还以为自己眼花。
 	dir := t.TempDir()
 	if errWrite := writeProbeScope(dir, probeScope{
 		Accounts:  []string{"codex-saved.json"},
@@ -445,8 +412,7 @@ func TestSavedScopeOverridesConfigYAML(t *testing.T) {
 	if !equalStrings(models, []string{"gpt-6-astra"}) {
 		t.Fatalf("models came from config.yaml, not the saved scope: %v", models)
 	}
-	// The saved scope is authoritative in full, not merged: it recorded no
-	// proxies, so there are none, even though config.yaml lists one.
+	// 保存范围整份权威，不跟 config.yaml 拼盘；存档说无代理就无代理，即便旧文件还写一个。
 	if proxies != 0 {
 		t.Fatalf("proxies leaked in from config.yaml: %d", proxies)
 	}
@@ -465,7 +431,7 @@ models:
 `, dir))
 	seedPoolEntry(t, map[string]string{"__cflb": "cf", "__oailb": "lb"}, time.Now(), "")
 
-	// Prime the in-memory view by serving one request through the pool.
+	// 先经池发一请求，让内存视图热身，别拿没开灯的舞台考演员。
 	interceptAfter(t, request("codex-a.json", "gpt-5.6-sol", fakeTokenSeed(312, wallClock(), 0x11)))
 
 	resp := driveResource(t, opsScopePath, confirmed(url.Values{
@@ -476,16 +442,14 @@ models:
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
-	// The pair is still there and still used. Ticking a box on the dashboard
-	// must not throw away a live credential.
+	// pair 仍在且仍用；页面勾框不能顺手把活凭据扔进垃圾桶。
 	out := interceptAfter(t, request("codex-a.json", "gpt-5.6-sol", fakeTokenSeed(312, wallClock(), 0x22)))
 	if cookie := out.Headers.Get("Cookie"); !strings.Contains(cookie, "__cflb=cf") {
 		t.Fatalf("the pair was lost when the scope was saved (cookie: %q)", cookie)
 	}
 }
 
-// equalStrings compares two string slices by value. Written out rather than
-// reached for via reflect so a failure prints something readable.
+// equalStrings 逐值比字符串切片，不请 reflect 绕场；失败信息要让人看得懂。
 func equalStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
@@ -498,12 +462,10 @@ func equalStrings(got, want []string) bool {
 	return true
 }
 
-// --- the two pools ---------------------------------------------------------
+// --- 双池：同台不串班 ---
 
 func TestScopeSaveRoundTripsTheRotatingPool(t *testing.T) {
-	// The rotating pool is persisted, applied live, and -- above all -- kept
-	// SEPARATE from the static one. Merging them would silently hand one pool's
-	// retry rule to the other, which is the whole defect the split fixes.
+	// 轮换池持久化、即时生效，并与静态池分开住；混一起会悄悄借错重试规矩，正是拆池要治的病。
 	dir := t.TempDir()
 	mustConfigure(t, scopeConfig(t, dir))
 
@@ -523,13 +485,12 @@ func TestScopeSaveRoundTripsTheRotatingPool(t *testing.T) {
 	if len(rotating) != 2 {
 		t.Fatalf("rotating pool = %v, want the two saved entries", len(rotating))
 	}
-	// scopeConfig seeds exactly one static proxy; saving only the rotating field
-	// must not disturb it.
+	// scopeConfig 只种一个静态代理；只存轮换字段不能惊动它，隔壁装修别拆这面墙。
 	if len(static) != 1 {
 		t.Fatalf("static pool = %d entries, want 1 -- saving one pool rewrote the other", len(static))
 	}
 
-	// And it survives a reload, which is what the renewal loop actually reads.
+	// 重载后也保留，续期循环实际读的正是这份菜单。
 	mustConfigure(t, scopeConfig(t, dir))
 	state.mu.Lock()
 	reloaded := len(state.config.ProbeProxiesRotating)
@@ -540,8 +501,7 @@ func TestScopeSaveRoundTripsTheRotatingPool(t *testing.T) {
 }
 
 func TestScopeSaveRejectsAnUnknownField(t *testing.T) {
-	// "fields" is the guard against an empty query meaning "clear everything", so
-	// a typo in it must fail loudly rather than silently save nothing.
+	// fields 防空 query 被当全清；拼错就大声拒绝，别静默保存空气。
 	dir := t.TempDir()
 	mustConfigure(t, scopeConfig(t, dir))
 
@@ -552,8 +512,7 @@ func TestScopeSaveRejectsAnUnknownField(t *testing.T) {
 }
 
 func TestRotatingPoolComplaintsAreMaskedToo(t *testing.T) {
-	// Both pools share normaliseProxyList precisely so this cannot drift: a bad
-	// rotating entry must be reported by field and position, never by value.
+	// 双池共用 normaliseProxyList 防走样；坏轮换项按字段与位置报错，别把秘密值拖上台指认。
 	_, _, _, _, problems := normaliseProbeScope(nil, nil, nil,
 		[]string{"gopher://gw:" + testProxySecret + "@rotate.invalid:70"})
 	if len(problems) == 0 {

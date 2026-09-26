@@ -10,7 +10,7 @@ import (
 )
 
 func TestCloudDashboardUsesFilenamePluginID(t *testing.T) {
-	// CPA 实际发送的 ResourceBasePath 来自 .so 文件名，而不是 Metadata.Name。
+	// CPA 的 ResourceBasePath 跟 .so 文件名领门牌，不跟 Metadata.Name 改姓。
 	for _, id := range []string{"codex-turn-state", "codex-turn-state-cloud-mint"} {
 		t.Run(id, func(t *testing.T) {
 			raw, _ := json.Marshal(pluginapi.ManagementRegistrationRequest{ResourceBasePath: "/v0/resource/plugins/" + id})

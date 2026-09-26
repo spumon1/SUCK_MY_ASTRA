@@ -9,7 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// 续链属于客户端和同一业务连接；插件只记录指纹，绝不自动补 previous_response_id。
+// 续链归客户端和同一业务连接管；插件只记指纹，不擅自补 previous_response_id，旁观者别续台词。
 type cloudChainObservation struct {
 	previous string
 	response string
@@ -47,7 +47,7 @@ func cloudWSFallbackKey(authID, responseID string) string {
 	if responseID == "" {
 		return ""
 	}
-	// 不同账号即使收到同名响应 ID 也不能合并；索引用完整摘要，不用展示用短指纹。
+	// 跨账号即便响应 ID 同名也不合并；索引认完整摘要，不拿展示短指纹当户口本。
 	value := sha256.Sum256([]byte(authID + "\x00" + responseID))
 	return "ws-observation:" + hex.EncodeToString(value[:])
 }
@@ -107,7 +107,7 @@ func cloudApplyWSChain(record *cloudPendingLog, event cloudWSChainEvent) {
 	if stage == "completed" && event.Response.Status != "completed" {
 		stage = "terminal_unconfirmed"
 	}
-	// 同一请求的迟到 created 不能把已经观察到的终态倒退。
+	// 同请求迟到的 created 不能把已见终态倒拨回开场，散场铃响了不准再报幕。
 	if record.chain.stage == "" || stage != "created" {
 		record.chain.stage = stage
 	}

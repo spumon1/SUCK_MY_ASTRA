@@ -15,37 +15,23 @@ import (
 	"time"
 )
 
-// Tests for the offline (CPA-free) harvester.
-//
-// The load-bearing properties are no longer "did it flip credential state back"
-// -- it never flips any -- but the ones that cost something when wrong:
-//
-//   - a run never starts on an empty selection or without the management key;
-//   - a 292 is stored under the credential FILE NAME, because that is the key the
-//     business role looks up; a 312 (throttled) is never stored;
-//   - an expired access token is skipped, never refreshed (refreshing could
-//     rotate CPA's refresh token and break live traffic);
-//   - the proxy pool is assigned in order and falls through on a dead exit;
-//   - renewal re-harvests a bucket near expiry;
-//   - no proxy password and no token reach the transcript, which is served with
-//     no key.
-//
-// The fake CPA serves only the two read-only GETs the harvester makes. A separate
-// fake upstream stands in for chatgpt.com. testProxySecret comes from
-// probe_scope_test.go, deliberately: one password, greppable from one place.
+// 离线（不借 CPA 执行模型）采集器考试，不考翻回凭据状态，因为根本不翻。
+// 真正烧钱的门禁逐项守：空选择或无管理 key 不启动；292 按业务查找的凭据文件名入库，312 不存；
+// 过期 access token 跳过，绝不刷新，免得轮换 CPA refresh token 伤在线流量；
+// 代理按序分配，死出口往下走，快过期 bucket 续采；免密流水不准出现代理密码或 token。
+// 假 CPA 只演两个只读 GET，另有假上游扮 chatgpt.com。testProxySecret 从
+// probe_scope_test.go 借同一枚道具密码，一处起名，到处都能 grep 抓它偷上镜。
 
-// --- fake CPA (read-only) ------------------------------------------------
+// --- 假 CPA：只读柜台，不办改户口 ---
 
-// fakeCredSeed is one credential the fake CPA publishes and hands out on
-// download. exp is the access token's expiry; zero means "days from now".
+// fakeCredSeed 是假 CPA 发布供下载的一份凭据；exp 是 access token 期限，零表示还有数天，别当天赶客。
 type fakeCredSeed struct {
 	name      string
 	accountID string
 	proxyURL  string
 	disabled  bool
 	exp       time.Time
-	// noToken drops the access_token from the download, standing in for a
-	// credential file the harvester cannot use.
+	// noToken 从下载里抽走 access_token，扮演采集器用不了的空壳凭据。
 	noToken bool
 }
 
@@ -55,9 +41,8 @@ type fakeCPA struct {
 	seeds  map[string]fakeCredSeed
 }
 
-// encodeJWT builds a token whose payload carries just the two non-secret claims
-// the harvester reads: exp and the chatgpt account id. The header segment "e30"
-// is base64url("{}"), enough for probeJWTClaims, which only decodes the payload.
+// encodeJWT 只在载荷装采集器要看的非秘密 exp 与 ChatGPT account id；
+// 头段 e30 是 base64url("{}")，probeJWTClaims 只解载荷，这身简装够上台。
 func encodeJWT(exp time.Time, accountID string) string {
 	claims := map[string]any{
 		"exp":                         exp.Unix(),
@@ -88,8 +73,7 @@ func (f *fakeCPA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == probeRouteAuthDownload:
 		f.serveDownload(w, r)
 	default:
-		// A write route reaching the fake is itself a failure: this harvester must
-		// never call one. Answering 405 makes such a regression loud.
+		// 写路由一到假 CPA 就已违规，采集器绝不能调它；回 405 大声喊停，不默默陪演。
 		http.Error(w, `{"error":"the offline harvester must not call this route"}`, http.StatusMethodNotAllowed)
 	}
 }
@@ -136,7 +120,7 @@ func (f *fakeCPA) writeJSON(w http.ResponseWriter, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-// --- fake upstream (chatgpt.com stand-in) --------------------------------
+// --- 假上游：chatgpt.com 的本地替身 ---
 
 type upstreamCall struct {
 	model         string
@@ -144,8 +128,7 @@ type upstreamCall struct {
 	accountID     string
 	sessionID     string
 	sentTurnState bool
-	// cookie is the request's Cookie header verbatim -- the probe is expected to
-	// send the account's pooled __cflb/__oailb pair on every upstream call.
+	// cookie 原样记录请求 Cookie 头；这里检查每次上游调用携账号池中 __cflb/__oailb pair 的预期，道具不换名。
 	cookie string
 }
 
@@ -153,18 +136,14 @@ type fakeUpstream struct {
 	mu     sync.Mutex
 	server *httptest.Server
 	calls  []upstreamCall
-	// status and tsLen shape the response: a 200 with a tsLen-long turn-state is
-	// a harvestable template; 312 is the degraded state; a non-200 is a rejection.
+	// status 与 tsLen 定剧情：200 加 tsLen 长 state 可作模板，312 是降级，非 200 则拒绝，别凭戏服颜色验票。
 	status int
 	tsLen  int
-	// tsLenSeq, when set, overrides tsLen per call index (last entry repeats).
+	// tsLenSeq 若设置就按调用序号覆盖 tsLen，最后一项循环返场。
 	tsLenSeq []int
-	// setCookies, when non-empty, is emitted verbatim as Set-Cookie headers on
-	// every response -- how a test hands the harvester a routing pair.
+	// setCookies 非空则每个响应原样发 Set-Cookie，把路由 pair 从假上游递给采集器。
 	setCookies []string
-	// hold keeps each request open, so overlap between concurrent callers is
-	// observable at all: without it a request can finish before the next starts
-	// and peak would read 1 even when the calls really were simultaneous.
+	// hold 让请求留台上，才能看见并发重叠；否则前一个抢先结束，真正并发也可能被 peak=1 误拍成独角戏。
 	hold     time.Duration
 	inFlight int
 	peak     int
@@ -217,9 +196,7 @@ func (u *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	status, tsLen := u.status, u.tsLen
 	setCookies := u.setCookies
-	// tsLenSeq shapes the answer per call, which is how "this exit's IP is
-	// throttled but the next one's is not" is expressed: the exits are
-	// indistinguishable to the fake, but the order they arrive in is not.
+	// tsLenSeq 按调用次序答复，演“这出口限流、下个没限”；假上游不认出口脸，但认排队号。
 	if len(u.tsLenSeq) > 0 {
 		if index < len(u.tsLenSeq) {
 			tsLen = u.tsLenSeq[index]
@@ -229,8 +206,7 @@ func (u *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	u.mu.Unlock()
 
-	// The turn-state begins with the real Fernet prefix so the redaction path is
-	// exercised on a realistic value; only its length is ever asserted on.
+	// state 顶着真实 Fernet 前缀考遮罩，值形态像真货，只断言长度，不看假票花纹。
 	if status == http.StatusOK && tsLen >= 6 {
 		w.Header().Set(turnStateHeader, "gAAAAA"+strings.Repeat("x", tsLen-6))
 	}
@@ -253,11 +229,9 @@ func (u *fakeUpstream) snapshot() []upstreamCall {
 	return append([]upstreamCall(nil), u.calls...)
 }
 
-// --- helpers -------------------------------------------------------------
+// --- 帮手：后台也排好班 ---
 
-// Spelled unlike anything in the other test files: the store cache is
-// process-global, and a bucket key shared with another test could make a run
-// decide there is nothing to fill.
+// bucket 键故意别于其他测试：缓存全进程共用，撞名会以为仓库已满，不再补货。
 const (
 	probeTestAccount = "codex-runnera-a@example.com-pro.json"
 	probeTestOther   = "codex-runnerb-b@example.com-pro.json"
@@ -317,9 +291,7 @@ func probeTestConfig(opts probeConfigOptions) string {
 	return builder.String()
 }
 
-// resetProbeRunner returns the package-level runner, the claim guard, and the
-// store cache to a clean state, and makes sure no run from an earlier case is
-// still in flight.
+// resetProbeRunner 清包级 runner、claim guard、存储缓存，还确认旧用例没留演员在台上跑。
 func resetProbeRunner(t *testing.T) {
 	t.Helper()
 	clear := func() {
@@ -330,15 +302,12 @@ func resetProbeRunner(t *testing.T) {
 		probeActive.mu.Lock()
 		probeActive.set = make(map[string]bool)
 		probeActive.mu.Unlock()
-		// The cooldown table is process-global and keyed by (exit, account,
-		// model). Left behind, one case's fire silently suppresses the next
-		// case's -- which shows up as "the transcript says nothing happened",
-		// not as an obvious cross-test leak.
+		// 冷却表全进程共用，键为（exit, account, model）；不清就让前场开火压住后场，
+		// 只表现为流水啥都没发生，串场幽灵最会装安静。
 		probeCooldown.mu.Lock()
 		probeCooldown.until = make(map[string]time.Time)
 		probeCooldown.mu.Unlock()
-		// Same reasoning for the account rest table: one case's 429 would
-		// otherwise silence every later case that touches that account.
+		// 账号休息表同理要清；上例一个 429 不能让后面所有同账号演员集体请假。
 		probeAccountRest.mu.Lock()
 		probeAccountRest.until = make(map[string]time.Time)
 		probeAccountRest.mu.Unlock()
@@ -356,7 +325,7 @@ func resetProbeRunner(t *testing.T) {
 	clear()
 }
 
-// setUpstream points the harvester at a fake upstream for one test.
+// setUpstream 给本用例采集器指向假上游，别走出片场。
 func setUpstream(t *testing.T, rawURL string) {
 	t.Helper()
 	previous := probeUpstreamURL
@@ -364,11 +333,8 @@ func setUpstream(t *testing.T, rawURL string) {
 	t.Cleanup(func() { probeUpstreamURL = previous })
 }
 
-// fastRenew shrinks the renewal cadence and the per-triple cooldown for one
-// test. Production never writes these; a real run checks once a minute and
-// spends at most one call per triple per 55 minutes. The cooldown has to shrink
-// alongside the cadence: leave it at 55 minutes and a renewal tick correctly
-// refuses to re-fire, so a renewal test would time out proving nothing.
+// fastRenew 同时缩短续期节奏与三元组冷却，只给测试快进。生产每分钟检查，每三元组 55 分钟至多一发。
+// 只调节奏不动 55 分钟冷却，续期会正确拒绝开火，测试等超时却什么也没考到。
 func fastRenew(t *testing.T, interval, threshold, cooldown time.Duration) {
 	t.Helper()
 	prevInterval, prevThreshold, prevCooldown := probeRenewInterval, probeRenewThreshold, probeExitCooldown
@@ -378,9 +344,7 @@ func fastRenew(t *testing.T, interval, threshold, cooldown time.Duration) {
 	})
 }
 
-// waitForProbeRun blocks until no run is marked running. It is for the failure
-// paths, which return; a healthy run enters the renewal loop and stays up until
-// cancelled, so success cases wait on progress instead.
+// waitForProbeRun 等 running 清零，只用于会返回的失败路径；健康运行进续期循环直到取消，成功用例要等进度，不等谢幕。
 func waitForProbeRun(t *testing.T) probeRunState {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -397,8 +361,7 @@ func waitForProbeRun(t *testing.T) probeRunState {
 	}
 }
 
-// waitUntil polls a condition to a deadline. The harvest is concurrent, so the
-// assertions wait for an observable effect rather than sleeping a fixed time.
+// waitUntil 在期限内轮询条件；采集并发，要等可见效果，不靠固定睡眠做梦猜结局。
 func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -411,8 +374,7 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// waitForInitialFill waits for the one-off fill pass to reach Total, i.e. every
-// selected bucket has been attempted once.
+// waitForInitialFill 等初填达到 Total，每个所选 bucket 都轮过一次，点名不能漏人。
 func waitForInitialFill(t *testing.T) {
 	t.Helper()
 	waitUntil(t, "initial fill to finish", func() bool {
@@ -427,11 +389,8 @@ func poolEntryCount() int {
 	return len(state.cookies)
 }
 
-// startProbeRun starts a run and registers a cleanup that stops it and waits for
-// the goroutine to exit. It is called after setUpstream/fastRenew, so its cleanup
-// runs FIRST in the LIFO order: the renewal goroutine is fully stopped before any
-// package var it reads (probeUpstreamURL, the renewal cadence) is restored, which
-// a still-live goroutine would otherwise race on.
+// startProbeRun 启动并登记停止、等 goroutine 退出的清理；它在 setUpstream/fastRenew 后调用，
+// 所以 LIFO 最先清它。先让续期演员下台，再恢复 probeUpstreamURL 和节奏等包变量，免得换布景时撞人竞态。
 func startProbeRun(t *testing.T) {
 	t.Helper()
 	if errStart := probeRunStart(); errStart != nil {
@@ -443,13 +402,11 @@ func startProbeRun(t *testing.T) {
 	})
 }
 
-// --- refusals ------------------------------------------------------------
+// --- 拒绝开工：缺道具就别硬演 ---
 
 func TestProbeRunStartRefusesIncompleteConfig(t *testing.T) {
-	// Each of these costs something when missing: an empty selection would
-	// otherwise have to mean "every account", spending quota on credentials the
-	// operator did not pick; a missing key means the harvester cannot read the
-	// account list at all; no store_dir means a harvest has nowhere to land.
+	// 空选择不能偷解释为全账号，免得花掉没被选中的配额；无 key 读不了名单，无 store_dir 没处落货。
+	// 每个检查都是真门槛，不是门口贴张纸。
 	tests := []struct {
 		name   string
 		narrow func(opts *probeConfigOptions)
@@ -482,9 +439,7 @@ func TestProbeRunStartRefusesIncompleteConfig(t *testing.T) {
 }
 
 func TestProbeRunStartRefusesEmptyStoreDir(t *testing.T) {
-	// store_dir is validated at configure for role probe, so this drives the
-	// refusal directly: a run built in-process with no store has nowhere to write
-	// a template for the business role to read.
+	// probe 的 store_dir 在 configure 就校验；此处直接造无仓库的运行考拒绝，没地方存模板就别向业务报丰收。
 	resetProbeRunner(t)
 	opts := probeTestOptions("", "http://127.0.0.1:1")
 	state.mu.Lock()
@@ -505,8 +460,7 @@ func TestProbeRunStartRefusesEmptyStoreDir(t *testing.T) {
 }
 
 func TestProbeRunStartIsSingleFlight(t *testing.T) {
-	// The run now owns the renewal loop and stays up until cancelled, so a second
-	// start must be refused rather than starting a second loop on the same buckets.
+	// 运行自己管续期直到取消，第二次 start 必须拒绝，同一批 bucket 不雇两班人撞着补货。
 	resetProbeRunner(t)
 	fake := newFakeCPA(t, fakeCredSeed{name: probeTestAccount, accountID: "acct-a"})
 	upstream := newFakeUpstream(t)
@@ -524,13 +478,11 @@ func TestProbeRunStartIsSingleFlight(t *testing.T) {
 	}
 }
 
-// --- harvest -------------------------------------------------------------
+// --- 采集：收对东西才算丰收 ---
 
 func TestProbePoolsTheMintedPair(t *testing.T) {
-	// The one property the business side depends on: a response that sets
-	// __cflb/__oailb lands in the GLOBAL pool for any account to steer with.
-	// Also asserts the request went out authorised and bare -- carrying a pair
-	// up would pin the node and stop the edge minting a fresh one.
+	// 业务所依赖的是响应 __cflb/__oailb 进全局池，任意账号可用。
+	// 还要查请求已鉴权且不带 pair；带旧房卡钉节点，边缘就不造新房卡，空手才领得到。
 	resetProbeRunner(t)
 	fake := newFakeCPA(t, fakeCredSeed{name: probeTestAccount, accountID: "acct-a"})
 	upstream := newFakeUpstream(t)
@@ -569,8 +521,7 @@ func TestProbePoolsTheMintedPair(t *testing.T) {
 }
 
 func TestProbeSkipsThrottled312(t *testing.T) {
-	// A 312 is the degraded/throttled state, not a template. Storing it would hand
-	// the business role the very state this plugin exists to route around.
+	// 312 是降级/限流，不是模板；存它再交业务，等于专卖本来要避开的坏票。
 	resetProbeRunner(t)
 	fake := newFakeCPA(t, fakeCredSeed{name: probeTestAccount, accountID: "acct-a"})
 	upstream := newFakeUpstream(t)
@@ -591,10 +542,8 @@ func TestProbeSkipsThrottled312(t *testing.T) {
 }
 
 func TestProbeSkipsExpiredTokenWithoutRefreshing(t *testing.T) {
-	// The safety rule: an expired access token is skipped, never refreshed --
-	// refreshing could rotate CPA's refresh token and break live traffic. With the
-	// only account expired the run fails cleanly, and the upstream is never called,
-	// so nothing was refreshed and nothing was fired on a dead token.
+	// 过期 access token 跳过且绝不刷新，免得轮换 CPA refresh token 破坏在线流量。
+	// 唯一账号过期就干净失败，上游零调用，不拿死票敲门，也不背后改钥匙。
 	resetProbeRunner(t)
 	fake := newFakeCPA(t, fakeCredSeed{
 		name:      probeTestAccount,
@@ -620,8 +569,7 @@ func TestProbeSkipsExpiredTokenWithoutRefreshing(t *testing.T) {
 }
 
 func TestProbeUnreadableTokenIsSkipped(t *testing.T) {
-	// A credential file with no access_token is unusable but must not crash the
-	// run; it is dropped with a line, and a run with nothing left fails cleanly.
+	// 凭据缺 access_token 不可用但不该炸进程；记一行丢弃，没人可用就干净失败，不拆舞台。
 	resetProbeRunner(t)
 	fake := newFakeCPA(t, fakeCredSeed{name: probeTestAccount, accountID: "acct-a", noToken: true})
 	upstream := newFakeUpstream(t)
@@ -638,12 +586,10 @@ func TestProbeUnreadableTokenIsSkipped(t *testing.T) {
 	}
 }
 
-// --- proxy pool ----------------------------------------------------------
+// --- 代理池：门挨个敲，账挨个记 ---
 
 func TestProbeExitsAssignInOrderWithFallback(t *testing.T) {
-	// The operator's rule: account i starts at exit i, then the rest in order,
-	// wrapping once, so every account has a full fallback sequence. An empty pool
-	// is one direct attempt.
+	// 账号 i 从出口 i 起按序走一圈，每账号都有完整回退序列；空池只直连一次，没菜单也有默认菜。
 	got := probeExits([]string{"p0", "p1", "p2"}, 0)
 	if fmt.Sprint(got) != fmt.Sprint([]string{"p0", "p1", "p2"}) {
 		t.Fatalf("account 0 order = %v, want p0,p1,p2", got)
@@ -658,15 +604,13 @@ func TestProbeExitsAssignInOrderWithFallback(t *testing.T) {
 	}
 }
 
-// newFakeProxy stands up a forwarding HTTP proxy so a test can hold two
-// genuinely distinct working exits. The pool needs real dialable URLs: "" is the
-// only other exit that works, and every "" collapses onto one cooldown key, so
-// the pool-walking rules cannot be exercised without this.
+// newFakeProxy 起真实可拨 HTTP 转发代理，造两条真能用的不同出口。
+// 否则只有 "" 直连可用，而多个 "" 共用冷却键，根本考不到沿池换门。
 func newFakeProxy(t *testing.T, hits *atomic.Int64) string {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		// A proxied request carries an absolute URL, so this forwards verbatim.
+		// 代理请求带绝对 URL，原样转交，不给门牌添戏。
 		outbound, errNew := http.NewRequest(r.Method, r.URL.String(), r.Body)
 		if errNew != nil {
 			http.Error(w, errNew.Error(), http.StatusBadGateway)
@@ -691,9 +635,8 @@ func newFakeProxy(t *testing.T, hits *atomic.Int64) string {
 	return server.URL
 }
 
-// harvestTestConfig is a minimal config for driving probeHarvestBucket directly,
-// which is how the pool rules are tested: going through probeRunStart would put
-// the exits through normaliseProbeScope and lose the shape each case needs.
+// harvestTestConfig 最简配置直接喂 probeHarvestBucket 考池规则；
+// 走 probeRunStart 会经 normaliseProbeScope 改形状，题目道具不能先被后台修掉。
 func harvestTestConfig(t *testing.T) (pluginConfig, probeCredential, *probeClientPool) {
 	t.Helper()
 	cfg := pluginConfig{
@@ -705,8 +648,7 @@ func harvestTestConfig(t *testing.T) (pluginConfig, probeCredential, *probeClien
 	cred := probeCredential{name: probeTestAccount, accessToken: "token-a", accountID: "acct-a"}
 	pool := newProbeClientPool()
 	t.Cleanup(pool.closeIdle)
-	// Production spaces exits two seconds apart, which would put the whole suite
-	// to sleep; the pacing itself is asserted by its own case.
+	// 生产出口间隔两秒，整套测试照睡会睡成连续剧；节奏有专门用例，这里快进。
 	previous := probeExitPause
 	probeExitPause = time.Millisecond
 	t.Cleanup(func() { probeExitPause = previous })
@@ -714,12 +656,11 @@ func harvestTestConfig(t *testing.T) (pluginConfig, probeCredential, *probeClien
 }
 
 func TestProbeAdvancesToNextExitOn312(t *testing.T) {
-	// The defect this pins: a 312 used to end the whole attempt, so the second
-	// exit was never dialed and the pool was decorative. A 312 is THIS EXIT's IP
-	// being throttled for this account, so the next exit must get its turn.
+	// 钉住旧缺陷：312 曾让整次停止，第二出口永远不上场，池沦为摆设。
+	// 312 限的是此账号当前出口 IP，下一出口必须有出场机会。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
-	upstream.tsLenSeq = []int{312, 292} // first exit throttled, second not
+	upstream.tsLenSeq = []int{312, 292} // 首出口限流，第二扇门正常开
 	upstream.setCookies = []string{"__cflb=cf; Path=/", "__oailb=lb; Path=/"}
 	setUpstream(t, upstream.server.URL)
 
@@ -744,12 +685,10 @@ func TestProbeAdvancesToNextExitOn312(t *testing.T) {
 }
 
 func TestProbeStopsAfterWalkingThePoolAndCoolsDown(t *testing.T) {
-	// Once every exit has been tried the bucket is out of options for the window.
-	// Re-firing it was the 540-calls-an-hour defect, so a second attempt inside
-	// the cooldown must spend nothing at all.
+	// 本窗口所有出口试完就无路可走；冷却内第二次不能再花配额，防止重演每小时 540 次乱敲门。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
-	upstream.tsLen = 312 // every exit throttled
+	upstream.tsLen = 312 // 所有出口都挂限流牌
 	setUpstream(t, upstream.server.URL)
 
 	var hitsA, hitsB atomic.Int64
@@ -774,12 +713,10 @@ func TestProbeStopsAfterWalkingThePoolAndCoolsDown(t *testing.T) {
 }
 
 func TestProbeNewExitIsEligibleImmediately(t *testing.T) {
-	// The operator's workflow: the pool is exhausted, they add a proxy, and that
-	// new exit must be tried at once rather than waiting out a window it was
-	// never part of. It falls out of keying the cooldown on the exit URL.
+	// 池耗尽后新增代理应立刻试，新门没参加旧冷却，不必陪罚站；按出口 URL 记冷却就能区分。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
-	upstream.tsLenSeq = []int{312, 312, 292} // the two old exits, then the new one
+	upstream.tsLenSeq = []int{312, 312, 292} // 先两扇旧门，再给新出口试镜
 	upstream.setCookies = []string{"__cflb=cf; Path=/", "__oailb=lb; Path=/"}
 	setUpstream(t, upstream.server.URL)
 
@@ -812,9 +749,8 @@ func TestProbeNewExitIsEligibleImmediately(t *testing.T) {
 	}
 }
 
-// A 429 is not an exit problem, and answering it by dialing the next exit is
-// what turned a handful of 312s into 21 429s on 2026-09-18: every remaining exit
-// carries the same credential the upstream just asked to slow down.
+// 429 不是换出口能治：2026-09-18 把几次 312 打成 21 次 429，
+// 正因剩余出口仍拿同一份被要求慢下来的凭据；人该休息，不是换鞋继续跑。
 func TestProbe429StopsTheWalkAndRestsTheAccount(t *testing.T) {
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
@@ -838,16 +774,14 @@ func TestProbe429StopsTheWalkAndRestsTheAccount(t *testing.T) {
 		t.Fatal("the account was not rested after a 429, so the next bucket will hit it again immediately")
 	}
 
-	// And nothing of that account fires again while it is resting.
+	// 账号休息期内任何桶都不能再开火，同一演员不能换面具加班。
 	probeHarvestBucket(context.Background(), cfg, pool, cred, "another-model", exits, nil, 0)
 	if got := upstream.count(); got != 1 {
 		t.Fatalf("upstream calls grew to %d while the account was resting", got)
 	}
 }
 
-// One credential is worked by one goroutine, so two of its buckets never have
-// requests in flight at the same time. Fanning out over targets instead is how a
-// single account saw ~7.5 requests a second.
+// 一凭据只由一 goroutine 干活，其两桶不同时在途；按目标散开曾让单账号每秒约 7.5 请求，群演抢同一张工牌。
 func TestProbeSerialisesOneAccountsBuckets(t *testing.T) {
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
@@ -874,11 +808,8 @@ func TestProbeSerialisesOneAccountsBuckets(t *testing.T) {
 }
 
 func TestProbeFallsThroughToNextExitOnTransportFailure(t *testing.T) {
-	// A dead first exit must not lose the harvest: the account falls through to the
-	// next exit in its sequence. The pool is handed straight to probeHarvestBucket
-	// so the direct entry ("") survives -- normaliseProbeScope trims an empty proxy
-	// from a configured pool, which is right in production (an empty pool already
-	// means direct) but would erase the exact second exit this case needs.
+	// 首出口死了要落到下个出口；直接给 probeHarvestBucket 池，保留直连 ""。
+	// normaliseProbeScope 会裁空代理，生产正确（空池已表示直连），但本题必须保住第二扇门。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
 	upstream.setCookies = []string{"__cflb=cf; Path=/", "__oailb=lb; Path=/"}
@@ -894,7 +825,7 @@ func TestProbeFallsThroughToNextExitOnTransportFailure(t *testing.T) {
 	pool := newProbeClientPool()
 	defer pool.closeIdle()
 
-	// Exit 0 is a closed port (instant connection refused); exit 1 is direct.
+	// 出口 0 关端口即刻拒连，出口 1 直连；一扇假门，一条真路。
 	probeHarvestBucket(context.Background(), cfg, pool, cred, probeTestModel, []string{"http://127.0.0.1:1", ""}, nil, 0)
 
 	if poolEntryCount() == 0 {
@@ -908,12 +839,11 @@ func TestProbeFallsThroughToNextExitOnTransportFailure(t *testing.T) {
 	}
 }
 
-// --- renewal -------------------------------------------------------------
+// --- 续期：票快馊了再开灶 ---
 
 func TestProbeRenewsBucketNearingExpiry(t *testing.T) {
-	// After the initial fill the run stays up and tops up buckets near expiry. With
-	// a large threshold the freshly filled bucket is immediately due, so a second
-	// upstream call is proof the renewal loop is running.
+	// 初填后继续守着近过期 bucket；阈值设大，新填马上又到期续补，
+	// 第二次上游调用就证明续期循环真在值班。
 	resetProbeRunner(t)
 	fastRenew(t, 15*time.Millisecond, 2*time.Hour, time.Millisecond)
 	fake := newFakeCPA(t, fakeCredSeed{name: probeTestAccount, accountID: "acct-a"})
@@ -926,20 +856,17 @@ func TestProbeRenewsBucketNearingExpiry(t *testing.T) {
 	waitUntil(t, "a renewal fire", func() bool { return upstream.count() >= 2 })
 }
 
-// --- secrets -------------------------------------------------------------
+// --- 秘密：流水不能当密码展览 ---
 
 func TestProbeRunNeverLeaksAProxyPassword(t *testing.T) {
-	// Lines, the run error and Current are all rendered on a page that needs no
-	// key. A proxy with a password, used as a dead exit, must appear masked in the
-	// transport-failure line and never in the clear.
+	// Lines、运行错误、Current 都进免密页面；带密码的死代理即便在传输失败行也必须遮罩，失败不许摘口罩。
 	resetProbeRunner(t)
 	fake := newFakeCPA(t, fakeCredSeed{name: probeTestAccount, accountID: "acct-a"})
 	upstream := newFakeUpstream(t)
 	setUpstream(t, upstream.server.URL)
 
 	opts := probeTestOptions(t.TempDir(), fake.server.URL)
-	// A password-bearing exit at a refused port: it fails fast, and the failure is
-	// logged through the masking path.
+	// 带密码出口指拒连端口，让它快失败，专考日志是否走遮罩通道。
 	opts.proxies = []string{"http://prober:" + testProxySecret + "@127.0.0.1:1"}
 	mustConfigure(t, probeTestConfig(opts))
 	startProbeRun(t)
@@ -956,24 +883,14 @@ func TestProbeRunNeverLeaksAProxyPassword(t *testing.T) {
 	}
 }
 
-// The probe transcript used to mask account names with its own copy of the
-// algorithm (probeShortAuth), kept in step with maskAuthLabel by hand. The copy
-// is gone and both sides call maskAuthLabel, whose own test (TestMaskAuthLabel)
-// is a strict superset of the cases this one held -- it additionally covers an
-// email in the final position and a name that is nothing but an email, which
-// are the two shapes that actually leak.
+// 旧 probeShortAuth 自抄一份遮罩算法还得手工同步，如今两边统一用 maskAuthLabel。
+// TestMaskAuthLabel 覆盖原测试且更多，尤其邮件在末尾、全名就是邮件这两种真漏法；两本假账改成一本真账。
 
-// --- the rotating pool ----------------------------------------------------
-//
-// A rotating entry is not an exit, it is a gateway that hands out a different
-// address on every connection (measured 2026-09-19 against the operator's pool:
-// twenty consecutive requests, twenty distinct UK addresses). Everything below
-// pins the consequence: the retry the static rule forbids is the only thing that
-// can clear a 312 there, so the two pools cannot share one rule.
+// --- 轮换池：同门口不等于同出口 ---
+// 轮换条目是每连接换地址的网关；2026-09-19 实测连续 20 请求得到 20 个不同英国地址。
+// 静态规矩禁止的重试恰是这里消除 312 的办法，两池不能共穿一双鞋。
 
-// shrinkRotating lowers the rotating budget for one test. Production never
-// writes these; a test that spent the real ten attempts would be ten fake round
-// trips slower for nothing.
+// shrinkRotating 只给本用例缩轮换预算，生产不写这些；真跑十次假往返只会多等，不多长见识。
 func shrinkRotating(t *testing.T, attempts int, cooldown time.Duration) {
 	t.Helper()
 	prevAttempts, prevCooldown := probeRotatingAttempts, probeRotatingCooldown
@@ -984,13 +901,11 @@ func shrinkRotating(t *testing.T, attempts int, cooldown time.Duration) {
 }
 
 func TestProbeRotatingRetriesOneEntryForAFreshAddress(t *testing.T) {
-	// The defect the split exists to fix. With one entry in the pool the static
-	// rule allows exactly one call per 55 minutes, so a single 312 left the bucket
-	// empty for the rest of the window even though the very next connection
-	// through that same entry would have come from a different address.
+	// 拆池治的是单条目被静态规矩锁成 55 分钟一次：一次 312 就空整窗，
+	// 可同条目下一连接本会换 IP，不能因为门牌相同就认定来客还是同一人。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
-	upstream.tsLenSeq = []int{312, 312, 292} // the third address is not throttled
+	upstream.tsLenSeq = []int{312, 312, 292} // 第三个地址没挂限流牌
 	upstream.setCookies = []string{"__cflb=cf; Path=/", "__oailb=lb; Path=/"}
 	setUpstream(t, upstream.server.URL)
 	cfg, cred, pool := harvestTestConfig(t)
@@ -1008,16 +923,14 @@ func TestProbeRotatingRetriesOneEntryForAFreshAddress(t *testing.T) {
 }
 
 func TestProbeRotatingStopsAtItsBudgetAndRestsBriefly(t *testing.T) {
-	// The budget is real -- an account that answers 312 from every address must
-	// not be retried forever -- but the rest afterwards is the SHORT window, not
-	// the static one. Resting a rotating pool for 55 minutes after a failure is
-	// what left the operator's buckets empty for fifty minutes at a stretch.
+	// 预算必须真封顶，所有地址都 312 不能无休止试；之后休息用短窗口而非静态 55 分钟，
+	// 否则运营者的桶一空就是五十分钟，午休比营业还长。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
-	upstream.tsLen = 312 // every address throttled
+	upstream.tsLen = 312 // 每个地址都限流，换鞋也跑不动
 	setUpstream(t, upstream.server.URL)
 	cfg, cred, pool := harvestTestConfig(t)
-	shrinkRotating(t, 4, time.Hour) // long enough to observe the rest
+	shrinkRotating(t, 4, time.Hour) // 休息安排够长，才能拍到冷板凳场面
 
 	if !probeHarvestBucket(context.Background(), cfg, pool, cred, probeTestModel, nil, []string{""}, 0) {
 		t.Fatal("the first pass made no upstream call")
@@ -1032,8 +945,7 @@ func TestProbeRotatingStopsAtItsBudgetAndRestsBriefly(t *testing.T) {
 		t.Fatalf("upstream calls = %d after the second pass, want 4 -- the rest window is not holding", got)
 	}
 
-	// And the rest really is the rotating window, not probeExitCooldown: the
-	// bucket must be eligible again once that shorter window passes.
+	// 确实等轮换短窗，不是 probeExitCooldown；短窗一过就准 bucket 回台。
 	shrinkRotating(t, 4, time.Nanosecond)
 	probeCooldownSet(probeRotatingExit, cred.name, probeTestModel, time.Now().Add(-time.Second))
 	if !probeHarvestBucket(context.Background(), cfg, pool, cred, probeTestModel, nil, []string{""}, 0) {
@@ -1042,9 +954,7 @@ func TestProbeRotatingStopsAtItsBudgetAndRestsBriefly(t *testing.T) {
 }
 
 func TestProbeRotatingStopsOnAccountLimit(t *testing.T) {
-	// 429 is the credential being told to slow down. No address the gateway can
-	// hand out changes that, so the remaining budget must not be spent -- this is
-	// the same distinction between 312 and 429 the static path makes.
+	// 429 叫凭据慢下来，网关换任何地址都不改这条命令；剩余预算不花，与静态路径同分 312/429。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
 	upstream.status = http.StatusTooManyRequests
@@ -1063,10 +973,8 @@ func TestProbeRotatingStopsOnAccountLimit(t *testing.T) {
 }
 
 func TestProbeRotatingPoolSuppressesTheImplicitDirectExit(t *testing.T) {
-	// An empty probe_proxies has always meant "go out over the box's own egress".
-	// Once the operator moves their whole pool to the rotating list, that default
-	// would quietly send harvests from the server's own address -- the one thing
-	// they are paying a proxy to avoid. The rotating pool must suppress it.
+	// 空 probe_proxies 原来表示本机出网；若代理全搬轮换表，这个默认会偷偷从服务器地址采集。
+	// 用户花钱正是为了不走本机出口，所以轮换池要压住这条老近路。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
 	upstream.tsLen = 292
@@ -1088,12 +996,10 @@ func TestProbeRotatingPoolSuppressesTheImplicitDirectExit(t *testing.T) {
 }
 
 func TestProbeStaticPoolIsTriedBeforeRotating(t *testing.T) {
-	// Static budgets perish -- one call per exit per window, unused or not --
-	// while a rotating entry can be tapped at any time. So the perishable
-	// resource goes first.
+	// 静态预算每出口每窗一发，没用也过期；轮换条目随时可用，先吃保质期短的那盘。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
-	upstream.tsLenSeq = []int{312, 292} // the static exit is throttled, rotating is not
+	upstream.tsLenSeq = []int{312, 292} // 静态出口限流，轮换出口照常开窗
 	upstream.setCookies = []string{"__cflb=cf; Path=/", "__oailb=lb; Path=/"}
 	setUpstream(t, upstream.server.URL)
 	cfg, cred, pool := harvestTestConfig(t)
@@ -1116,12 +1022,10 @@ func TestProbeStaticPoolIsTriedBeforeRotating(t *testing.T) {
 	}
 }
 
-// The 64KB body cap predates v7.3.4's rich auth-files entries (recent_requests,
-// quota, model_quotas, cooldowns): a modest fleet truncates the document mid-
-// JSON, surfacing as "unexpected end of JSON input" instead of a list. The cap
-// is now generous, and a response past it must say so rather than mis-parse.
+// 64KB 上限早于 v7.3.4 富 auth-files 条目（recent_requests、quota、model_quotas、cooldowns）。
+// 不大一队账号就把 JSON 截腰，报 unexpected end of JSON input。如今上限放宽，超了必须明说，不能把剪坏菜单怪成厨师不识字。
 func TestProbeClientReadsLargeManagementDocument(t *testing.T) {
-	big := strings.Repeat("x", 200<<10) // 200KB -- past the old 64KB cap
+	big := strings.Repeat("x", 200<<10) // 200KB，挤破旧 64KB 小信封
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"files":[%q]}`, big)
@@ -1145,8 +1049,7 @@ func TestProbeClientReadsLargeManagementDocument(t *testing.T) {
 }
 
 func TestProbeClientReportsOversizeRatherThanMisParsing(t *testing.T) {
-	// A body past the generous cap must be a readable error, not a JSON syntax
-	// error -- that is what made the 64KB truncation so hard to diagnose.
+	// 超过宽上限要报可读容量错，不是 JSON 语法错；64KB 那次难查就难在裁纸人装作没来过。
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(make([]byte, probeMgmtMaxBodyBytes+2))
 	}))

@@ -10,17 +10,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// --- the catalog seam --------------------------------------------------------
-//
-// The steering gate judges the selected credential by what the host reports
-// about it -- provider first, then type, filename last. These tests pin the
-// precedence, because the failure they guard is directional: a codex-named
-// file holding another provider's credential would carry OpenAI's routing
-// cookies onto the wrong upstream, and only the reported provider catches it.
+// --- 凭据目录接缝：认工牌，别看艺名 ---
+// 引导门禁听宿主报告，先 provider，再 type，最后文件名。
+// Codex 名字的文件可能装其他提供商凭据；只有 provider 优先，才不会把 OpenAI 房卡送错剧组。
 
-// withAuthCatalog installs a fake full credential catalog for the duration of
-// one test. The gate reads it through a 2-second cache, so the cache is reset
-// on both install and cleanup -- a stale catalog must never leak across cases.
+// withAuthCatalog 给一个用例装假完整凭据目录；门禁有 2 秒缓存，安装和清理都重置，旧花名册别跨场串戏。
 func withAuthCatalog(t *testing.T, files []pluginapi.HostAuthFileEntry, err error) {
 	t.Helper()
 	authCatalogLister = func() ([]pluginapi.HostAuthFileEntry, error) {
@@ -39,16 +33,15 @@ func TestEntryIsCodexProviderPrecedence(t *testing.T) {
 		file pluginapi.HostAuthFileEntry
 		want bool
 	}{
-		// Provider is authoritative: it outranks the filename in both
-		// directions.
+		// provider 双向压过文件名，工牌是真身份，艺名再响也没用。
 		{"provider codex, plain name", pluginapi.HostAuthFileEntry{Name: "work.json", Provider: "codex"}, true},
 		{"provider codex, case-insensitive", pluginapi.HostAuthFileEntry{Name: "work.json", Provider: "Codex"}, true},
 		{"provider gemini, codex name", pluginapi.HostAuthFileEntry{Name: "codex-evil.json", Provider: "gemini"}, false},
 		{"provider unknown, codex name", pluginapi.HostAuthFileEntry{Name: "codex-x.json", Provider: "unknown"}, false},
-		// Type is the fallback only when provider is empty.
+		// provider 没填才轮到 type 顶班，替补别抢首发。
 		{"type codex, provider empty", pluginapi.HostAuthFileEntry{Name: "work.json", Type: "codex"}, true},
 		{"type gemini, codex name", pluginapi.HostAuthFileEntry{Name: "codex-evil.json", Type: "gemini"}, false},
-		// Both empty: the filename convention is all there is.
+		// 两项都空才靠文件名约定认人，线索只剩门口招牌。
 		{"codex name, nothing reported", pluginapi.HostAuthFileEntry{Name: "codex-a.json"}, true},
 		{"codex id, nothing reported", pluginapi.HostAuthFileEntry{ID: "codex-b.json"}, true},
 		{"plain name, nothing reported", pluginapi.HostAuthFileEntry{Name: "work.json"}, false},
@@ -62,8 +55,7 @@ func TestEntryIsCodexProviderPrecedence(t *testing.T) {
 	}
 }
 
-// The fix for the silent no-steer case: a Codex credential whose file is not
-// named like one must still be steered, because the host says it is Codex.
+// 修静默漏引导：文件名不像 Codex，但宿主说是 Codex 就得引导，别按发型拒客。
 func TestSteerUsesProviderNotFilename(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
@@ -78,8 +70,7 @@ func TestSteerUsesProviderNotFilename(t *testing.T) {
 	}
 }
 
-// The leak this gate exists for: the filename says codex, the provider says
-// gemini -- the provider wins, and the pair stays off the request.
+// 防泄漏正题：文件名叫 codex，provider 写 gemini，信 provider；pair 不许跟错车。
 func TestSteerRefusesCodexNamedForeignCredential(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
@@ -94,8 +85,7 @@ func TestSteerRefusesCodexNamedForeignCredential(t *testing.T) {
 	}
 }
 
-// A catalog that answers but does not know the selected auth is a race or an
-// inconsistency, not a licence to steer on the filename alone.
+// 目录能读却找不到所选 auth，是竞态或不一致；不能拿文件名给未知来客开后门。
 func TestSteerRefusesAuthAbsentFromCatalog(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
@@ -110,8 +100,7 @@ func TestSteerRefusesAuthAbsentFromCatalog(t *testing.T) {
 	}
 }
 
-// Degraded mode: when the catalog itself cannot be read, the filename
-// convention is the only signal left and the legacy behaviour holds.
+// 目录本身读不到才进入降级，剩文件名这一条线索，沿用旧规矩摸路。
 func TestSteerFallsBackToFilenameWhenCatalogDown(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
@@ -128,8 +117,7 @@ func TestSteerFallsBackToFilenameWhenCatalogDown(t *testing.T) {
 	}
 }
 
-// The index is matched before the id: it survives a rename, which is exactly
-// when the reported name would mislead.
+// 先匹配 index 再 id；改名后 index 仍在，别被换招牌骗到隔壁。
 func TestSteerMatchesBySelectedAuthIndex(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
@@ -139,8 +127,7 @@ func TestSteerMatchesBySelectedAuthIndex(t *testing.T) {
 		{ID: "codex-decoy.json", Name: "codex-decoy.json", AuthIndex: "idx-4", Provider: "gemini"},
 	}, nil)
 
-	// A codex-named id that does not resolve, with the index pointing at the
-	// real codex entry: the index decides, so this steers.
+	// codex 风格 id 查不到，但 index 指真 Codex 条目，听 index，照常引导。
 	req := request("renamed.json", "gpt-5.6-sol", fakeTokenSeed(312, wallClock(), 0x77))
 	req.Metadata[selectedAuthIndexMetadataKey] = "idx-9"
 	resp := interceptAfter(t, req)
@@ -148,10 +135,8 @@ func TestSteerMatchesBySelectedAuthIndex(t *testing.T) {
 		t.Fatalf("an index-verified Codex account was not steered: %q", cookie)
 	}
 
-	// The mirror, and the case that actually proves precedence: the reported id
-	// names the CODEX entry while the index names the GEMINI one. Only an
-	// index-first lookup refuses the steer -- an id-first one would attach the
-	// pair onto gemini traffic.
+	// 反向才真考优先级：id 指 CODEX，index 指 GEMINI。必须 index 先查并拒绝，
+	// 否则 id 抢答就把 pair 搬上 Gemini 的车。
 	req2 := request("original.json", "gemini-3", fakeTokenSeed(312, wallClock(), 0x77))
 	req2.Metadata[selectedAuthIndexMetadataKey] = "idx-4"
 	resp2 := interceptAfter(t, req2)
@@ -160,7 +145,7 @@ func TestSteerMatchesBySelectedAuthIndex(t *testing.T) {
 	}
 }
 
-// An index-only request -- no selected_auth_id at all -- is still attributable.
+// 只带 index、没有 selected_auth_id 也能归属，有座位号不必再喊艺名。
 func TestSteerAttributesByIndexAlone(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
@@ -180,9 +165,7 @@ func TestSteerAttributesByIndexAlone(t *testing.T) {
 	}
 }
 
-// The sole-account inference and the gate now speak the same language: an
-// inferred account whose catalog entry says codex steers even when its file is
-// not named like one; one whose entry says otherwise is refused.
+// 单账号推断与门禁说同一套话：目录说 Codex 就算文件名不像也引导；说别家就拒绝，不认口音认工牌。
 func TestSoleAccountInferenceVerifiedByCatalog(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
@@ -202,8 +185,7 @@ func TestSoleAccountInferenceRefusedByCatalog(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
 	seedPoolEntry(t, map[string]string{"__cflb": "cf"}, time.Now(), "")
-	// The codex list counts it (filename fallback), the catalog says gemini:
-	// the gate believes the provider, and the pair stays off.
+	// Codex 列表按文件名把它点进来，目录却说 gemini；门禁信 provider，pair 不跟着凑热闹。
 	withAuthList(t, enabledAccounts("codex-suspect.json"), nil)
 	withAuthCatalog(t, []pluginapi.HostAuthFileEntry{
 		{ID: "codex-suspect.json", Name: "codex-suspect.json", Provider: "gemini"},

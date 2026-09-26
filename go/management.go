@@ -1,34 +1,10 @@
-// Management API for the codex-turn-state plugin.
-//
-// This plugin is deployed keyless by the operator's explicit, repeated choice:
-// opening the dashboard and every action on it work with no management key. The
-// box binds CPA to 127.0.0.1 and is reachable only through an SSH tunnel, so
-// "keyless" means "anyone who can reach the tunnel", which in practice is the
-// operator. That decision is what shapes the two route kinds below.
-//
-//   - Everything the dashboard uses -- the HTML shell, the status document, and
-//     every action it offers (dry_run, role, clear, selftest, scope save, probe
-//     start and probe cancel) -- is a ResourceRoute.
-//     Those are served under /v0/resource/plugins/<id>/ and the host does NOT
-//     authenticate them ("Resource requests are not management-authenticated" --
-//     pluginapi). The host also hard-restricts them to GET (ServeResourceHTTP
-//     rejects any other method) and passes the query string but no body, so the
-//     action routes read their parameters from the query and guard against an
-//     accidental firing with confirm=1 rather than with a key.
-//
-//   - The same clear and selftest operations are ALSO exposed as authenticated
-//     ManagementRoutes under /v0/management/ (POST, reading a JSON body), for a
-//     script that holds the management key. Those are not what the dashboard
-//     calls; they are the keyed API path kept alongside the keyless one. Their
-//     Menu field is left empty: a GET route that declares one is re-registered
-//     under the resource prefix (routeDeclaresLegacyMenuResource in the host),
-//     which would matter only for a GET, but the rule is kept in view here.
-//
-// No response from any route in this file contains a cookie value. The pool
-// holds credential material; the dashboard needs readiness and expiry,
-// and readiness and expiry are all it gets. The status document does expose each
-// bucket's auth_id, which is the credential filename and contains the customer
-// email -- an accepted consequence of an anonymously readable status.
+// Management API 是 codex-turn-state 的前台，不是人人发一把管理钥匙的锁匠铺。
+// 按操作者明确选择，本部署采用 keyless：CPA 绑定 127.0.0.1，经 SSH 隧道访问；能到隧道的人就能操作面板。这是部署边界，不是插件自带身份认证。
+// 面板 HTML、status 及 dry_run、role、clear、selftest、scope save、probe start/cancel 都登记为 ResourceRoute。
+// 宿主在 /v0/resource/plugins/<id>/ 下不鉴权，只收 GET，传 query 不传 body；动作凭 confirm=1 防误触，不能把这枚确认章当门锁。
+// clear/selftest 另有 /v0/management/ 下带管理密钥的 POST ManagementRoutes，读取 JSON，供脚本使用，并非面板调用的路径。
+// 这些路由不填 Menu：宿主会把声明 Menu 的 GET 移挂资源前缀（routeDeclaresLegacyMenuResource），别给带锁柜台偷偷开个无锁后门。
+// 所有响应都不返回 Cookie 值，只给池的就绪度和到期信息；auth_id 是含客户邮箱的凭据文件名，匿名状态接口仍暴露它，这是已接受的隐私代价。
 package main
 
 import (
@@ -49,115 +25,65 @@ import (
 //go:embed cloud_mint_ui.html
 var dashboardHTML []byte
 
-// Route suffixes. The host hands back a path that may be absolute or relative
-// depending on how it resolved the registration, so dispatch matches on the
-// suffix rather than on equality.
+// 路由后缀是认人的暗号：宿主可能给绝对路径，也可能给相对路径。
+// 按 suffix 分发，不要求整条门牌长得一模一样。
 const (
 	routeStatus       = "/codex-turn-state/status"
 	routeBucketsClear = "/codex-turn-state/buckets/clear"
-	// Named selftest, not probe: it cannot harvest, and sharing a name with the
-	// dashboard's 探测 would invite exactly the wrong conclusion from a green
-	// result. See selftestNote.
+	// 叫 selftest，不叫 probe：它不能采集，绿灯只能说明路通。
+	// 别把门铃响了当成仓库满了，说明见 selftestNote。
 	routeSelftest = "/codex-turn-state/selftest"
-	// routeDashboard is relative to the plugin's own resource prefix, so the
-	// browser-facing URL is /v0/resource/plugins/codex-turn-state/dashboard.
+	// routeModeltrace 主动 WS 探针：对灌池源连打 N 轮，报告每轮 served 模型及探测判定。
+	// 这是带 key 的 POST，像 selftest 一样真花额度，不是舞台纸钞。
+	routeModeltrace = "/codex-turn-state/modeltrace"
+	// routeGatewaySweep 多轮调用 FC modeltrace，按网关汇总探测所称的满血率；找落点，不给武功颁终身证书。
+	routeGatewaySweep = "/codex-turn-state/gateway-sweep"
+	// routeDashboard 相对插件资源前缀挂门牌，浏览器地址是
+	// /v0/resource/plugins/codex-turn-state/dashboard，别敲隔壁管理柜台。
 	routeDashboard = "/dashboard"
-	// routeStatusResource is the unauthenticated, resource-prefix alias of the
-	// status route: /v0/resource/plugins/codex-turn-state/status. Its resolved
-	// path ends in the same /codex-turn-state/status suffix routeStatus matches
-	// on, so both dispatch to handleStatus with no extra case. It exists so the
-	// dashboard can render on open, before the operator has entered any key.
+	// routeStatusResource 是免管理钥匙的状态别名：/v0/resource/plugins/codex-turn-state/status。
+	// 它与 routeStatus 同以 /codex-turn-state/status 收尾，都去 handleStatus；面板一开门就能取数，不必先找钥匙。
 	routeStatusResource = "/status"
-	// routeConfig returns the configuration verbatim. The dashboard no longer
-	// needs it -- the status document carries the proxy list in the clear now --
-	// but it stays exactly where it is, behind the management key and with no
-	// resource alias, because "the config, verbatim" is the shape any future
-	// secret lands in by default. probe_management_key is already such a secret,
-	// and it is not in configResponse for precisely that reason. An alias here would publish whatever this route grows next,
-	// with no error and no log line.
+	// routeConfig 原样返回配置，所以仍锁在管理密钥之后，不设资源别名。
+	// 面板已改从 status 取明文代理列表，不靠它开饭；但未来配置里的秘密可能顺势出现在这里。
+	// probe_management_key 已是秘密，故不放进 configResponse；别等无声无息公开了才发现柜门没锁。
 	routeConfig = "/codex-turn-state/config"
 
-	// The keyless action routes. These are ResourceRoutes, so the host serves
-	// them without a management key and restricts them to GET (see the package
-	// comment). They exist because the operator chose keyless operation: the four
-	// actions the dashboard offers -- flip dry_run, switch role, clear buckets,
-	// run a self-test -- carry no secret, so exposing them anonymously leaks
-	// nothing the anonymous status did not already. The proxy editor is
-	// deliberately NOT among them: it reads and writes proxy userinfo, and that
-	// stays behind routeConfig and CPA's authenticated config PATCH.
-	//
-	// They are GET routes that change state, so each requires confirm=1 -- not as
-	// authentication, but so a bare navigation, a link prefetch or a crawler
-	// cannot fire one just by loading the URL. The suffixes carry an /ops/ segment
-	// so they cannot collide with the /buckets/clear or /selftest management
-	// routes under suffix matching.
+	// 这些 keyless 动作明确登记为 ResourceRoutes：宿主不查管理密钥，只准 GET。
+	// 按操作者选择，dry_run、role、clear、selftest 不多带秘密；代理编辑不在这一组，它涉及 userinfo，仍由 routeConfig 与 CPA 鉴权 PATCH 把关。
+	// GET 会改状态，故必须 confirm=1 防止裸导航、预取或爬虫误触；这不是身份验证，举手不等于出示身份证。
+	// 后缀加 /ops/，免得与管理侧 /buckets/clear、/selftest 撞名，两个柜台抢一张叫号票。
 	routeOpsDryRun   = "/ops/dry-run"
 	routeOpsRole     = "/ops/role"
 	routeOpsClear    = "/ops/clear"
 	routeOpsSelftest = "/ops/selftest"
-	// routeOpsScope saves the probe scope, keyless like the rest of /ops.
-	//
-	// It writes the plugin's own scope file rather than CPA's config.yaml,
-	// because the host offers no way for a plugin to persist its configuration
-	// and the route that would (PATCH /v0/management/plugins/<id>/config) is
-	// authenticated -- a key in front of the one screen that must not need one.
+	// routeOpsScope 跟其他 /ops 一样免管理钥匙，保存到插件自己的 scope 文件。
+	// 宿主没给插件持久化配置的回调；PATCH /v0/management/plugins/<id>/config 又要鉴权，不能把免钥匙页面最后一步锁进柜子。
 	routeOpsScope = "/ops/scope"
-	// The probe runner's two controls, keyless like the rest of /ops and for the
-	// same reason: the whole point of running a probe from the dashboard is that
-	// nobody has to type a key to do it. The bearer the run itself needs comes
-	// from probe_management_key in the config, which is why neither route takes
-	// one and why neither response can ever echo it.
-	//
-	// Being in the resource list is deliberate, not incidental. A GET management
-	// route that declares a Menu is silently re-registered under the
-	// unauthenticated resource prefix (routeDeclaresLegacyMenuResource in the
-	// host), which is how a route ends up keyless by accident; these are keyless
-	// by choice, declared where keyless routes belong.
-	//
-	// Start spends real quota and cancel stops a run in flight, so both go through
-	// handleOpsResource and both require confirm=1.
+	// 探测启停也走 keyless /ops，省掉面板输入管理钥匙这道手续。
+	// 执行所需 bearer 来自配置 probe_management_key，两个接口既不接收也不回显它，钥匙只在后台转手。
+	// 资源路由是主动选择；别靠带 Menu 的 GET 被宿主悄悄移挂到免鉴权前缀来“碰巧免锁”。
+	// start 真花额度，cancel 真停任务，因此都经 handleOpsResource 检查 confirm=1。
 	routeOpsProbeStart  = "/ops/probe/start"
 	routeOpsProbeCancel = "/ops/probe/cancel"
 
-	// routeOpsProxyCheck tests every configured exit against the upstream and
-	// reports one row each (proxy_check.go). It spends no account quota -- the
-	// request it sends carries no credential -- but it does open real connections
-	// through every exit in the pool, so it is an action rather than a read and
-	// goes through handleOpsResource with the rest.
-	//
-	// It reads the pool the plugin already holds rather than accepting one. A
-	// proxy URL carries a password, and this is a keyless GET, so taking the list
-	// as query parameters would put the pool's credentials into the host's access
-	// log and the operator's browser history.
+	// routeOpsProxyCheck 挨个测试已配置出口并逐行回报，实现在 proxy_check.go。
+	// 请求不带账号凭据，不花账号额度，但会实际拨号，所以同样走 handleOpsResource，不能把探路当看地图。
+	// 只读插件现有池，不从免钥匙 GET 的 query 接收代理 URL；userinfo 可能含密码，不能请它在访问日志和浏览器历史里巡演。
 	routeOpsProxyCheck = "/ops/proxy-check"
 
-	// routeOpsChoices lists what there is to choose from: the Codex credentials
-	// CPA actually holds, and the model ids worth offering. It exists so the scope
-	// editor can be checkboxes instead of three hand-typed lists -- a mistyped
-	// credential name is not rejected anywhere (normaliseProbeScope checks the
-	// shape, not existence), so it survives as a scope entry that silently probes
-	// nothing.
-	//
-	// It is the one /ops route that reads rather than acts, which is why it does
-	// not go through handleOpsResource: confirm=1 guards things that change state
-	// or spend quota, and a bare GET of a list does neither. See the dispatch case
-	// in managementHandle.
-	//
-	// Keyless like its neighbours, and that is what constrains the body: every
-	// field it returns is equivalent to published. Credential filenames carry a
-	// customer's email, so the displayed `label` drops it (maskAuthLabel) and the
-	// full string appears only in `name`, which the page must post back as the
-	// selection value -- the same accepted exposure the status document's auth_id
-	// already carries, and no wider.
+	// routeOpsChoices 给范围编辑器提供真实 Codex 凭据与模型选项，把手抄点名册换成勾选。
+	// normaliseProbeScope 只验形状不验存在性，错拼账号可能悄悄探了个寂寞。
+	// 它只读不花额度，故不进要求 confirm=1 的 handleOpsResource；页面加载就能取表。
+	// 免钥匙响应视同公开：label 经 maskAuthLabel 去掉邮箱，回传选中值所需 name 仍是完整文件名，暴露范围与 status.auth_id 相同。
 	routeOpsChoices = "/ops/choices"
 )
 
-// managementRegister answers management.register with the route table.
+// managementRegister 把路由花名册交给 management.register，柜台各归各位。
 func managementRegister(raw []byte) ([]byte, error) {
 	var req pluginapi.ManagementRegistrationRequest
 	if len(raw) > 0 {
-		// A malformed registration request is not worth failing over: the paths
-		// below are fixed, and the host resolves relative ones itself.
+		// 注册请求格式坏了也不必掀桌：以下路径固定，相对地址由宿主解析。
 		_ = json.Unmarshal(raw, &req)
 	}
 
@@ -168,66 +94,43 @@ func managementRegister(raw []byte) ([]byte, error) {
 			{Method: http.MethodGet, Path: routeCloudDashboardStatus},
 			{Method: http.MethodPost, Path: routeBucketsClear},
 			{Method: http.MethodPost, Path: routeSelftest},
-			// No Menu, like every other data route here. A GET route that
-			// declares one is re-registered under the unauthenticated resource
-			// prefix (routeDeclaresLegacyMenuResource in the host), which on this
-			// route specifically would publish the proxy passwords.
+			{Method: http.MethodPost, Path: routeModeltrace},
+			{Method: http.MethodPost, Path: routeGatewaySweep},
+			// 数据路由不填 Menu；GET 一填就会被宿主移挂免鉴权资源前缀。
+			// 这条若搬错柜台，代理密码就成了门口海报。
 			{Method: http.MethodGet, Path: routeConfig},
 		},
 		Resources: []pluginapi.ResourceRoute{
 			{
-				// Not "/". normalizeResourceRoute trims trailing slashes and
-				// rejects the empty result, so registering the plugin root
-				// drops the route with no log line -- the only symptom is a
-				// 404 at request time, long after the registration that
-				// silently discarded it.
+				// 门牌不能写 "/"：normalizeResourceRoute 去掉尾斜杠后会拒绝空串。
+				// 根路由会被无日志丢掉，只留下日后请求的 404，像开店忘挂地址。
 				Path:        routeDashboard,
 				Menu:        "云端打票",
 				Description: "云端打票：真实任务、脱敏流水与打票设置",
 			},
 			{
-				// Read-only status, unauthenticated by virtue of the resource
-				// prefix. No Menu: it is data the dashboard fetches, not a page
-				// to navigate to, and it must not be confused with routeDashboard.
-				//
-				// Privacy note for anyone about to expose port 8317: this makes
-				// the status document anonymously readable, and each bucket's
-				// auth_id is the credential filename, which contains the customer
-				// email. That is the user's informed choice (they asked for a
-				// no-login page).
+				// 只读 status 走免鉴权资源前缀，不填 Menu，给面板取数据，不冒充 dashboard 页面。
+				// 暴露 8317 前要看清：任何可达者都能读 auth_id（文件名内含客户邮箱）。
+				// 操作者已选择免登录；这个选择不是把邮箱变成了非敏感的魔术。
 				Path:        routeStatusResource,
 				Description: "只读状态（无需鉴权），供看板拉取",
 			},
-			// The keyless actions. Unauthenticated by virtue of the resource
-			// prefix, GET-only by the host's rule, guarded by confirm=1 rather than
-			// by a key. None of them echoes probe_management_key, the only value on
-			// this plugin that is never displayed at all. No Menu: the dashboard fires these with fetch, they are not
-			// pages to navigate to.
+			// 这些动作明确走免鉴权资源前缀，宿主只收 GET，再靠 confirm=1 防误点。
+			// 绝不回显 probe_management_key；不填 Menu，因为面板用 fetch 办事，不是跳去看戏。
 			{Path: routeOpsDryRun, Description: "翻转 dry_run（无需鉴权，需 confirm=1）"},
 			{Path: routeOpsRole, Description: "切换 role（无需鉴权，需 confirm=1）"},
 			{Path: routeOpsClear, Description: "清空桶（无需鉴权，需 confirm=1）"},
 			{Path: routeOpsSelftest, Description: "连通性自检（无需鉴权，需 confirm=1，烧额度）"},
-			// Saving the scope is keyless like the other four, and so is reading
-			// the proxy list back: the status document now carries it in the
-			// clear (see statusResponse), at the operator's explicit instruction,
-			// because the write-only masked editor meant retyping every password
-			// on every scope edit. routeConfig stays behind the key regardless --
-			// see the comment there.
+			// 保存 scope 免钥匙；按操作者明确要求，status 也回传明文代理列表。
+			// 否则每改一次范围就得重输所有密码，编辑器会变成默写考试；routeConfig 仍保留管理密钥。
 			{Path: routeOpsScope, Description: "保存探测范围（无需鉴权，需 confirm=1）"},
-			// The probe runner's controls. Keyless and confirm=1 guarded like the
-			// rest of /ops; the run authenticates with the configured probe keys,
-			// so the operator never supplies one.
+			// 探测启停与其他 /ops 一样免钥匙但需 confirm=1；运行从配置取探测密钥，不让用户现场翻口袋。
 			{Path: routeOpsProbeStart, Description: "启动探测运行（无需鉴权，需 confirm=1，烧额度）"},
 			{Path: routeOpsProbeCancel, Description: "取消探测运行（无需鉴权，需 confirm=1）"},
-			// Not quota-spending -- it sends no credential -- but it does dial every
-			// exit, so it is confirm=1 guarded like the other actions.
+			// 没带凭据所以不花账号额度，但确实逐个拨出口；也得盖 confirm=1 的开工章。
 			{Path: routeOpsProxyCheck, Description: "批量测代理到 OpenAI 的连通性（无需鉴权，需 confirm=1，不烧额度）"},
-			// The scope editor's menu. Read-only, so it is the one /ops route with
-			// no confirm=1 in its description: the page fetches it bare on load,
-			// before the operator has clicked anything, and a confirm requirement
-			// would make the checkboxes fail to populate rather than protect
-			// anything. No Menu, for the same reason as the rest: it is fetched by
-			// the page, not navigated to.
+			// 范围选项只读，页面加载即取，不要求 confirm=1，不然复选框还没登台就被拦下。
+			// 这里也不填 Menu：页面取的数据不是另一个可导航页面。
 			{Path: routeOpsChoices, Description: "可选账号/模型清单（无需鉴权，只读）"},
 		},
 	}
@@ -237,7 +140,7 @@ func managementRegister(raw []byte) ([]byte, error) {
 	return okEnvelope(response)
 }
 
-// managementHandle dispatches one management or resource request.
+// managementHandle 给 management/resource 请求分柜台，别让状态查询走进清仓通道。
 func managementHandle(raw []byte) ([]byte, error) {
 	var req pluginapi.ManagementRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
@@ -265,16 +168,9 @@ func managementHandle(raw []byte) ([]byte, error) {
 		if method != http.MethodGet && method != "" {
 			return okEnvelope(managementError(http.StatusMethodNotAllowed, "config is a GET route"))
 		}
-		// The one route that is NOT keyless. Everything the dashboard does works
-		// without a key, this route included -- the page stopped calling it when
-		// the status document started carrying the proxy list in the clear -- but
-		// it keeps its key because it returns the configuration verbatim, which is
-		// where the two probe bearers would surface if they were ever added to
-		// configResponse.
-		//
-		// The resource prefix is the unauthenticated one, so a request arriving
-		// through it means an alias was registered somewhere it should not have
-		// been. The passwords stop here rather than being served.
+		// routeConfig 仍要钥匙：页面不再调用它，免钥匙体验不受影响；原样配置却不能随便公开。
+		// 若日后 configResponse 加入探测 bearer，这层锁尤其不能丢。
+		// resource 前缀表示误挂了免鉴权别名，密码在这里止步，不能因门牌挂错就照常迎客。
 		if isResourcePath(path) {
 			return okEnvelope(managementError(http.StatusNotFound, "no such codex-turn-state route: "+req.Path))
 		}
@@ -289,17 +185,20 @@ func managementHandle(raw []byte) ([]byte, error) {
 			return okEnvelope(managementError(http.StatusMethodNotAllowed, "selftest is a POST route"))
 		}
 		return okEnvelope(handleSelftest(req.Body))
+	case hasRouteSuffix(path, routeModeltrace):
+		if method != http.MethodPost {
+			return okEnvelope(managementError(http.StatusMethodNotAllowed, "modeltrace is a POST route"))
+		}
+		return okEnvelope(handleModeltrace(req.Body))
+	case hasRouteSuffix(path, routeGatewaySweep):
+		if method != http.MethodPost {
+			return okEnvelope(managementError(http.StatusMethodNotAllowed, "gateway-sweep is a POST route"))
+		}
+		return okEnvelope(handleGatewaySweep(req.Body))
 	case hasRouteSuffix(path, routeOpsChoices):
-		// Deliberately not folded into the handleOpsResource group below. That
-		// function's contract is "everything past this point changes state or
-		// spends quota", which is what earns it the confirm=1 requirement; this
-		// route only reads, so requiring confirm would be ceremony that buys
-		// nothing and costs the dashboard its checkboxes -- the page fetches this
-		// on load, bare, before any click there could be a confirmation of.
-		//
-		// GET is still enforced here rather than left to the host: the host does
-		// restrict resource routes to GET, but that is the host's rule, and a
-		// second copy of it costs one line and survives the host changing its mind.
+		// choices 不并入 handleOpsResource：那里的契约是改状态或花额度，才需 confirm=1。
+		// 这边只读，加载时裸 GET 就该拿到复选框，不能在点菜前要求确认已经吃饱。
+		// 仍自行检查 GET，虽宿主也限制，但宿主改主意时这道门槛还在。
 		if method != http.MethodGet && method != "" {
 			return okEnvelope(managementError(http.StatusMethodNotAllowed, "choices is a GET route"))
 		}
@@ -312,10 +211,8 @@ func managementHandle(raw []byte) ([]byte, error) {
 		hasRouteSuffix(path, routeOpsProbeStart),
 		hasRouteSuffix(path, routeOpsProbeCancel),
 		hasRouteSuffix(path, routeOpsProxyCheck):
-		// The keyless actions. Reached only through the resource prefix (they are
-		// registered as resources, not management routes), so they arrive with a
-		// query and no body and no key; handleOpsResource enforces GET and
-		// confirm=1 before doing anything.
+		// 免钥匙动作只从 resource 前缀进来，有 query、没 body、没管理 key。
+		// handleOpsResource 先查 GET 与 confirm=1，票据没盖章就不开工。
 		return okEnvelope(handleOpsResource(path, method, req.Query))
 	case isDashboardPath(path):
 		return okEnvelope(handleDashboard())
@@ -324,54 +221,42 @@ func managementHandle(raw []byte) ([]byte, error) {
 	}
 }
 
-// hasRouteSuffix matches a resolved path against a registered suffix. The host
-// may present "/codex-turn-state/status" or the full
-// "/v0/management/codex-turn-state/status"; both must land on the same handler.
+// hasRouteSuffix 按后缀认门：/codex-turn-state/status 和
+// /v0/management/codex-turn-state/status 都得进同一个柜台，不能因街名长就换业务。
 func hasRouteSuffix(path, suffix string) bool {
 	return strings.EqualFold(path, suffix) || strings.HasSuffix(strings.ToLower(path), strings.ToLower(suffix))
 }
 
-// isDashboardPath recognises the resource root, and only that. Matching on the
-// plugin id alone would also catch /v0/management/codex-turn-state, which would
-// serve the HTML shell from the authenticated management prefix -- harmless in
-// itself, but it turns every mistyped management path into a 200 and hides the
-// typo. The resource prefix is what distinguishes the browser-navigable route.
+// isDashboardPath 只认资源页面入口，不只看插件 id。
+// 否则 /v0/management/codex-turn-state 这种拼错的管理路径也会喜提 HTML 200，把错门牌装成迎宾毯。
 func isDashboardPath(path string) bool {
 	return isResourcePath(path)
 }
 
-// isResourcePath reports whether a resolved path came in through the host's
-// resource prefix, which is the unauthenticated one ("Resource requests are not
-// management-authenticated" -- pluginapi). It is the only signal this handler
-// has about whether a key was required, so any route that must never answer
-// anonymously checks it.
+// isResourcePath 识别宿主免鉴权 resource 前缀，这是处理器判断是否查过管理钥匙的唯一线索。
+// 绝不能匿名回答的路由必须问它，不能靠来客气势判断身份。
 func isResourcePath(path string) bool {
 	return strings.Contains(strings.ToLower(path), "/resource/plugins/")
 }
 
-// handleDashboard serves the shell. It is deliberately data-free -- see the
-// package comment for why that is not an oversight.
+// handleDashboard 只上页面空壳，不夹数据；这是按边界摆盘，不是厨师忘放菜。
 func handleDashboard() pluginapi.ManagementResponse {
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,
 		Headers: http.Header{
 			"Content-Type": []string{"text/html; charset=utf-8"},
-			// The shell embeds a build of the dashboard; a cached copy after an
-			// upgrade would show an old page against a new API.
+			// 页面内嵌了构建版本；升级后不留旧缓存，别让旧菜单指挥新厨房。
 			"Cache-Control": []string{"no-store"},
-			// Nothing here is meant to be framed or sniffed.
+			// 不让页面被套框，也不让浏览器猜 MIME；别给外人临时搭戏台。
 			"X-Content-Type-Options": []string{"nosniff"},
 		},
 		Body: []byte(strings.Replace(string(dashboardHTML), `name="cpa-plugin-id" content="codex-turn-state"`, `name="cpa-plugin-id" content="`+currentCloudPluginID()+`"`, 1)),
 	}
 }
 
-// handleOpsResource dispatches the keyless actions. It is reached only
-// through the resource prefix, so it has no key to check; instead it enforces the
-// two things that make a keyless GET action safe enough for a localhost-only
-// dashboard: the method really is GET, and confirm=1 is present so nothing fires
-// from a bare navigation, a link prefetch or a crawler. Everything past this
-// point changes state or spends quota.
+// handleOpsResource 处理免钥匙动作，只从资源前缀到达，没有管理 key 可验。
+// 在仅本机可达的部署边界内，强制 GET + confirm=1，防裸导航、预取和爬虫误触。
+// 越过这里就会改状态或花额度；确认章只是防手滑，不是防盗门。
 func handleOpsResource(path, method string, q url.Values) pluginapi.ManagementResponse {
 	if method != http.MethodGet && method != "" {
 		return managementError(http.StatusMethodNotAllowed, "keyless action routes are GET-only")
@@ -402,20 +287,9 @@ func handleOpsResource(path, method string, q url.Values) pluginapi.ManagementRe
 	}
 }
 
-// handleProbeStartResource starts a probe run and answers with the run's state.
-//
-// A start that fails because a run is already in flight is a 409, not a 400: the
-// request was well formed and the caller has nothing to fix, which is exactly
-// what a browser refresh or a double click produces, and 400 would send the
-// dashboard to the "your request is wrong" branch for something that is merely
-// "already happening".
-//
-// Which of the two it was is decided from the runner's own state rather than by
-// matching words in the error message. Message text is not a contract; a reword
-// on the runner's side would silently start returning 400 for a running probe,
-// and nothing would fail until an operator wondered why the page was complaining.
-// The narrow cost is that a run finishing between the failed start and this
-// snapshot reports 400 -- with the runner's own message attached either way.
+// handleProbeStartResource 开启探测并返回运行状态。已有任务则给 409，不甩锅成 400 请求错误。
+// 依据 runner 自身状态判断，不匹配错误文案；文案换台词不该改变 HTTP 契约。
+// 若失败后取快照前任务刚好结束，会回 400；两种情形都保留 runner 原错误，实话实说不补拍。
 func handleProbeStartResource() pluginapi.ManagementResponse {
 	if errStart := probeRunStart(); errStart != nil {
 		status := http.StatusBadRequest
@@ -424,27 +298,19 @@ func handleProbeStartResource() pluginapi.ManagementResponse {
 		}
 		return managementError(status, errStart.Error())
 	}
-	// Freshly taken rather than assumed: the run is already going, so this is the
-	// first progress the page can show, and inventing a zeroed "about to start"
-	// state would be a claim about something we did not look at.
+	// 现场取新快照：既然任务已在跑，就展示真进度，不虚构“即将开始”的零分成绩单。
 	return jsonResponse(http.StatusOK, probeRunSnapshot())
 }
 
-// probeCancelResponse reports whether a cancel actually stopped anything, with
-// the resulting run state alongside. The two are separate answers: "there was
-// nothing to cancel" and "a run was cancelled" both end with a stopped runner,
-// and a page that only saw the end state could not tell the operator which of the
-// two their click did. The field is named probe_run to match the status document,
-// so one decoder reads both.
+// probeCancelResponse 同时报是否真的取消及最终 probe_run 状态。
+// 本来没跑与刚被取消都会停着，不能只看空椅子就猜刚才谁坐过；字段与 status 共用解码。
 type probeCancelResponse struct {
 	Cancelled bool          `json:"cancelled"`
 	ProbeRun  probeRunState `json:"probe_run"`
 }
 
-// handleProbeCancelResource asks the runner to stop. Cancelling when nothing is
-// running is not an error -- it is the state the caller wanted -- so it answers
-// 200 with cancelled=false rather than a 404 the dashboard would have to special
-// case.
+// handleProbeCancelResource 请求停工；本来没任务也算达到目标。
+// 回 200、cancelled=false，不让页面为“没有人上班”特判一个 404。
 func handleProbeCancelResource() pluginapi.ManagementResponse {
 	cancelled := probeRunCancel()
 	return jsonResponse(http.StatusOK, probeCancelResponse{
@@ -453,94 +319,54 @@ func handleProbeCancelResource() pluginapi.ManagementResponse {
 	})
 }
 
-// --- /ops/choices ---------------------------------------------------------
+// --- /ops/choices：先给菜单，别让用户凭空点菜 -------------------------------
 
-// knownCodexModels is the menu of Codex model ids the scope editor offers when
-// the operator has not already configured one.
-//
-// It is a menu, not a whitelist. Nothing validates against it: /ops/scope stores
-// whatever it is sent, normaliseProbeScope only rejects whitespace, and
-// modelChoices unions cfg.Models over the top of this list -- so a model id that
-// is missing here can still be configured by hand and still comes back checked.
-// That asymmetry is the point. When this list goes stale the operator loses a
-// checkbox; they never lose the ability to select a model, which is what a
-// whitelist here would eventually cost them.
-//
-// The ids are the ones observed in live traffic (see FINDINGS.md) rather than
-// anything CPA publishes -- CPA has no "list the models" route -- which is
-// exactly why it is expected to go stale and why nothing may depend on it being
-// complete.
-//
-// A var because Go has no constant slice; nothing writes to it.
+// knownCodexModels 是范围编辑器的模型菜单，不是模型白名单。
+// /ops/scope 接收自定义值，normaliseProbeScope 只拒空白，modelChoices 再并入 cfg.Models，手填模型仍能选中。
+// 名单来自实测流量（FINDINGS.md），CPA 没有模型列表路由，过时只该少个复选框，不该封了点菜权。
+// Go 没有常量切片所以用 var，生产中没人改这本菜单。
 var knownCodexModels = []string{"gpt-5.5", "gpt-5.6-sol", "gpt-6-astra"}
 
-// choicesFetchTimeout bounds the single CPA call this route makes.
-//
-// The dashboard fetches /ops/choices on load and a person is waiting on it, so
-// the runner's 30-second probeMgmtTimeout is the wrong budget here: an
-// unresponsive CPA would hang the page rather than render it with a reason. Five
-// seconds is far longer than a loopback listing takes and far shorter than a
-// human's patience. A var so tests can shrink it; nothing in production writes
-// to it.
+// choicesFetchTimeout 限制本路由唯一一次 CPA 调用；页面有人等，不能套探测用的 30 秒 probeMgmtTimeout。
+// 五秒足够等回环列表，又不至于等到茶凉；用 var 让测试缩时，生产不修改。
 var choicesFetchTimeout = 5 * time.Second
 
-// choiceAccount is one credential checkbox.
-//
-// Name is the full filename because that is what /ops/scope expects back, and
-// Label is what the page displays: they differ because the filename carries a
-// customer's email and this route answers without a key. See maskAuthLabel.
+// choiceAccount 是账号复选框：Name 保留 /ops/scope 回传所需完整文件名，Label 给人看。
+// 文件名带邮箱，接口又免钥匙，展示名得先过 maskAuthLabel，不能把身份证贴点名册。
 type choiceAccount struct {
 	Name  string `json:"name"`
 	Label string `json:"label"`
-	// Disabled is CPA's own flag, passed through so the page can say "this one is
-	// switched off" rather than hiding the row. A disabled credential is still a
-	// legitimate probe target: the flag governs whether CPA routes business
-	// traffic to the account, and the probe does not go through CPA -- it reads
-	// the credential's own token and calls the upstream directly, so it never
-	// consults this. Filtering the row out would remove a choice that works.
-	//
-	// (The older reason given here was that the sweep enabled one account at a
-	// time anyway. The offline probe does not change account state at all.)
+	// Disabled 原样传 CPA 开关，让页面灰显而不是把行藏起来。
+	// 禁用只影响 CPA 业务路由；离线探测取该凭据 token 直连上游，不看此开关，所以仍可选。
+	// 旧式轮流启用账号的解释已过时：离线探测不碰账号状态，别让退役剧本继续指挥演员。
 	Disabled bool `json:"disabled"`
-	// Selected is whether the name is in cfg.ProbeAccounts right now, so the page
-	// renders the saved scope rather than an empty form the operator would have to
-	// re-tick from memory.
+	// Selected 按当前 cfg.ProbeAccounts 还原勾选，不让用户每次开门都重背点名册。
 	Selected bool `json:"selected"`
 }
 
-// choiceModel is one model checkbox.
+// choiceModel 是模型的一格复选框，点菜用，不是能力鉴定章。
 type choiceModel struct {
 	Name     string `json:"name"`
 	Selected bool   `json:"selected"`
 }
 
-// choicesResponse is the menu the scope editor renders.
-//
-// Error has no omitempty on purpose: the page reads this field unconditionally,
-// and a key that vanishes when it is empty forces it to distinguish "absent"
-// from "empty" for no gain.
+// choicesResponse 是范围编辑器的菜单；Error 故意不用 omitempty。
+// 页面无条件读它，空就给空，别玩“字段不见了”的猜谜游戏。
 type choicesResponse struct {
 	Accounts []choiceAccount `json:"accounts"`
 	Models   []choiceModel   `json:"models"`
 	Error    string          `json:"error"`
 }
 
-// handleChoicesResource lists what the scope editor can offer.
-//
-// It degrades rather than fails. A credential list that cannot be fetched comes
-// back as 200 with accounts:[] and a populated error, because the page still has
-// to render: the models half needs no CPA call and is always usable, and an
-// operator looking at "probe_management_key is not set" can act on it, whereas a
-// 500 tells them only that something broke. That is also why the model list is
-// built before the fetch is attempted -- so a failure cannot take it with it.
+// handleChoicesResource 先备模型菜单，再取账号；取不到账号也回 200、accounts:[] 和 error。
+// 模型不依赖 CPA 仍可用，明确错误比一张 500 闭店告示更有用；一道菜缺货不必关整间店。
 func handleChoicesResource() pluginapi.ManagementResponse {
 	state.mu.Lock()
 	cfg := state.config
 	state.mu.Unlock()
 
 	out := choicesResponse{
-		// [] rather than null in both slots: the page iterates these directly, and
-		// a null renders as a crash rather than as an empty list.
+		// 两份列表都给 [] 不给 null；页面直接遍历，空盘能端，空气盘会摔。
 		Accounts: []choiceAccount{},
 		Models:   modelChoices(cfg.Models),
 	}
@@ -548,9 +374,7 @@ func handleChoicesResource() pluginapi.ManagementResponse {
 	accounts, errAccounts := choiceAccounts(cfg)
 	if errAccounts != nil {
 		out.Error = errAccounts.Error()
-		// Logged at the same level of detail that is returned, which is to say with
-		// no key in it: choiceAccounts redacts before it returns, so there is only
-		// one sanitised string and both destinations get it.
+		// choiceAccounts 已脱敏，日志与响应共用同一条净消息；钥匙不用分两路上镜。
 		log.Printf(logPrefix+"choices: credential list unavailable: %s", out.Error)
 		return jsonResponse(http.StatusOK, out)
 	}
@@ -558,43 +382,24 @@ func handleChoicesResource() pluginapi.ManagementResponse {
 	return jsonResponse(http.StatusOK, out)
 }
 
-// choiceAccounts fetches CPA's Codex credentials and marks the ones already in
-// the scope.
-//
-// The listing comes from the probe runner's client rather than from
-// host.auth.list, which statusAccounts uses. The two differ in what they can
-// tell us: host.auth.list is the credential set as this plugin's host sees it,
-// while GET /v0/management/auth-files is the document the sweep itself will act
-// on -- the same route, the same filter, the same .bak exclusion. A checkbox must
-// name something the sweep can actually probe, so it is built from the sweep's
-// own view.
-//
-// The filter is not repeated here. probeClient.listCodexAuths already drops .bak
-// copies and non-Codex providers, and a second implementation of that rule is a
-// second thing to get wrong -- the .bak exclusion in particular, which exists
-// because enabling an operator's backup copy is a real hazard.
+// choiceAccounts 用 probe runner 客户端取 CPA Codex 凭据，再标出已选项。
+// 它读 GET /v0/management/auth-files，与实际 sweep 同视图、同过滤、同 .bak 排除，不混用 statusAccounts 的 host.auth.list。
+// 复选框要能真的探到；过滤只复用 listCodexAuths，别另抄一份规则把备份账号也请上场。
 func choiceAccounts(cfg pluginConfig) ([]choiceAccount, error) {
-	// Answered without a request when there is no key to make one with. The
-	// alternative -- firing an unauthenticated GET and reporting CPA's 401 -- would
-	// blame the server for a setting on this side, and 401 reads as "the key is
-	// wrong" rather than "there is no key".
+	// 没 key 就本地说明缺配置，不发匿名 GET 再怪 CPA 的 401；没带钥匙和钥匙不对不是一回事。
 	if strings.TrimSpace(cfg.ProbeManagementKey) == "" {
 		return nil, fmt.Errorf("probe_management_key is not set, so CPA's credential list cannot be read; " +
 			"set it in config.yaml and reload, or keep listing probe_accounts by hand")
 	}
 
-	// Bounded here rather than relying on the client's own per-call timeout: that
-	// one is sized for a sweep, this one for a page. Cancelled on every return
-	// path, so a slow CPA cannot leave the request running behind the answer.
+	// 页面单独限时，不借 sweep 的慢钟；每条返回路径都取消，别让人走了电话还占线。
 	ctx, cancel := context.WithTimeout(context.Background(), choicesFetchTimeout)
 	defer cancel()
 
 	files, errList := newProbeClient(cfg).listCodexAuths(ctx)
 	if errList != nil {
-		// Redacted even though the paths that produce this error should carry
-		// nothing secret: the message can quote a response body, and this string is
-		// bound for an anonymously readable field and a log line. probeExplainStatus
-		// names probe_management_key by field name, never by value.
+		// 错误即便看似不含秘密也先脱敏，因它可能引述响应体，要去匿名字段和日志。
+		// probeExplainStatus 只报 probe_management_key 字段名，不把钥匙本尊请出来作证。
 		return nil, fmt.Errorf("could not read CPA's credential list: %s", probeRedact(errList.Error()))
 	}
 
@@ -603,8 +408,7 @@ func choiceAccounts(cfg pluginConfig) ([]choiceAccount, error) {
 		selected[strings.TrimSpace(name)] = true
 	}
 
-	// listCodexAuths sorts by name, so the checkbox order is stable across
-	// refreshes without sorting again here.
+	// listCodexAuths 已按名字排队，这里不再重排，刷新别变成抢座游戏。
 	out := make([]choiceAccount, 0, len(files))
 	for _, file := range files {
 		out = append(out, choiceAccount{
@@ -617,18 +421,8 @@ func choiceAccounts(cfg pluginConfig) ([]choiceAccount, error) {
 	return out, nil
 }
 
-// modelChoices is the union of the configured models and the known menu.
-//
-// A union rather than either half alone: the menu on its own would hide a model
-// the operator has configured by hand and make it look unselected (their next
-// save would then silently drop it), and the configured list on its own would
-// offer nothing to add on a fresh deploy, which is the moment the checkboxes are
-// most useful.
-//
-// De-duplication is by exact string, not case-insensitively. Model ids reach
-// CPA and the store verbatim -- bucketKey is built from the exact string -- so
-// "GPT-5.5" and "gpt-5.5" are two different buckets, and collapsing them here
-// would render one checkbox whose value is not the one that was configured.
+// modelChoices 合并配置模型与已知菜单：只留菜单会丢手填模型，只留配置会让新部署无菜可点。
+// 按精确字符串去重，不能忽略大小写；GPT-5.5 与 gpt-5.5 在 CPA/store/bucketKey 里是两张桌，别擅自拼桌。
 func modelChoices(configured []string) []choiceModel {
 	selected := make(map[string]bool, len(configured))
 	union := make(map[string]bool, len(configured)+len(knownCodexModels))
@@ -644,8 +438,7 @@ func modelChoices(configured []string) []choiceModel {
 		union[name] = true
 	}
 
-	// Sorted because map iteration order is randomised: without this the checkbox
-	// list would reshuffle on every poll of the page.
+	// map 遍历会洗牌，排好序再端上页面，别让复选框每轮刷新都换座。
 	names := make([]string, 0, len(union))
 	for name := range union {
 		names = append(names, name)
@@ -659,38 +452,18 @@ func modelChoices(configured []string) []choiceModel {
 	return out
 }
 
-// maskAuthLabel renders a credential filename safe to display.
-//
-// The names look like codex-620f5a42-luo.swmu@gmail.com-pro.json: an id, a
-// customer's email address, and a tier. This route answers without a key, so the
-// email must not be in what the page shows -- 620f5a42…pro identifies the
-// credential to the operator just as well and identifies the customer to nobody.
-//
-// The rule is "drop every dash-separated part containing an @, then keep the
-// first and last of what survives". Dropping the email parts comes first, and
-// that ordering is the whole safety of the function rather than a detail: on
-// codex-620f5a42-luo@gmail.com.json the email is the *last* part, so a
-// first-and-last rule applied before the drop would publish exactly what this
-// exists to hide.
-//
-// Everything else is best-effort presentation. An unexpected shape yields a
-// shorter or odder label, never a leak, because the only branch that can emit
-// text is the one fed by parts that survived the @ filter.
-//
-// A shorten-this-name helper elsewhere in the package may look equivalent and is
-// not, unless it drops the @ parts before picking first and last. Anything that
-// merely abbreviates is fine for a log line, which is masked further downstream;
-// this one feeds a keyless HTTP response, where it is the last line of defence.
+// maskAuthLabel 先按连字符分段，删掉所有含 @ 的部分，再取幸存段的首尾。
+// 凭据文件名含 id、邮箱、tier；例如 codex-620f5a42-luo.swmu@example.com-pro.json 应显示成 620f5a42…pro，而不是晒客户邮箱。
+// 顺序不能倒：codex-620f5a42-luo@example.com.json 的末段就是邮箱，先取首尾会把秘密端上桌。
+// 异常形状宁可短些怪些，也只输出过了 @ 过滤的片段；别拿普通缩写助手冒充隐私保镖，这里是免钥匙响应的最后一道挡板。
 func maskAuthLabel(name string) string {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
-		// Nothing in, nothing out. Unreachable from the route -- listCodexAuths
-		// drops empty names -- but a masking helper that panics or invents a label
-		// on an empty string is a bad neighbour for whatever calls it next.
+		// 空名字就给空标签，别凭空捏造身份或 panic；路由虽已滤空，助手还得会接空盘。
 		return ""
 	}
 
-	// The two fixed affixes carry no information: every credential here has them.
+	// 这两个固定前后缀人人都有，摘掉制服再认人，不损失区分信息。
 	body := trimmed
 	if lower := strings.ToLower(body); strings.HasSuffix(lower, ".json") {
 		body = body[:len(body)-len(".json")]
@@ -702,8 +475,7 @@ func maskAuthLabel(name string) string {
 	kept := make([]string, 0, 4)
 	for _, part := range strings.Split(body, "-") {
 		part = strings.TrimSpace(part)
-		// The @ test, not a list of known domains: a domain list is a thing to keep
-		// current, and the one it misses is the one that gets published.
+		// 认 @ 不认域名花名册；域名会翻新，漏一个就给邮箱开了后门。
 		if part == "" || strings.Contains(part, "@") {
 			continue
 		}
@@ -712,27 +484,20 @@ func maskAuthLabel(name string) string {
 
 	switch len(kept) {
 	case 0:
-		// Everything was email-shaped. An ellipsis is a poor label, and it is the
-		// right answer anyway: the alternative is inventing an identifier out of
-		// the one field we just decided not to show. The checkbox still works --
-		// `name` carries the value the page posts back -- so this costs legibility
-		// for one unusually named credential and nothing else.
+		// 全是邮箱形状就只显示省略号，丑一点也不拿隐私凑字数。
+		// name 仍能回传选值，复选框能工作，牺牲的是特殊名字的辨识度，不是功能。
 		return "…"
 	case 1:
-		// One survivor is the whole label; joining it to itself would read as two
-		// fields where there is one.
+		// 只剩一段就直接显示，别把一个人复制两遍冒充双人组。
 		return kept[0]
 	default:
-		// First and last, so a name with extra dashes in the middle still renders
-		// as the id and the tier rather than as an ever-growing string.
+		// 取首尾保留 id 与 tier，中间连字符再多也别把标签拉成长面条。
 		return kept[0] + "…" + kept[len(kept)-1]
 	}
 }
 
-// clearRequestFromQuery builds a clearRequest from the keyless clear route's
-// query: ?all=1 to wipe, or ?auth_id=..&model=.. for one bucket. clearBuckets
-// then applies the same validation and path-sanitising the POST route gets, so a
-// crafted auth_id cannot escape the store on this path either.
+// clearRequestFromQuery 把 ?all=1 或 ?auth_id=..&model=.. 装成 clearRequest。
+// 后续 clearBuckets 与 POST 共用验证和路径净化；query 不是能带 auth_id 翻仓库围墙的贵宾通道。
 func clearRequestFromQuery(q url.Values) clearRequest {
 	return clearRequest{
 		AuthID: strings.TrimSpace(q.Get("auth_id")),
@@ -741,8 +506,7 @@ func clearRequestFromQuery(q url.Values) clearRequest {
 	}
 }
 
-// selftestRequestFromQuery builds a selftestRequest from the keyless selftest
-// route's query: ?model=..&auth_id=.. with auth_id optional.
+// selftestRequestFromQuery 从 ?model=..&auth_id=.. 取自检单；auth_id 可不填，留给调度器点名。
 func selftestRequestFromQuery(q url.Values) selftestRequest {
 	return selftestRequest{
 		Model:  strings.TrimSpace(q.Get("model")),
@@ -750,11 +514,8 @@ func selftestRequestFromQuery(q url.Values) selftestRequest {
 	}
 }
 
-// handleDryRunResource flips dry_run from the keyless route and persists it so a
-// CPA restart keeps the operator's choice (see runtimeOverride in main.go). A
-// dry_run change does not invalidate the pool, so swapConfigLocked leaves the
-// entries and the tallies alone; it is used only so there is one place that
-// swaps the running config.
+// handleDryRunResource 从免钥匙路由切 dry_run，并借 main.go 的 runtimeOverride 持久化，让重启别失忆。
+// 改 dry_run 不作废池或计数，仍统一经 swapConfigLocked 换运行配置；只换排练牌，不清厨房。
 func handleDryRunResource(q url.Values) pluginapi.ManagementResponse {
 	value, ok := parseBoolParam(q.Get("value"))
 	if !ok {
@@ -771,8 +532,7 @@ func handleDryRunResource(q url.Values) pluginapi.ManagementResponse {
 	persisted := true
 	warning := ""
 	if err := writeRuntimeOverride(dir, role, value); err != nil {
-		// The in-process change already took effect; only persistence failed, so a
-		// restart would revert it. Say so rather than report a clean success.
+		// 内存里已经改好，只是落盘失败；重启会回原样，不能拿半张收据冒充办妥。
 		persisted = false
 		warning = "restart will revert: " + err.Error()
 		log.Printf(logPrefix+"dry_run set to %t but persisting the override failed: %v", value, err)
@@ -782,10 +542,8 @@ func handleDryRunResource(q url.Values) pluginapi.ManagementResponse {
 	return jsonResponse(http.StatusOK, map[string]any{"dry_run": value, "persisted": persisted, "warning": warning})
 }
 
-// handleRoleResource switches role from the keyless route and persists it. A role
-// change resets the tallies (swapConfigLocked),
-// exactly as a config-file role change does; persisting it is what lets the
-// switch survive the CPA restart a role change may need to renegotiate its hooks.
+// handleRoleResource 切角色并持久化；swapConfigLocked 会像配置文件改角色那样重置计数。
+// 角色切换可能要重启重谈 hooks，所以选择得留得住，别换完工牌重启又穿回旧制服。
 func handleRoleResource(q url.Values) pluginapi.ManagementResponse {
 	role := strings.ToLower(strings.TrimSpace(q.Get("value")))
 	if role != roleProbe && role != roleBusiness {
@@ -821,8 +579,7 @@ func handleRoleResource(q url.Values) pluginapi.ManagementResponse {
 	})
 }
 
-// queryTrue reads a query flag as a boolean, treating the common truthy spellings
-// as true and everything else -- including absence -- as false. Used for ?all=.
+// queryTrue 给 ?all= 认常见真值拼法；缺失或其余内容都算 false，不靠语气猜真假。
 func queryTrue(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "on", "yes":
@@ -831,9 +588,7 @@ func queryTrue(v string) bool {
 	return false
 }
 
-// parseBoolParam reads an explicit boolean value and reports whether it was
-// recognised, so a dry_run toggle can reject a typo (ok=false) rather than
-// silently reading it as off.
+// parseBoolParam 同时报布尔值与是否认得；拼错返回 ok=false，不能把错字悄悄当关灯口令。
 func parseBoolParam(v string) (value bool, ok bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "on", "yes":
@@ -844,37 +599,22 @@ func parseBoolParam(v string) (value bool, ok bool) {
 	return false, false
 }
 
-// statusBucket is one (account, model) cell of the readiness matrix.
+// statusBucket 是就绪矩阵的一格 (account, model)，别把一张桌的账记到全店。
 type statusBucket struct {
 	AuthID string `json:"auth_id"`
 	Model  string `json:"model"`
 	Ready  bool   `json:"ready"`
-	// Len is the last turn-state length the upstream signed on this bucket --
-	// reported as observed rather than assumed: the length classes are per-plan
-	// measurements (FINDINGS.md), not protocol constants, so a value outside the
-	// configured two is data, not a bug.
+	// Len 如实记最后签发的 turn-state 长度；FINDINGS.md 的长度档位是套餐实测，不是协议铁律。
+	// 超出配置两档也先当观测数据，别看身高超表就说客人不存在。
 	Len int `json:"len"`
-	// Enabled is the credential's state, repeated on every cell of its row so
-	// the page can grey a row out without a second lookup. A disabled account is
-	// still listed: dropping the row during a probe would make a bucket look
-	// lost rather than merely unreachable, and "not harvested because the
-	// account is off" is a different finding from "not harvested".
-	//
-	// When accounts_source is "store" this is not authoritative -- the credential
-	// list was unavailable, so it is reported true rather than inventing a
-	// disabled state nobody observed.
+	// Enabled 把凭据状态带到每个格子，页面可直接灰显整行；禁用也保留，免得“没采到”与“账号关了”混成失踪案。
+	// accounts_source=store 时没有权威账号列表，暂报 true，不编造禁用状态；来源标签已说明这是借旧账本认人。
 	Enabled bool `json:"enabled"`
-	// RouteCookiesSecondsLeft is how long the pool's best __cflb/__oailb pair
-	// can still be sent -- the same value on every cell, because the pool is
-	// global and not bound to any account or ticket. A cell can read
-	// ready=true while this is zero: the upstream last signed normal for the
-	// bucket but no live pair is pooled, so nothing steers the next request
-	// onto that node. 0/omitted means no live pair is pooled.
+	// RouteCookiesSecondsLeft 是全局池最好 __cflb/__oailb 的剩余寿命，各格同一口钟，不绑账号或票。
+	// ready=true 仍可能为零：上游曾签正常状态，却没活 pair 可引路；0/省略都指池里没活 pair，绿招牌不等于有房卡。
 	RouteCookiesSecondsLeft int64 `json:"route_cookies_seconds_left,omitempty"`
-	// Observed is what the upstream actually returned for this bucket, split by
-	// whether the request carried a steered pair. Absent until the bucket has
-	// been seen at least once -- a row with no observations is "no traffic",
-	// which is a different thing from "normal" and must not render as one.
+	// Observed 按是否携带引导 pair 拆开真实上游观测；没见过就不填。
+	// 没有客流不等于客人满意，页面不能把“没数据”画成“正常”。
 	Observed *observationSummary `json:"observed,omitempty"`
 }
 
@@ -889,11 +629,8 @@ type statusResponse struct {
 	Buckets        []statusBucket `json:"buckets"`
 	TargetsTotal   int            `json:"targets_total"`
 	TargetsReady   int            `json:"targets_ready"`
-	// AccountsSource is "host" when the credential list came from
-	// host.auth.list, and "store" when that was unavailable and the accounts
-	// were inferred from whatever the store already holds. The difference
-	// matters: under "store" a never-probed account is invisible, so an empty
-	// matrix means "we could not ask", not "there is nothing to probe".
+	// AccountsSource=host 表示来自 host.auth.list，store 表示问不到宿主，只能从已有存储推账号。
+	// 后者看不见从未探测的账号；空矩阵可能是没问成，不是全店没人，别把账本空白当人口普查。
 	AccountsSource string           `json:"accounts_source"`
 	AccountsError  string           `json:"accounts_error,omitempty"`
 	Counters       decisionCounters `json:"counters"`
@@ -901,75 +638,34 @@ type statusResponse struct {
 	GeneratedAt    string           `json:"generated_at"`
 	StoreError     string           `json:"store_error,omitempty"`
 
-	// ---- probe scope ----
-	//
-	// EVERY FIELD BELOW IS ANONYMOUSLY READABLE. This struct is serialised by
-	// handleStatus, which answers on both /v0/management/codex-turn-state/status
-	// and the unauthenticated /v0/resource/plugins/codex-turn-state/status. There
-	// is no per-route filtering: whatever is added here is public.
-	//
-	// probe_proxies used to appear here only as a count and a masked list. It no
-	// longer does, and the honest record of why:
-	//
-	//   - The operator asked for it, explicitly, after the masked field made the
-	//     editor unusable. A textarea seeded with "socks5h://***@exit:1080" can
-	//     only be saved by retyping every entry, so every scope edit cost the
-	//     whole proxy list -- which is what they were told to do, and refused.
-	//   - It is their system and their call. This comment records the change, not
-	//     an argument about it.
-	//   - The blast radius is "already on the box": CPA binds to 127.0.0.1 and is
-	//     reached through an SSH tunnel, so the reader of this document is someone
-	//     who could read config.yaml anyway.
-	//
-	// What that does NOT mean: this list is now readable by anything that can
-	// reach the plugin, keyless, including any other process on the host. Masking
-	// therefore stays everywhere else -- every log line and every configErrors
-	// complaint still goes through maskProxyURL, because a log is copied into
-	// tickets and chat windows and a status fetch is not.
-	//
-	// The rest of the rule is unchanged and is the part to keep: anything added
-	// here is public. probe_management_key is consequently NOT here in any form,
-	// not even a masked one.
+	// ---- 探测范围：这一柜全部可匿名读取，不是上了锁的保险箱 ----
+	// handleStatus 同时服务 /v0/management/codex-turn-state/status 与免鉴权 /v0/resource/plugins/codex-turn-state/status，没有按路由过滤字段。
+	// probe_proxies 曾只有计数和脱敏列表；按操作者明确要求改为明文，避免编辑器用 socks5h://***@exit:1080 回填后，每次保存都得重输所有密码。
+	// 这是既有部署选择：CPA 绑定 127.0.0.1、经 SSH 隧道访问；不等于本机其他进程或任何可达者读不到。
+	// 日志与 configErrors 仍必须走 maskProxyURL，日志会被贴到工单和聊天，钥匙不能随账单外卖。
+	// 以后新增字段同样视为公开；probe_management_key 绝不放进来，连脱敏版本也不摆。
 	ProbeAccounts   []string `json:"probe_accounts"`
 	ProbeProxyCount int      `json:"probe_proxy_count"`
-	// ProbeProxies is plaintext, at the operator's explicit instruction. See
-	// above.
+	// ProbeProxies 按操作者明确选择回明文；上面的风险说明不是装饰招牌。
 	ProbeProxies []string `json:"probe_proxies"`
-	// Same plaintext rule as ProbeProxies above, for the same reason.
+	// 这里同 ProbeProxies 回明文，理由相同；换个池名不会自动变出门锁。
 	ProbeProxyRotatingCount int      `json:"probe_proxy_rotating_count"`
 	ProbeProxiesRotating    []string `json:"probe_proxies_rotating"`
-	// ConfigErrors lists probe-scope entries that were rejected at configure
-	// time. They are not fatal, which is exactly why they need to be visible:
-	// the scope silently covers less than whoever edited it believes.
+	// ConfigErrors 展示 configure 拒掉的范围项；不致命不等于没影响，别悄悄少做半桌菜。
 	ConfigErrors []string `json:"config_errors,omitempty"`
-	// ProbeRun is the in-plugin probe runner's live progress, so the dashboard can
-	// poll one document instead of two. Anonymously readable like everything else
-	// here, which is the constraint on what the runner may put in Lines: progress
-	// and outcomes, never a key and never a cookie value.
+	// ProbeRun 合并 runner 进度，面板轮询一份文档即可；同样匿名可读。
+	// Lines 只写进度结果，不写 key 或 Cookie 值，现场播报不是晒钥匙大会。
 	ProbeRun probeRunState `json:"probe_run"`
 
-	// ObservationsSince is when the tally these counts come from started. A
-	// rate is meaningless without it: 3 observations and 4237 observations are
-	// not the same claim, and the page must be able to say which it is holding.
+	// ObservationsSince 交代统计从何时起算；3 次与 4237 次不是同一分量，别只报胜率不报场次。
 	ObservationsSince string `json:"observations_since,omitempty"`
-	// ObservationFeed is the most recent responses, newest first. Every field
-	// is structured -- no free text, unlike probe_run.lines above -- because
-	// this document is anonymously readable and a free-text channel on it is a
-	// leak waiting to be written into.
-	//
-	// What it newly exposes: per-account request timestamps, so an activity
-	// pattern. On a loopback-bound panel behind an SSH tunnel that is
-	// acceptable; on anything reachable it would not be.
+	// ObservationFeed 新记录在前，全部结构化字段，不给自由文本留泄密话筒。
+	// 它会公开逐账号请求时间与活动模式；本机回环加 SSH 隧道的边界可接受，放到公开可达网络就不能照搬。
 	ObservationFeed []observationEvent `json:"observation_feed"`
 }
 
-// handleStatus reports configuration, bucket readiness and decision tallies.
-//
-// Reachable both authenticated (/v0/management/...) and anonymously
-// (/v0/resource/plugins/codex-turn-state/status); see managementRegister for
-// why the anonymous alias exists and what it exposes. It stays strictly
-// read-only, and it never emits a cookie value -- only lengths, readiness and
-// timestamps -- so anonymous read is bounded to that.
+// handleStatus 只读配置、矩阵就绪度和决策计数，可经鉴权管理路由或免鉴权资源 status 访问。
+// 暴露范围见 managementRegister；不回 Cookie 值，只报长度、就绪度、时间等观测，明文代理等配置另按字段注释的既定边界处理，别把“无 Cookie”误读成“无秘密”。
 func handleStatus() pluginapi.ManagementResponse {
 	now := time.Now()
 
@@ -993,19 +689,15 @@ func handleStatus() pluginapi.ManagementResponse {
 		GeneratedAt:    now.UTC().Format(time.RFC3339),
 		Buckets:        []statusBucket{},
 		ProbeAccounts:  append([]string(nil), cfg.ProbeAccounts...),
-		// Plaintext, at the operator's explicit instruction -- see the comment on
-		// the field. The count stays alongside it because the page reads it
-		// without having to count a list it may be rendering lazily.
+		// 明文代理依操作者选择返回；计数也保留，页面懒加载列表时不必先把每个客人叫起来数一遍。
 		ProbeProxyCount: len(cfg.ProbeProxies),
 		ProbeProxies:    append([]string(nil), cfg.ProbeProxies...),
 
 		ProbeProxyRotatingCount: len(cfg.ProbeProxiesRotating),
 		ProbeProxiesRotating:    append([]string(nil), cfg.ProbeProxiesRotating...),
 		ConfigErrors:            configErrors,
-		// Taken outside state.mu on purpose: the runner keeps its own lock, and
-		// reaching for it while holding this one is how two locks become a
-		// deadlock. Nothing above needs the two views to be consistent with each
-		// other.
+		// 在 state.mu 外取 runner 快照，它有自己的锁；两把锁别互相等着请客。
+		// 这里不要求两个视图严格同一时刻，没必要为了合影制造死锁。
 		ProbeRun: probeRunSnapshot(),
 	}
 	if out.Models == nil {
@@ -1014,8 +706,7 @@ func handleStatus() pluginapi.ManagementResponse {
 	if out.ProbeAccounts == nil {
 		out.ProbeAccounts = []string{}
 	}
-	// [] rather than null: the page assigns this straight into its editor, and a
-	// null would render as the string "null" in the textarea.
+	// 空列表给 []，不给 null；编辑器不该凭空长出一行叫 null 的代理。
 	if out.ProbeProxies == nil {
 		out.ProbeProxies = []string{}
 	}
@@ -1025,15 +716,12 @@ func handleStatus() pluginapi.ManagementResponse {
 
 	ttl := cfg.ttl()
 
-	// Pool liveness is ONE number now: the pair is account-agnostic, so every
-	// cell reports the same pool clock rather than a per-account cookie life.
+	// 池寿命只剩一个全局数值：pair 不认账号，各格共用一口钟，不各自报时。
 	state.mu.Lock()
 	poolLeft := state.poolSecondsLeftLocked(now, ttl)
 	state.mu.Unlock()
 
-	// The observation snapshot is the only per-bucket state left to read -- the
-	// template store is gone, so a cell's readiness is what the upstream last
-	// signed for it, not what we have stashed.
+	// 每桶只读观测快照；模板仓已退场，就绪看上游最后签了什么，不看不存在的库存。
 	observed, feed, since := observationsSnapshot()
 	out.ObservationsSince = since
 	out.ObservationFeed = feed
@@ -1045,27 +733,16 @@ func handleStatus() pluginapi.ManagementResponse {
 		byKey[bucketKey(cell.AuthID, cell.Model)] = cell.summary(now)
 	}
 
-	// The matrix is the set of buckets the dashboard watches, not the set
-	// already observed. Deriving the accounts from observations alone would
-	// make the page emptiest at the moment it matters most -- straight after a
-	// deploy, when nothing has been seen and the operator needs to see the
-	// intended coverage.
+	// 矩阵列出应关注的目标，而非只列已经看见的流量。
+	// 部署刚开张最需要看覆盖范围，不能因为还没来客就把桌椅从菜单上抹掉。
 	accounts, accountsSource, errAccounts := statusAccounts(observed)
 	out.AccountsSource = accountsSource
 	if errAccounts != nil {
-		// Degraded, not failed: the observation-derived matrix is still worth
-		// showing. Saying so beats the silent empty array this replaced.
+		// 问宿主失败只降级，不把页面掀掉；仍展示观测推导的矩阵，并明说是旧账本认人。
 		out.AccountsError = errAccounts.Error()
 	}
-	// A configured probe scope replaces the rows rather than filtering them. The
-	// two differ for an account that is in the scope but that the host did not
-	// report: filtering would drop it, and the operator would see a smaller
-	// matrix than the scope they saved with nothing saying why. Keeping the row
-	// and marking it not-enabled states the problem instead.
-	//
-	// The enabled flag still comes from the host wherever the host knows the
-	// account, so a scoped row greys out for the same reason an unscoped one
-	// does.
+	// 配置的探测范围替换矩阵行集合，而非只过滤宿主列表；否则范围内但宿主没报的账号会无声失踪。
+	// 已知账号仍用宿主 enabled，未知账号保留行并标禁用，让少了谁有个说法。
 	if len(cfg.ProbeAccounts) > 0 {
 		known := make(map[string]bool, len(accounts))
 		for _, account := range accounts {
@@ -1074,8 +751,7 @@ func handleStatus() pluginapi.ManagementResponse {
 		scoped := make([]codexAuth, 0, len(cfg.ProbeAccounts))
 		for _, name := range cfg.ProbeAccounts {
 			enabled, seen := known[name]
-			// Unknown to the host means unreachable right now, which is what
-			// enabled=false means everywhere else on this page.
+			// 宿主不认识就暂按 enabled=false 表示当前不可达，别替陌生人办通行证。
 			scoped = append(scoped, codexAuth{AuthID: name, Enabled: seen && enabled})
 		}
 		accounts = scoped
@@ -1083,8 +759,7 @@ func handleStatus() pluginapi.ManagementResponse {
 
 	models := out.Models
 	if len(models) == 0 {
-		// No configured list: fall back to whatever the observations know about,
-		// so the page is still useful before models is filled in.
+		// 没配模型列表就借已有观测的名单，让页面在菜单填好前也不至于只端空盘。
 		modelSeen := make(map[string]bool)
 		for _, cell := range observed {
 			modelSeen[cell.Model] = true
@@ -1100,20 +775,14 @@ func handleStatus() pluginapi.ManagementResponse {
 		enabledByAuth[account.AuthID] = account.Enabled
 	}
 
-	// cellFor renders one matrix position from its observation summary. Ready
-	// means "the last state the upstream signed here was the normal one" --
-	// there is no stored template left to be ready on.
+	// cellFor 按观测画格子；Ready 指上游最后在此签过正常状态，不是仓库里还藏着一张模板票。
 	cellFor := func(auth, model string) statusBucket {
 		cell := statusBucket{AuthID: auth, Model: model}
 		if summary, ok := byKey[bucketKey(auth, model)]; ok {
 			copied := summary
 			cell.Observed = &copied
-			// Ready = "the upstream is signing states for this bucket that are
-			// not the known-degraded one". "other" counts: the length classes are
-			// per-plan measurements, so a signed-but-unrecognised length is a
-			// served response (measured: healthy 332/780), not a failed one --
-			// a NEW degraded signature would land here too, which is the visible
-			// trade-off of not hard-coding the upstream's payload sizes.
+			// Ready 接受非已知降级长度，含 other；档位是套餐实测，不能把未知签名长度一律当失败。
+			// 已见健康 332/780，但新降级长度也可能落入 other，这是不硬编码上游尺寸的取舍，量衣尺不是验功仪。
 			cell.Ready = summary.LastSignedKind != "" && summary.LastSignedKind != observationLimited
 			cell.Len = summary.LastLen
 		}
@@ -1121,10 +790,7 @@ func handleStatus() pluginapi.ManagementResponse {
 		return cell
 	}
 
-	// targetsReady counts the intended matrix only, so it is tallied here rather
-	// than over out.Buckets at the end -- that slice also carries the drift rows
-	// appended below, and a stale observation left over from an earlier, wider
-	// scope would otherwise count towards the current scope's progress.
+	// targetsReady 只数本轮目标矩阵，不把下方追加的历史漂移行也算进成绩单。
 	targetsTotal := 0
 	targetsReady := 0
 	seen := make(map[string]bool, len(accounts)*len(models))
@@ -1140,9 +806,7 @@ func handleStatus() pluginapi.ManagementResponse {
 			}
 		}
 	}
-	// Any observed bucket the matrix above does not cover -- a model no longer
-	// in the configured list, or an account the host did not report -- is still
-	// shown. That drift is exactly the kind worth seeing rather than hiding.
+	// 已观测但不在当前矩阵的账号/模型仍显示；名单变了不等于历史客人凭空蒸发。
 	for _, cell := range observed {
 		key := bucketKey(cell.AuthID, cell.Model)
 		if seen[key] {
@@ -1155,7 +819,7 @@ func handleStatus() pluginapi.ManagementResponse {
 		out.Buckets = append(out.Buckets, row)
 	}
 
-	// Stable order, or the page's rows and columns reshuffle on every refresh.
+	// 固定行列顺序，刷新只更新账目，不让整间店的座位重新抽签。
 	sort.Slice(out.Buckets, func(i, j int) bool {
 		if out.Buckets[i].AuthID != out.Buckets[j].AuthID {
 			return out.Buckets[i].AuthID < out.Buckets[j].AuthID
@@ -1163,27 +827,17 @@ func handleStatus() pluginapi.ManagementResponse {
 		return out.Buckets[i].Model < out.Buckets[j].Model
 	})
 
-	// The intended matrix, not len(out.Buckets): "8 of 25" when the operator
-	// scoped the run to 2 accounts × 2 models would be reporting progress against
-	// a target nobody chose. Drift rows stay visible in Buckets but out of the
-	// denominator.
+	// 进度分母只算目标矩阵，不用 len(out.Buckets)；2 账号 × 2 模型不能报成“8/25”。
+	// 漂移行仍展示，但不混进用户没点过的套餐。
 	out.TargetsTotal = targetsTotal
 	out.TargetsReady = targetsReady
 
 	return jsonResponse(http.StatusOK, out)
 }
 
-// configResponse is the editable configuration, proxies included verbatim.
-//
-// It exists because the dashboard used to refill its editor from here -- a form
-// seeded from masked strings writes "***" back over the passwords on the first
-// save. The status document now carries the proxy list itself, so the page no
-// longer calls this at all; it is kept as the keyed view of the configuration.
-//
-// What it must never grow: probe_management_key. It is not editable from
-// anywhere and is not displayed anywhere, so there is nothing for a form to
-// refill, and a field here would be a secret one accidental resource alias away
-// from being anonymous.
+// configResponse 是可编辑配置的带钥匙视图，代理原样回传；旧编辑器不能把 *** 当密码写回去。
+// 现在面板从 status 取代理，这条路保留而不再被页面调用。
+// probe_management_key 绝不能新增到这里：它不供编辑或展示，别等一个误挂资源别名就把钥匙送到街上。
 type configResponse struct {
 	Role           string   `json:"role"`
 	StoreDir       string   `json:"store_dir"`
@@ -1197,13 +851,8 @@ type configResponse struct {
 	ConfigErrors   []string `json:"config_errors,omitempty"`
 }
 
-// handleConfig serves the editable configuration behind the management key.
-//
-// It is deliberately read-only. Writes go through CPA's own
-// PATCH /v0/management/plugins/codex-turn-state/config, which the dashboard
-// already uses for dry_run and role: the host owns persisting plugin config --
-// there is no host.config.save callback -- so a write route here could only
-// change the in-memory copy, which the next reconfigure would silently revert.
+// handleConfig 只读，且在管理密钥之后；写入交给 CPA 的 PATCH /v0/management/plugins/codex-turn-state/config。
+// 宿主管持久化，没提供 host.config.save；自建写路由只改内存，下次 reconfigure 又会打回原形，不能卖会消失的收据。
 func handleConfig() pluginapi.ManagementResponse {
 	state.mu.Lock()
 	cfg := state.config
@@ -1248,19 +897,10 @@ type scopeSaveResponse struct {
 	Note               string   `json:"note"`
 }
 
-// handleScopeSave persists the probe scope from the keyless route's query.
-//
-// Which lists to replace is named explicitly in `fields` rather than inferred
-// from which parameters are present. The two differ for an empty list, and the
-// difference matters: "the operator cleared the proxies" and "the page did not
-// send any proxies this time" arrive as the same query, and guessing wrong wipes
-// a list of credentials that cannot be recovered from anywhere else.
-//
-// Values arrive as repeated parameters: account=a&account=b&model=x&proxy=…
-// A query string is the only channel available -- the host serves resource
-// routes as GET with no body -- so proxy userinfo does travel in the URL. It
-// does not reach any log: CPA records upstream /v1/* calls, not management-plane
-// request lines, and this plugin never logs a proxy unmasked.
+// handleScopeSave 从 keyless query 持久化探测范围；用 fields 明说替换哪份列表，不凭参数有没有出现来猜。
+// “清空代理”和“这次没传代理”可能长得一样，猜错会把整本凭据账撕掉。
+// 值用重复参数 account=a&account=b&model=x&proxy=…；资源 GET 无 body，只能走 query，代理 userinfo 因而会进入 URL。
+// 既有 CPA 日志记录上游 /v1/* 而非管理请求行，插件也只记脱敏代理；这不是保证浏览器或其他中间层永不留 URL 的隐身术。
 func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 	requested := map[string]bool{}
 	for _, field := range strings.Split(q.Get("fields"), ",") {
@@ -1275,10 +915,10 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 	}
 	for name := range requested {
 		switch name {
-		case "accounts", "models", "proxies", "rotating":
+		case "accounts", "models", "proxies", "rotating", "mint_accounts":
 		default:
 			return managementError(http.StatusBadRequest,
-				"unknown field "+name+"; expected accounts, models, proxies or rotating")
+				"unknown field "+name+"; expected accounts, models, proxies, rotating or mint_accounts")
 		}
 	}
 
@@ -1293,6 +933,7 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 
 	accounts, models, proxies := cfg.ProbeAccounts, cfg.Models, cfg.ProbeProxies
 	rotating := cfg.ProbeProxiesRotating
+	mintAccounts := cfg.MintAccounts
 	if requested["accounts"] {
 		accounts = q["account"]
 	}
@@ -1305,32 +946,48 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 	if requested["rotating"] {
 		rotating = q["rotating_proxy"]
 	}
+	if requested["mint_accounts"] {
+		mintAccounts = q["mint_account"]
+	}
 
 	accounts, models, proxies, rotating, problems := normaliseProbeScope(accounts, models, proxies, rotating)
+	// 打票账号先滤空白；是否属于 probe_accounts 交给 fillAccounts 查名册，不能只看衣服像不像。
+	{
+		cleaned := mintAccounts[:0:0]
+		for _, a := range mintAccounts {
+			if s := strings.TrimSpace(a); s != "" {
+				cleaned = append(cleaned, s)
+			}
+		}
+		mintAccounts = cleaned
+	}
 
 	scope := probeScope{
-		Accounts:  accounts,
-		Models:    models,
-		Proxies:   proxies,
-		Rotating:  rotating,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Accounts:     accounts,
+		Models:       models,
+		Proxies:      proxies,
+		Rotating:     rotating,
+		MintAccounts: mintAccounts,
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	if errWrite := writeProbeScope(cfg.StoreDir, scope); errWrite != nil {
 		return managementError(http.StatusInternalServerError,
 			"could not save the probe scope: "+errWrite.Error())
 	}
 
-	// Applied in memory as well as on disk, so the change is live without
-	// waiting for the host's next reconfigure. Observations are deliberately left
-	// alone: scope says which buckets the next probe run covers, not whether an
-	// observation already recorded is still genuine.
+	// 内存与磁盘一起更新，不等宿主下次 reconfigure 才开工。
+	// 范围只管下一轮探谁，不抹掉已发生的观测；换菜单不等于撕掉旧账单。
 	state.mu.Lock()
 	state.config.ProbeAccounts = accounts
 	state.config.Models = models
 	state.config.ProbeProxies = proxies
 	state.config.ProbeProxiesRotating = rotating
+	state.config.MintAccounts = mintAccounts
 	state.configErrors = problems
+	liveCfg := state.config
 	state.mu.Unlock()
+	// 灌池子集或探针账号一变，后台立即按新名单开工，不等宿主 reconfigure 再发开饭通知。
+	cloudPoolFillerReconfigure(liveCfg)
 
 	log.Printf(logPrefix+"probe scope saved: accounts=%d models=%d proxies=%d rotating=%d (fields=%s)",
 		len(accounts), len(models), len(proxies), len(rotating), q.Get("fields"))
@@ -1370,14 +1027,8 @@ func sortedKeys(set map[string]bool) []string {
 	return out
 }
 
-// statusAccounts lists the credentials the readiness matrix should have a row
-// for. It asks the host first, because only the host knows about an account that
-// has never been harvested. When the host cannot answer it falls back to the
-// accounts the store mentions and says so, so a caller can tell a real "no
-// accounts" from "could not ask".
-//
-// Every Codex credential is returned, disabled ones included, each carrying its
-// state -- see statusBucket.Enabled for why a disabled account keeps its row.
+// statusAccounts 先问宿主要所有 Codex 凭据，禁用也带状态保留；只有宿主认识从未采集过的账号。
+// 问不到才从已有存储推名单并注明来源，区分“真没人”与“电话没打通”，别靠空账本宣布闭店。
 func statusAccounts(observed []bucketObservation) ([]codexAuth, string, error) {
 	accounts, errList := listCodexAuths()
 	if errList == nil {
@@ -1391,10 +1042,8 @@ func statusAccounts(observed []bucketObservation) ([]codexAuth, string, error) {
 			continue
 		}
 		seen[cell.AuthID] = true
-		// Enabled is unknown on this path. Reported true because a credential
-		// that produced an observation was working at the time, and marking it
-		// disabled would assert something never observed; accounts_source is
-		// what tells the caller not to trust this field.
+		// 这条回退路径不知道 Enabled，暂报 true，因为旧观测只证明当时能工作。
+		// accounts_source 已提醒不权威，不能凭没问到就给账号贴停业封条。
 		fallback = append(fallback, codexAuth{AuthID: cell.AuthID, Enabled: true})
 	}
 	sort.Slice(fallback, func(i, j int) bool { return fallback[i].AuthID < fallback[j].AuthID })
@@ -1426,8 +1075,7 @@ type clearResponse struct {
 	Buckets []clearedBucket `json:"buckets"`
 }
 
-// handleBucketsClear deletes one bucket file or all of them, rewrites index.json
-// and drops the in-memory view so the next request re-reads from disk.
+// handleBucketsClear 接清理单再交共享清理核心；实际清哪份账由 clearBuckets 的池模型规则决定，不按旧模板文件账猜。
 func handleBucketsClear(body []byte) pluginapi.ManagementResponse {
 	var req clearRequest
 	if len(strings.TrimSpace(string(body))) > 0 {
@@ -1438,17 +1086,9 @@ func handleBucketsClear(body []byte) pluginapi.ManagementResponse {
 	return clearBuckets(req)
 }
 
-// clearBuckets is the shared core behind both the authenticated POST route
-// (handleBucketsClear, which decodes a JSON body) and the keyless GET route
-// (clearRequestFromQuery, which builds the same struct from the query string).
-// They differ only in where the clearRequest comes from; the clearing itself
-// is identical for both.
-//
-// What "clear" means changed with the pool model: there is no per-bucket store
-// left to delete, so auth+model clears that bucket's OBSERVATION row -- the
-// only state the matrix holds per cell -- and "all" wipes the route-cookie
-// pool plus every observation, which is the whole reusable state the plugin
-// keeps.
+// clearBuckets 是鉴权 POST（JSON）和免钥匙 GET（query）的同一个清理后厨，区别只在单子从哪来。
+// 池模型已无每桶模板文件：auth+model 只清该桶 OBSERVATION 行，all 才清路由 Cookie 池及全部观测。
+// 别把擦一张桌子的单子理解成拆整间店。
 func clearBuckets(req clearRequest) pluginapi.ManagementResponse {
 	state.mu.Lock()
 	cfg := state.config
@@ -1459,14 +1099,12 @@ func clearBuckets(req clearRequest) pluginapi.ManagementResponse {
 	var targets []clearedBucket
 	switch {
 	case req.All && namesBucket:
-		// Contradictory: one reading wipes everything, the other removes a
-		// single row. Guessing would mean guessing in the destructive direction.
+		// all 与单桶同时来是矛盾指令；不能在“擦桌子”和“拆饭馆”之间替用户猜大的。
 		return managementError(http.StatusBadRequest,
 			`"all" cannot be combined with "auth_id" or "model" -- send one or the other`)
 	case req.All:
 	case strings.TrimSpace(req.AuthID) != "" && strings.TrimSpace(req.Model) != "":
-		// auth_id and model arrive from the caller, so the same sanitiser the
-		// selftest path uses guards the operation.
+		// auth_id/model 来自用户，用 selftest 同一套净化规则；清仓通道也不能夹带越界门牌。
 		if _, errPath := bucketRelPath(req.AuthID, req.Model); errPath != nil {
 			return managementError(http.StatusBadRequest, errPath.Error())
 		}
@@ -1476,9 +1114,7 @@ func clearBuckets(req clearRequest) pluginapi.ManagementResponse {
 	}
 
 	if req.All {
-		// The pool is the only reusable credential the plugin holds; wiping it
-		// is the analogue of wiping the old template store. The file is
-		// rewritten immediately so a restart does not resurrect dead pairs.
+		// 池是仅剩的可复用凭据仓；清空后立刻重写文件，免得重启把已撤的旧票又摆回柜台。
 		now := time.Now()
 		state.mu.Lock()
 		state.cookies = make(map[string]*routeCookieEntry)
@@ -1517,35 +1153,24 @@ type selftestRequest struct {
 }
 
 type selftestResponse struct {
-	// Reached reports whether the request got to the upstream and came back with
-	// an answer. An upstream 429, 401 or a JSON error body all count as reached:
-	// the path works and the upstream declined, which is a different problem from
-	// the request never arriving, and the two call for opposite next steps --
-	// wait and retry, versus go and look at the network.
+	// Reached 只问上游有没有回答，429、401 或 JSON 错误体都算到达。
+	// 路通但被拒该等/重试，压根没到才查网络；别把服务员说没菜听成饭馆不存在。
 	Reached    bool   `json:"reached"`
 	StatusCode int    `json:"status_code"`
 	Model      string `json:"model"`
 	AuthID     string `json:"auth_id"`
-	// Targeted reports whether auth_id above is a credential we asked for or
-	// merely an empty string. It exists so the two cannot be confused: an empty
-	// auth_id never means "the scheduler chose nothing", it means we did not ask
-	// and cannot find out.
+	// Targeted 说明是否主动点了 auth_id；空串代表没指定且无从得知，不是调度器选了个隐形账号。
 	Targeted  bool `json:"targeted"`
 	Harvested bool `json:"harvested"`
-	// UpstreamErrorCode is the "code" out of an upstream error body, when there
-	// was one. This is the most actionable field on a failed self-test:
-	// server_is_overloaded is the same signal as a degraded 312 (see
-	// FINDINGS.md), so seeing it means no 292 is available to harvest right now
-	// and the answer is to wait, not to go hunting for a broken link.
+	// UpstreamErrorCode 取上游错误体 code，供失败自检判断；历史记录中 server_is_overloaded 与降级 312 同信号（FINDINGS.md）。
+	// 当时意味着无 292 可采，应等待而非排查断网；别把厨房忙当成马路塌。
 	UpstreamErrorCode string `json:"upstream_error_code"`
 	UpstreamErrorType string `json:"upstream_error_type"`
 	Note              string `json:"note"`
 	Error             string `json:"error,omitempty"`
 }
 
-// upstreamErrorBody is the OpenAI-style error envelope the upstream returns.
-// Receiving one at all is the proof that the request arrived: a transport
-// failure cannot produce the upstream's own error schema.
+// upstreamErrorBody 对应 OpenAI 风格错误信封；收到上游自己的错误结构也是到达证据，网络断线不会替厨房写缺菜条。
 type upstreamErrorBody struct {
 	Error struct {
 		Type    string `json:"type"`
@@ -1554,50 +1179,23 @@ type upstreamErrorBody struct {
 	} `json:"error"`
 }
 
-// The self-test notes.
-//
-// harvested is a constant false in both, not a runtime check, because nothing
-// this handler can do would make it true -- pinning AuthID does not change it.
-// CPA sets SkipInterceptorPluginID to the calling plugin's own id for host
-// callbacks: the native loader tags the call context with the plugin id
-// (internal/pluginhost/host_callbacks_unix.go:43), callHostModelExecute reads it
-// back as skipPluginID (host_callbacks.go:304), and
-// modelExecutionRequestFromPlugin puts it in SkipInterceptorPluginID
-// (host_callbacks.go:306). That is the host's guard against a plugin re-entering
-// itself, and it means a request issued from here cannot pass through this
-// plugin's own response interceptor. So it can prove the path is alive; it can
-// never fill a bucket.
+// selftest 的 harvested 两处都固定 false，指定 AuthID 也不能把它变成采集器。
+// 宿主回调为防插件递归跳过调用方：host_callbacks_unix.go:43 标插件 id，host_callbacks.go:304 读 skipPluginID，:306 填 SkipInterceptorPluginID。
+// 因此这里的请求不会经过本插件 response interceptor；能证明路通，不能往桶里加货，别把门铃当进货铃。
 const (
 	selftestNote = "连通性自检不会落盘：host.model.execute 会跳过本插件的响应拦截器。采集请用看板上的「探测」。"
-	// Said plainly rather than left to inference: HostModelExecutionResponse
-	// carries only StatusCode, Headers and Body, so when we do not pin a
-	// credential there is no way to learn which one answered. Reporting a guess
-	// would be worse than reporting nothing.
+	// HostModelExecutionResponse 只有 StatusCode、Headers、Body；不指定凭据就不知道谁回答。
+	// 不报比乱报强，不能听声音就替调度器点名。
 	selftestNoteUntargeted = selftestNote +
 		" 本次未指定 auth_id，由调度器选号；上游响应不含账号标识，因此无法得知实际使用的是哪个号。要定点检查请传 auth_id。"
-	// Appended when the upstream answered with an error but the host did not
-	// pass its HTTP status through. status_code stays 0 rather than being
-	// invented; this says so, so nobody reads the 0 as "no response".
+	// 上游已回错但宿主没传 HTTP 状态时附加说明，status_code 保持 0 不瞎编。
+	// 零是没拿到状态码，不是没收到回答，别把空账格当店员失踪。
 	selftestNoteNoStatus = " 上游返回了错误但宿主未透传 HTTP 状态码，故 status_code 为 0；请看 upstream_error_code 和 error 原文。"
 )
 
-// handleSelftest sends one minimal request and reports whether it reached the
-// upstream. It answers exactly one question -- "is the path alive?" -- and
-// deliberately does not gate on role or on how many credentials are enabled:
-// the moment this is most useful is when something is already wrong, and
-// refusing to answer because the role looks unusual would withhold the one
-// diagnostic the operator came for.
-//
-// An optional auth_id pins the credential, which turns this into a check of one
-// exact (account, model) pair without having to disable anything. Left out, the
-// scheduler chooses and the answer says so rather than guessing.
-//
-// This handler never enables or disables a credential -- nothing in this plugin
-// does any more. A toggle needs a snapshot and a guaranteed restore, and a
-// half-completed one would leave the operator's accounts switched off with
-// nothing to put them back. The offline harvester removed the need entirely by
-// holding each account's own token, so attribution never depended on being the
-// only enabled credential.
+// handleSelftest 发最小请求，只问通不通；不按 role 或启用账号数拦截，排障时不能因为店里乱就拒绝开灯。
+// 可选 auth_id 定点检查 (account, model)，不传就由调度器选，并明说不知道归属。
+// 它绝不启停账号：半途切换可能无法恢复，离线 harvester 直接持账号 token，早已不用靠“只留一人上班”认人。
 func handleSelftest(body []byte) pluginapi.ManagementResponse {
 	var req selftestRequest
 	if len(strings.TrimSpace(string(body))) > 0 {
@@ -1608,11 +1206,8 @@ func handleSelftest(body []byte) pluginapi.ManagementResponse {
 	return runSelftest(req)
 }
 
-// runSelftest is the shared core behind the authenticated POST route
-// (handleSelftest, JSON body) and the keyless GET route (selftestRequestFrom
-// Query). The self-test issues one real upstream request and spends quota, so on
-// the keyless path handleOpsResource has already required confirm=1 before this
-// runs.
+// runSelftest 共用鉴权 POST/JSON 与免钥匙 GET/query 的执行核心。
+// 一发真实请求就花额度，所以 GET 早由 handleOpsResource 检查 confirm=1；彩排也是真买菜。
 func runSelftest(req selftestRequest) pluginapi.ManagementResponse {
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
@@ -1623,23 +1218,14 @@ func runSelftest(req selftestRequest) pluginapi.ManagementResponse {
 	cfg := state.config
 	state.mu.Unlock()
 
-	// The one guard worth keeping: a typo in a model id spends quota on a
-	// request that was never going to tell us anything.
+	// 先查模型 id，别拿打错的菜名花额度请上游猜谜。
 	if len(cfg.Models) > 0 && !containsFold(cfg.Models, model) {
 		return managementError(http.StatusBadRequest,
 			fmt.Sprintf("model %q is not in the configured models list", model))
 	}
 
-	// auth_id is optional. When present it is caller-supplied input that gets
-	// interpolated into an outbound request, so it goes through the same
-	// sanitiser the store path uses -- one rule for "is this identifier safe to
-	// pass on", rather than a second one that could drift from it.
-	//
-	// Whether the credential exists is deliberately not checked here. The
-	// scheduler owns that answer, and inventing our own "no such account" would
-	// mean maintaining a second view of the credential list that could disagree
-	// with the real one. An unknown id comes back as an upstream error, reported
-	// verbatim.
+	// auth_id 可选；有值时会进入出站请求，沿用存储路径同一套净化规则，别另立一套会走样的门规。
+	// 存在性由调度器判断，未知 id 的上游错误原样报告，不在这里养第二本可能过期的户口簿。
 	authID := strings.TrimSpace(req.AuthID)
 	if authID != "" {
 		if _, errAuth := bucketRelPath(authID, model); errAuth != nil {
@@ -1647,14 +1233,8 @@ func runSelftest(req selftestRequest) pluginapi.ManagementResponse {
 		}
 	}
 
-	// Checked after the input is validated, so a malformed request still gets
-	// the specific 4xx naming what is wrong with it.
-	//
-	// This fails rather than answering 200 with reached=false. Without a callback
-	// table the self-test never ran, and a 200 would put "we could not ask" in the
-	// same shape as "we asked and got nothing" -- the one confusion this endpoint
-	// exists to prevent. A caller that only reads the status code still gets the
-	// message; a caller that reads the body gets the reason.
+	// 先验输入再查 callback，错参数仍拿具体 4xx；没有回调表就明确失败。
+	// 自检根本没跑不能回 200/reached=false，没出门和出门没找到人不是同一出戏。
 	if !hostAPIAvailable() {
 		log.Printf(logPrefix + "selftest could not run: no host callback table")
 		return managementError(http.StatusServiceUnavailable,
@@ -1674,9 +1254,7 @@ func runSelftest(req selftestRequest) pluginapi.ManagementResponse {
 		out.Note = selftestNoteUntargeted
 	}
 
-	// A deliberately minimal turn, with no X-Codex-Turn-State attached: sending
-	// a stale value is what stops the upstream minting a fresh one, and even a
-	// self-test should not teach the upstream to reuse an old state.
+	// 只发最小回合，不带 X-Codex-Turn-State；旧状态会妨碍上游铸新票，自检也别教厨房回锅旧菜。
 	payload := map[string]any{
 		"model": model,
 		"input": []map[string]any{{
@@ -1697,7 +1275,7 @@ func runSelftest(req selftestRequest) pluginapi.ManagementResponse {
 		Stream:        false,
 		Body:          rawBody,
 		Headers:       http.Header{"Content-Type": []string{"application/json"}},
-		// Empty means "scheduler's choice"; the host omits the field when unset.
+		// 空值让调度器点名，宿主会省略字段；不是请一位名叫空串的演员。
 		AuthID: authID,
 	}
 
@@ -1711,21 +1289,9 @@ func runSelftest(req selftestRequest) pluginapi.ManagementResponse {
 		return jsonResponse(http.StatusOK, out)
 	}
 
-	// The host collapses an upstream rejection into an error envelope rather than
-	// a response carrying the status, so "reached but refused" has to be
-	// recovered from the message text. Two signals, in order of strength:
-	//
-	//  1. An upstream error body. Observed in practice as
-	//     host_call_failed: {"error":{"type":"service_unavailable_error",
-	//     "code":"server_is_overloaded",...}}. Only the upstream produces that
-	//     schema, so receiving it is proof the request arrived -- this is the
-	//     case that used to be misreported as reached=false, sending operators
-	//     to check the network when the real answer was "it is overloaded".
-	//  2. The host's own "failed with status N" phrasing.
-	//
-	// Neither present means a genuine transport failure, and only then is
-	// reached=false the honest answer. The raw message is passed through in
-	// every branch so the operator is never left with only our classification.
+	// 宿主可能把上游拒绝压进错误信封而不保留 HTTP 状态，要从文字捞回“已到达但被拒”。
+	// 先认上游错误结构，例如 host_call_failed: {"error":{"type":"service_unavailable_error","code":"server_is_overloaded",...}}；再认宿主的 failed with status N。
+	// 两者都没有才按传输失败 reached=false；每支保留原消息，不只甩一个分类，让排障别被带去修一条没坏的路。
 	out.Error = errCall.Error()
 	upstream, okUpstream := upstreamErrorFrom(out.Error)
 	status, okStatus := statusFromExecutionError(out.Error)
@@ -1748,13 +1314,8 @@ func runSelftest(req selftestRequest) pluginapi.ManagementResponse {
 	return jsonResponse(http.StatusOK, out)
 }
 
-// upstreamErrorFrom pulls an upstream error body out of the host's error text,
-// which wraps it in a prefix ("host_call_failed: {...}"). A Decoder is used
-// rather than Unmarshal so trailing text after the JSON value is tolerated.
-//
-// A body counts only if it carries at least one populated field: an unrelated
-// JSON object that happens to appear in a message must not be mistaken for the
-// upstream answering.
+// upstreamErrorFrom 从 host_call_failed: {...} 包装中捞上游 JSON；用 Decoder 容忍尾随文字。
+// 至少一个有效非空字段才认账，不能见到任意花括号就说厨房回话了。
 func upstreamErrorFrom(message string) (upstreamErrorBody, bool) {
 	idx := strings.Index(message, "{")
 	if idx < 0 {
@@ -1770,13 +1331,8 @@ func upstreamErrorFrom(message string) (upstreamErrorBody, bool) {
 	return body, true
 }
 
-// statusFromExecutionError recovers an upstream status code from the host's
-// error text. modelExecutionError renders a status-bearing failure as
-// "... failed with status <code>".
-//
-// The marker is the full phrase rather than just "status ": the message may now
-// carry an upstream JSON body, and a "status" appearing inside an upstream
-// message string would otherwise be read as an HTTP code.
+// statusFromExecutionError 只认宿主完整的 failed with status <code> 口令。
+// 单搜 status 会误抓上游 JSON 字符串，别把菜名里的“三号”当桌号。
 func statusFromExecutionError(message string) (int, bool) {
 	const marker = "failed with status "
 	idx := strings.LastIndex(message, marker)
@@ -1801,9 +1357,7 @@ func statusFromExecutionError(message string) (int, bool) {
 	return status, true
 }
 
-// hostCallJSON marshals a host callback, unwraps the RPC envelope and decodes
-// the result. The host reports failures inside the envelope as well as through
-// the return code, so both are checked.
+// hostCallJSON 编码回调、拆 RPC 信封再解结果；返回码和信封内错误都要查，封面漂亮不等于里面没退单。
 func hostCallJSON(method string, payload any, out any) error {
 	raw, errMarshal := json.Marshal(payload)
 	if errMarshal != nil {
@@ -1832,8 +1386,7 @@ func hostCallJSON(method string, payload any, out any) error {
 	return json.Unmarshal(env.Result, out)
 }
 
-// jsonResponse renders a management payload. Schema 6 hosts return JSON without
-// HTML entity escaping, so the body reaches the browser as written.
+// jsonResponse 输出管理载荷；Schema 6 宿主不做 HTML 实体转义，正文按原样到浏览器，不额外给文字裹糖衣。
 func jsonResponse(status int, payload any) pluginapi.ManagementResponse {
 	body, errMarshal := json.Marshal(payload)
 	if errMarshal != nil {
@@ -1849,8 +1402,7 @@ func jsonResponse(status int, payload any) pluginapi.ManagementResponse {
 	}
 }
 
-// managementError returns a structured error. Handlers return these rather than
-// panicking: a panic in a native plugin takes the whole CPA process with it.
+// managementError 回结构化错误，不 panic；原生插件一掀桌，整个 CPA 进程都可能跟着翻锅。
 func managementError(status int, message string) pluginapi.ManagementResponse {
 	body, errMarshal := json.Marshal(map[string]string{"error": message})
 	if errMarshal != nil {

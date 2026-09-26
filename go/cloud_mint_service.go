@@ -68,9 +68,10 @@ type cloudMintWork struct {
 	model, key, id, group string
 	proxyURL              string
 	seedCookie            string
+	sid                   string // 用 sid 钉住住宅出口，modeltrace 铸票与 grade 同门出入；空则沿配置轮换
 }
 
-// 摘要包含账号、实际凭据版本、模型、传输和验收配置；缓存里不放 Access Token。
+// 摘要点齐账号、实际凭据版本、模型、传输和验收配置；缓存不收 Access Token，只留账目不留金条。
 func (w cloudMintWork) cacheKey() string {
 	raw, _ := json.Marshal([]any{w.cfg, w.creds.AuthID, w.creds.AccessToken, w.creds.AccountID, w.model, w.key, w.proxyURL, w.seedCookie})
 	sum := sha256.Sum256(raw)
@@ -119,7 +120,7 @@ func (s *cloudMintService) getWithRoute(cfg cloudMintConfig, creds cloudMintCred
 	}
 }
 
-// 同账号只允许一个工作任务；同桶并发合并。冷启动不让业务线程无限等云端冷却。
+// 同账号只开一个工位，同桶并发拼单；冷启动不能让业务线程在云端冷却门口等到天荒地老。
 func (s *cloudMintService) start(work cloudMintWork) (*cloudMintJob, *cloudMintCached, error) {
 	id, group := work.id, work.group
 	s.mu.Lock()
@@ -177,10 +178,9 @@ func (s *cloudMintService) run(work cloudMintWork, job *cloudMintJob) {
 	close(job.done)
 }
 
-// 云端模式独占注入决策，不能再让旧的全局 Cookie 池覆盖这张票的目标 pair。
-// 独占只适用于可归属的 Codex 流量：先判定凭据归属，非 Codex 或归属不明的
-// 请求一律原样放行——与池模式"不可归属即不动"的规则一致，503 只留给确认
-// 是 Codex 但票未就绪的请求，否则云端开关会误伤其他模型的正常通讯。
+// 云端模式独占可归属 Codex 流量的注入决定，旧全局 Cookie 池不能再来抢票的目标 pair。
+// 先认清凭据：非 Codex 或身份不明都原样放行，与池模式“认不清就不动”一致。
+// 503 只给已确认 Codex 但票未就绪的请求，别让一个开关把隔壁提供商也关进小黑屋。
 func interceptCloudMint(req pluginapi.RequestInterceptRequest, cfg pluginConfig) (out pluginapi.RequestInterceptResponse) {
 	track := true
 	defer func() {
@@ -197,8 +197,8 @@ func interceptCloudMint(req pluginapi.RequestInterceptRequest, cfg pluginConfig)
 		return pluginapi.RequestInterceptResponse{}
 	}
 	if err != nil {
-		// 归属无法确认时放行而非拦截：没有票的 Codex 请求上游照常服务，
-		// 而误拦非 Codex 流量会让其他模型完全无法通讯。
+		// 归属不明就放行：没票的 Codex 仍可交上游处理；
+		// 误拦非 Codex 会断掉别家模型的通信，门卫宁可不乱伸手。
 		track = false
 		cloudRecordLog("凭据归属不明放行", "%s", err)
 		return pluginapi.RequestInterceptResponse{}
@@ -216,7 +216,41 @@ func interceptCloudMint(req pluginapi.RequestInterceptRequest, cfg pluginConfig)
 	headers := http.Header{}
 	headers.Set(turnStateHeader, entry.Ticket)
 	headers.Set("Cookie", mergeRouteCookies(headerValue(req.Headers, "Cookie"), entry.Cookies))
-	return pluginapi.RequestInterceptResponse{ClearHeaders: []string{turnStateHeader, "Cookie"}, Headers: headers}
+	resp := pluginapi.RequestInterceptResponse{ClearHeaders: []string{turnStateHeader, "Cookie"}, Headers: headers}
+	// WS 的票要写进帧 body 的 client_metadata['x-codex-turn-state']，头部只到 upgrade 门口，
+	// 进不了 response.create 席位；所以同时写 body。SSE 看 header，WS 看 body，各认各的座位。
+	// 这与真实客户端续轮、FC grade 回放的 relay/index.js mintGradePayload 对齐。
+	// body 为空或不是 JSON 就不碰它，只保留 header 注入，不拿坏菜硬摆盘。
+	if newBody, ok := injectTurnStateIntoBody(req.Body, entry.Ticket); ok {
+		resp.Body = newBody
+	}
+	return resp
+}
+
+// clientMetadataTurnStateKey 是上游在 response.create 帧里找 turn-state 的门牌，别贴到隔壁。
+const clientMetadataTurnStateKey = "x-codex-turn-state"
+
+// injectTurnStateIntoBody 把票放进 client_metadata['x-codex-turn-state']，其余键原位留座。
+// 体为空、不是 JSON 对象或票为空就回 ok=false；调用方保留原体，只走 header，不强拆别人的桌子。
+func injectTurnStateIntoBody(body []byte, ticket string) ([]byte, bool) {
+	if len(body) == 0 || ticket == "" {
+		return nil, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	meta, _ := obj["client_metadata"].(map[string]any)
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	meta[clientMetadataTurnStateKey] = ticket
+	obj["client_metadata"] = meta
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 func cloudMintUnavailable() pluginapi.RequestInterceptResponse {

@@ -1,10 +1,8 @@
 package main
 
-// Route-cookie tests. The mechanics being pinned: __cflb/__oailb are a GLOBAL
-// routing credential -- a pair minted anywhere serves every Codex account, so
-// the pool is keyed by the pair values themselves, never by an account. The
-// request side merges the pool's best live entry onto attributable Codex
-// traffic; the response side folds every Set-Cookie pair back into the pool.
+// 路由 Cookie 的户口在全局池：__cflb/__oailb 任一处铸出的 pair 都供 Codex 账号用。
+// 池按 pair 值记账，不按账号分包厢；请求侧给可归属 Codex 流量合并最佳活条目，
+// 响应侧把每组 Set-Cookie pair 收回池中，房卡周转，不给房客改姓。
 
 import (
 	"context"
@@ -17,7 +15,7 @@ import (
 	"time"
 )
 
-// setCookieHeaders builds a response header carrying the given Set-Cookie lines.
+// setCookieHeaders 把给定 Set-Cookie 行装进响应头信封，一张不落。
 func setCookieHeaders(turnState string, lines ...string) http.Header {
 	h := http.Header{}
 	if turnState != "" {
@@ -29,15 +27,15 @@ func setCookieHeaders(turnState string, lines ...string) http.Header {
 	return h
 }
 
-// --- parsing ---------------------------------------------------------------
+// --- 解析：门牌先认清 ---
 
 func TestRouteCookiesKeepsOnlyTheLoadBalancerPair(t *testing.T) {
 	h := setCookieHeaders("",
 		"__cflb=cf-pair-1; Path=/; HttpOnly",
 		"__oailb=lb-pair-2; Path=/",
-		"oai-did=device-identity; Path=/",                   // identity cookie: never replayed
-		"__Secure-session-token=session-material; HttpOnly", // session material: never replayed
-		"__cf_bm=bot-management; Path=/",                    // not part of the pair
+		"oai-did=device-identity; Path=/",                   // 身份 Cookie 不回放，私人证件不拿来当房卡
+		"__Secure-session-token=session-material; HttpOnly", // 会话材料不回放，钥匙串不借台上演戏
+		"__cf_bm=bot-management; Path=/",                    // 不是 pair 的成员，别混进双人组
 	)
 	set := routeCookiesFromResponseHeaders(h, testNow)
 	if len(set.pairs) != 2 {
@@ -49,8 +47,7 @@ func TestRouteCookiesKeepsOnlyTheLoadBalancerPair(t *testing.T) {
 }
 
 func TestRouteCookiesMatchesUnderscoreVariants(t *testing.T) {
-	// The upstream spelling has been observed as __cflb/__oailb; the match is on
-	// the name with leading underscores stripped so a _cflb variant still lands.
+	// 上游常写 __cflb/__oailb；验名时先摘前导下划线帽子，_cflb 换帽也能入场。
 	h := setCookieHeaders("", "_cflb=one-underscore", "___oailb=three-underscores")
 	set := routeCookiesFromResponseHeaders(h, testNow)
 	if set.pairs["_cflb"] != "one-underscore" || set.pairs["___oailb"] != "three-underscores" {
@@ -70,8 +67,7 @@ func TestRouteCookiesHonoursMaxAge(t *testing.T) {
 }
 
 func TestRouteCookiesHonoursExpires(t *testing.T) {
-	// __cflb is issued with Expires only -- a Max-Age-only reader would treat
-	// its declared lifetime as absent.
+	// __cflb 只带 Expires；若只认 Max-Age，就会把有期限房卡误当没写退房日。
 	expires := testNow.Add(time.Hour).UTC().Format(http.TimeFormat)
 	set := routeCookiesFromResponseHeaders(setCookieHeaders("", "__cflb=a; Expires="+expires), testNow)
 	want, err := http.ParseTime(expires)
@@ -105,8 +101,7 @@ func TestRouteCookiesEarlierOfMaxAgeAndExpiresWins(t *testing.T) {
 }
 
 func TestRouteCookiesUnparseableExpiresIsIgnored(t *testing.T) {
-	// A malformed Expires is ignored rather than honoured: it must not become
-	// an absent deadline, and must not become a deadline either.
+	// Expires 写坏了就拒认这条声明；不能把乱码算成有效期限，也不能借它洗成无期限。
 	set := routeCookiesFromResponseHeaders(setCookieHeaders("", "__cflb=a; Expires=not-a-date"), testNow)
 	if set.pairs["__cflb"] != "a" {
 		t.Fatalf("the cookie itself was dropped over a bad Expires: %v", set.pairs)
@@ -129,8 +124,8 @@ func TestRouteCookiesDeletionIsNotAValue(t *testing.T) {
 
 func TestRouteCookiesRejectsSmuggledShapes(t *testing.T) {
 	h := setCookieHeaders("",
-		"__cflb=va,lue",       // comma inside the value -- would corrupt the merge
-		"__ cflb=spaced-name", // space inside the name
+		"__cflb=va,lue",       // 值内逗号会搅坏合并，台词分隔符别乱入
+		"__ cflb=spaced-name", // 名字夹空格，门牌裂成两半
 		"__oailb=ok; Path=/",
 	)
 	set := routeCookiesFromResponseHeaders(h, testNow)
@@ -139,7 +134,7 @@ func TestRouteCookiesRejectsSmuggledShapes(t *testing.T) {
 	}
 }
 
-// --- usability -------------------------------------------------------------
+// --- 可用性：房卡有样子还得开得了门 ---
 
 func TestRouteCookieSetUsable(t *testing.T) {
 	ttl := 240 * time.Second
@@ -171,14 +166,14 @@ func TestRouteCookieSecondsLeftUsesTheEarlierDeadline(t *testing.T) {
 	e := routeCookieEntry{
 		Pairs:    map[string]string{"__cflb": "v"},
 		SeenAt:   testNow.UTC().Format(time.RFC3339),
-		ExpireAt: testNow.Add(time.Minute).UTC().Format(time.RFC3339), // declared deadline wins over the longer ttl
+		ExpireAt: testNow.Add(time.Minute).UTC().Format(time.RFC3339), // 声明期限压过较长 ttl，租约先到就退房
 	}
 	if got := entrySecondsLeft(e, testNow, 240*time.Second); got != 60 {
 		t.Fatalf("entrySecondsLeft = %d, want 60 (the declared deadline, not the ttl)", got)
 	}
 }
 
-// --- request-header merge ----------------------------------------------------
+// --- 请求头合并：换房卡，不掀行李箱 ---
 
 func TestMergeRouteCookiesOverlaysOnlyItsOwnNames(t *testing.T) {
 	pairs := map[string]string{"__cflb": "fresh-cf", "__oailb": "fresh-lb"}
@@ -187,8 +182,7 @@ func TestMergeRouteCookiesOverlaysOnlyItsOwnNames(t *testing.T) {
 	if merged != want {
 		t.Fatalf("merged = %q, want %q", merged, want)
 	}
-	// The client's own cookies keep their place; the pooled pair replaces the
-	// stale same-named entry and appends the missing one.
+	// 客户端原有 Cookie 留原位；池中 pair 顶替同名旧卡，缺的那张补在后面。
 	if !strings.HasPrefix(merged, "oai-did=device-1") {
 		t.Fatalf("client cookies were reordered or dropped: %q", merged)
 	}
@@ -203,10 +197,9 @@ func TestMergeRouteCookiesNoSetIsIdentity(t *testing.T) {
 	}
 }
 
-// --- pool round-trip ---------------------------------------------------------
+// --- 池内往返：发卡与收卡对账 ---
 
-// seedPoolEntry folds a pair into the in-memory pool the same way the harvest
-// paths do on a sighting.
+// seedPoolEntry 按真实采集路径把看见的 pair 折入内存池，道具也走正门。
 func seedPoolEntry(t *testing.T, pairs map[string]string, seenAt time.Time, via string) {
 	t.Helper()
 	state.mu.Lock()
@@ -251,9 +244,7 @@ func TestPoolWriteDropsDeadEntries(t *testing.T) {
 }
 
 func TestPoolEntryKeyDedupesByValueNotOrigin(t *testing.T) {
-	// Two mints that produce the same pairs collapse to one entry -- they ARE
-	// the same credential. Two exits landing on the same node is exactly that
-	// case.
+	// 两次铸出相同 pair 就是同一张凭证，只记一笔；两个出口落同一节点也别虚报两套房。
 	state.mu.Lock()
 	state.cookies = make(map[string]*routeCookieEntry)
 	state.mu.Unlock()
@@ -267,7 +258,7 @@ func TestPoolEntryKeyDedupesByValueNotOrigin(t *testing.T) {
 	}
 }
 
-// --- request side ------------------------------------------------------------
+// --- 请求侧：送卡上门 ---
 
 func TestSteerAttachesThePoolPair(t *testing.T) {
 	dir := t.TempDir()
@@ -285,16 +276,14 @@ func TestSteerAttachesThePoolPair(t *testing.T) {
 	if !strings.Contains(cookie, "oai-did=device-1") {
 		t.Fatalf("the client's own cookie was dropped: %q", cookie)
 	}
-	// The plugin never writes the turn-state header itself.
+	// 插件自己不写 turn-state 头，这支笔不归它。
 	if got := outgoingHeader(resp); got != "" {
 		t.Fatalf("the plugin wrote a turn-state header: %q", got)
 	}
 }
 
 func TestSteerAttachesWithoutAClientTicket(t *testing.T) {
-	// The pair is the credential under reuse now, not something that keeps a
-	// ticket alive -- so an attributable request gets it whether or not the
-	// request carries a state of its own.
+	// 复用的是 pair 凭证，不是给票续命；只要请求可归属，有无自带 state 都能领房卡。
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
 	seedPoolEntry(t, map[string]string{"__cflb": "cf"}, time.Now(), "")
@@ -306,9 +295,8 @@ func TestSteerAttachesWithoutAClientTicket(t *testing.T) {
 }
 
 func TestSteerRefusesNonCodexAccount(t *testing.T) {
-	// Rule 1: the pair is OpenAI's credential and must never ride on traffic
-	// bound for another provider's upstream. An attributable but non-Codex
-	// auth id is refused the same way an unattributable one is.
+	// 第一道门禁：pair 属 OpenAI，绝不能跟其他提供商的流量出门。
+	// 能归属但非 Codex 的 auth id，与无法归属的一样不放行。
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
 	seedPoolEntry(t, map[string]string{"__cflb": "cf"}, time.Now(), "")
@@ -324,9 +312,8 @@ func TestSteerRefusesNonCodexAccount(t *testing.T) {
 }
 
 func TestPoolServesEveryCodexAccount(t *testing.T) {
-	// The pool is global: a pair minted anywhere serves every Codex account --
-	// that is the whole point of collecting it. "Cross-account" only applies to
-	// credentials of a DIFFERENT provider, which the previous test pins.
+	// 全局池就是让任意处铸出的 pair 服务所有 Codex 账号；这里可跨账号，不可跨提供商。
+	// 上一用例守的是不同提供商那条红线，别把全局池误盖成单人宿舍。
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
 	seedPoolEntry(t, map[string]string{"__cflb": "cf-a"}, time.Now(), "")
@@ -364,7 +351,7 @@ func TestNoLivePairNoWrite(t *testing.T) {
 	}
 }
 
-// --- harvest side ------------------------------------------------------------
+// --- 采集侧：收卡不问戏演得怎样 ---
 
 func TestHarvestPoolsThePair(t *testing.T) {
 	dir := t.TempDir()
@@ -395,9 +382,7 @@ func TestHarvestPoolsThePair(t *testing.T) {
 }
 
 func TestHarvestPoolsOnSilentAndDegradedResponses(t *testing.T) {
-	// The pair is minted at the edge and does not depend on the serving state:
-	// a silent response and a 312 both still deliver it, and both belong in the
-	// pool.
+	// pair 由边缘铸造，不靠服务状态领工资；静默响应和 312 带来的 pair 都要入池。
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
 	resetHarvestState(t)
@@ -420,9 +405,7 @@ func TestHarvestPoolsOnSilentAndDegradedResponses(t *testing.T) {
 }
 
 func TestHarvestPoolsWithoutAttribution(t *testing.T) {
-	// The pair is a GLOBAL credential -- it is not filed under an account, so
-	// there is nothing to attribute. A response with no account metadata still
-	// feeds the pool.
+	// pair 是全局凭证，不落账号名下；响应没账号元数据也能把卡送进池，别索要房客族谱。
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
 	resetHarvestState(t)
@@ -440,9 +423,8 @@ func TestHarvestPoolsWithoutAttribution(t *testing.T) {
 }
 
 func TestSteeredPairGetsOutcomeMarks(t *testing.T) {
-	// A request that left carrying a pool entry reports back through the
-	// pendingAuth relay: a normal signed state marks the entry good, a degraded
-	// one marks it bad and deprioritises it for the next pick.
+	// 携池条目出门的请求经 pendingAuth 捎回成绩：正常签名 state 标好，
+	// 降级 state 标坏并降低下次选取优先级，房卡也有考勤。
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
 	resetHarvestState(t)
@@ -469,12 +451,11 @@ func TestSteeredPairGetsOutcomeMarks(t *testing.T) {
 	}
 }
 
-// --- probe side --------------------------------------------------------------
+// --- 探测侧：空手去，带卡回 ---
 
 func TestProbeMintsBareAndPools(t *testing.T) {
-	// A mint call goes out BARE: carrying a pair pins the node, and the edge
-	// sets no new cookies on a steered request -- so collecting means sending
-	// nothing. The response's pair lands in the global pool.
+	// 铸票必须不带 pair：带卡会钉住节点，定向请求的边缘不再发新 Cookie。
+	// 要收新卡就空手去；响应 pair 收进全局池。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
 	upstream.setCookies = []string{"__cflb=cf-minted; Path=/", "__oailb=lb-minted; Path=/"}
@@ -491,13 +472,12 @@ func TestProbeMintsBareAndPools(t *testing.T) {
 
 	state.mu.Lock()
 	_, pooled := state.cookies[cookieEntryKey(map[string]string{"__cflb": "cf-minted", "__oailb": "lb-minted"})]
-	state.mu.Unlock() // explicit, not deferred: the second harvest below takes this lock again
+	state.mu.Unlock() // 此处立刻解锁不 defer；下面第二次采集还要拿锁，别揣钥匙堵门
 	if !pooled {
 		t.Fatalf("the minted pair was not pooled: %v", state.cookies)
 	}
 
-	// The next mint goes out bare too -- the pool exists for the business side
-	// to steer with, never for the probe to send back.
+	// 下一次铸票也空手去；池是业务引导用的行李柜，不是探针回礼盒。
 	if !probeHarvestBucket(context.Background(), cfg, pool, cred, "gpt-runner-2", nil, nil, 0) {
 		t.Fatal("second harvest fired nothing")
 	}
@@ -511,20 +491,17 @@ func TestProbeMintsBareAndPools(t *testing.T) {
 }
 
 func TestProbeSuccessRestAlignsWithRenewal(t *testing.T) {
-	// A spent-or-throttled triple rests probeExitCooldown; a successful one must
-	// be back on the table exactly when its template wants renewing
-	// (ttl - probeRenewThreshold), or a 240s template would lapse inside a
-	// 55-minute rest. The config uses a short ttl so the success window is
-	// visibly inside the failure cooldown.
+	// 耗尽或限流三元组休息 probeExitCooldown；成功者在 ttl - probeRenewThreshold 即应续采。
+	// 否则 240s 模板会过期在 55 分钟午睡里。测试用短 ttl，让成功续期窗口明显早于失败冷却。
 	resetProbeRunner(t)
-	upstream := newFakeUpstream(t) // 200 + 292 by default
+	upstream := newFakeUpstream(t) // 默认上菜 200 + 292
 	upstream.setCookies = []string{"__cflb=cf; Path=/", "__oailb=lb; Path=/"}
 	setUpstream(t, upstream.server.URL)
 
 	var hitsA atomic.Int64
 	exitA := newFakeProxy(t, &hitsA)
 	cfg, cred, pool := harvestTestConfig(t)
-	cfg.TTLSeconds = 300 // successRest = 300 - 90 = 210s << probeExitCooldown
+	cfg.TTLSeconds = 300 // successRest = 300 - 90 = 210s << probeExitCooldown，成功者少坐冷板凳
 
 	if !probeHarvestBucket(context.Background(), cfg, pool, cred, probeTestModel, []string{exitA}, nil, 0) {
 		t.Fatal("harvest fired nothing")
@@ -540,9 +517,7 @@ func TestProbeSuccessRestAlignsWithRenewal(t *testing.T) {
 }
 
 func TestProbeThrottledTripleKeepsTheLongRest(t *testing.T) {
-	// Contrast for the test above: a 312 changes nothing about how long the
-	// exit sits out -- it is the IP being throttled, and re-dialing it inside
-	// the window only earns 429s.
+	// 对照上例：312 不缩短出口休息，限的是 IP；窗口内再敲门只会多领 429 罚单。
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
 	upstream.tsLen = 312
@@ -551,7 +526,7 @@ func TestProbeThrottledTripleKeepsTheLongRest(t *testing.T) {
 	var hitsA atomic.Int64
 	exitA := newFakeProxy(t, &hitsA)
 	cfg, cred, pool := harvestTestConfig(t)
-	cfg.TTLSeconds = 300 // same short ttl as the success case -- the difference under test is the outcome, not the clock
+	cfg.TTLSeconds = 300 // 与成功用例同短 ttl，只换结果不偷拨钟
 
 	if !probeHarvestBucket(context.Background(), cfg, pool, cred, probeTestModel, []string{exitA}, nil, 0) {
 		t.Fatal("harvest fired nothing")
@@ -565,9 +540,8 @@ func TestProbeThrottledTripleKeepsTheLongRest(t *testing.T) {
 	}
 }
 
-// A 312 that still sets a pair pools the pair but does NOT count as stored:
-// the edge mints the cookie regardless of serving state, while the exit's IP
-// is throttled for this bucket -- so the walk must move on to the next exit.
+// 312 若仍发 pair，房卡入池却不算 stored；边缘照发 Cookie，这个 bucket 的出口 IP 仍受限。
+// 所以继续走下一出口，不能拿房卡冒充合格模板。
 func TestProbeConsumePaired312PoolsButTriesNext(t *testing.T) {
 	resetProbeRunner(t)
 	cfg := pluginConfig{
@@ -592,13 +566,12 @@ func TestProbeConsumePaired312PoolsButTriesNext(t *testing.T) {
 	}
 }
 
-// A steered request answered with an unrecognised length still stamps the pair
-// good: the length classes are per-plan measurements, and a healthy 332/780 is
-// evidence the node accepted the steer, not a reason to withhold the mark.
+// 定向请求遇未知长度也可标 pair 良好：长度分类来自各套餐实测，健康 332/780
+// 说明节点接受引导，不该因票换了身高就扣掉好评。
 func TestSteeredPairMarksGoodOnOtherLength(t *testing.T) {
 	resetProbeRunner(t)
 	upstream := newFakeUpstream(t)
-	upstream.tsLen = 780 // signed, but outside the configured classes
+	upstream.tsLen = 780 // 签过票但不在配置分类里，换身高不等于假票
 	upstream.setCookies = []string{"__cflb=cf-good; Path=/", "__oailb=lb-good; Path=/"}
 	setUpstream(t, upstream.server.URL)
 
@@ -616,23 +589,21 @@ func TestSteeredPairMarksGoodOnOtherLength(t *testing.T) {
 	}
 }
 
-// The credential's own claim wins: __oailb is a JWT whose exp is the deadline
-// the gateway actually enforces -- measured exp-iat=3900 while Max-Age/Expires
-// declare only 3600 -- so the token's own expiry overrides the transport hint.
+// __oailb 的 JWT exp 才是网关真执行的退房钟：实测 exp-iat=3900，
+// Max-Age/Expires 却报 3600；凭据自带期限压过运输单上的估时。
 func TestRouteCookiesPrefersTheTokensOwnExpiry(t *testing.T) {
 	exp := testNow.Add(3900 * time.Second).Unix()
 	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"iat":%d,"exp":%d}`, testNow.Unix(), exp)))
 	jwt := "hdr." + payload + ".sig"
 	set := routeCookiesFromResponseHeaders(setCookieHeaders("",
-		"__oailb="+jwt+"; Max-Age=60", // transport declares one minute; the token itself signs 3900s
+		"__oailb="+jwt+"; Max-Age=60", // 运输单报一分钟，票自己签 3900s，退房听票的
 		"__cflb=cf"), testNow)
 	if !set.expireAt.Equal(time.Unix(exp, 0).UTC()) {
 		t.Fatalf("expireAt = %s, want the JWT's own exp %s, not the conservative Max-Age", set.expireAt, time.Unix(exp, 0).UTC())
 	}
 }
 
-// A non-JWT value keeps the attribute path working: __cflb is not a token, so
-// its Expires declaration remains the deadline source.
+// 不是 JWT 的 __cflb 仍按属性走；Expires 是它的退房通知，别硬找不存在的内兜。
 func TestRouteCookiesNonJwtFallsBackToAttributes(t *testing.T) {
 	set := routeCookiesFromResponseHeaders(setCookieHeaders("",
 		"__cflb=cf; Expires="+testNow.Add(time.Hour).UTC().Format(http.TimeFormat)), testNow)

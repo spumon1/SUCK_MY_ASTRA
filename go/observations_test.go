@@ -1,12 +1,7 @@
 package main
 
-// Tests for the observation tally: the natural/injected split, the blind spot
-// it exists to expose, the bounded ring, and the snapshot round trip.
-//
-// The split is the part worth testing hardest. If injected observations leak
-// into the natural counts, the dashboard reports a degradation rate computed
-// over a sample the plugin itself selected -- which is the specific way this
-// feature can lie to its operator.
+// 观测账本考 natural/injected 分账、盲区、有界环与快照往返。
+// 最怕 injected 混进 natural：插件自己挑过的样本却拿来算自然降级率，就像裁判把自己投的票算民意。
 
 import (
 	"encoding/json"
@@ -45,20 +40,19 @@ func observedBucket(t *testing.T, auth, model string) bucketObservation {
 	return bucketObservation{}
 }
 
-// Every reading the dashboard renders, each landing in its own counter.
+// 页面展示的每种读数各进自己的计数器，账房不许合并报销。
 func TestObservationSplitsNaturalFromInjected(t *testing.T) {
 	cfg := resetObservations(t, "")
 
-	recordObservation(cfg, "a.json", "gpt-5.5", 292, false) // unprompted, good
-	recordObservation(cfg, "a.json", "gpt-5.5", 312, false) // unprompted, degraded
-	recordObservation(cfg, "a.json", "gpt-5.5", 0, true)    // ours accepted
-	recordObservation(cfg, "a.json", "gpt-5.5", 312, true)  // degraded despite ours
-	recordObservation(cfg, "a.json", "gpt-5.5", 292, true)  // fresh good despite ours
-	recordObservation(cfg, "a.json", "gpt-5.5", 99, false)  // unrecognised length
-	recordObservation(cfg, "a.json", "gpt-5.5", 101, true)  // unrecognised, and ours went out
-	// The two unrecognised lengths differ on purpose: a second sighting of the
-	// SAME length is learned as this bucket's normal (noteSignedLen), which
-	// would land on InjectedNormal instead and stop exercising this split.
+	recordObservation(cfg, "a.json", "gpt-5.5", 292, false) // 自然请求正常，没请向导也走对门
+	recordObservation(cfg, "a.json", "gpt-5.5", 312, false) // 自然请求降级，记自然账别甩锅注入
+	recordObservation(cfg, "a.json", "gpt-5.5", 0, true)    // 我们的模板被接纳，房卡刷开了
+	recordObservation(cfg, "a.json", "gpt-5.5", 312, true)  // 带了我们的模板仍降级，房卡不是万能药
+	recordObservation(cfg, "a.json", "gpt-5.5", 292, true)  // 虽有注入仍签新正常票，上游另开收据
+	recordObservation(cfg, "a.json", "gpt-5.5", 99, false)  // 长度没认出来，先别乱发毕业证
+	recordObservation(cfg, "a.json", "gpt-5.5", 101, true)  // 未知长度且我们已注入，账记自家这桌
+	// 两个未知长度刻意不同；同长度第二次会被 noteSignedLen 学成此 bucket 的正常值，
+	// 落到 InjectedNormal 就考不到当前分账题，不能让样本提前背答案。
 
 	cell := observedBucket(t, "a.json", "gpt-5.5")
 	for _, want := range []struct {
@@ -80,10 +74,8 @@ func TestObservationSplitsNaturalFromInjected(t *testing.T) {
 	}
 }
 
-// An unrecognised length on a request we injected into belongs on the injected
-// side. It used to fall through to NaturalOther, which put our own traffic in
-// the unprompted counts -- the one place a reader is entitled to treat the
-// numbers as a rate.
+// 注入请求上的未知长度归 injected；旧逻辑落 NaturalOther，把自选流量塞进自然统计。
+// 读者会把自然数字当比例，不能往这杯清水里偷偷兑汤。
 func TestInjectedUnrecognisedLengthStaysOffTheNaturalSide(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -101,12 +93,8 @@ func TestInjectedUnrecognisedLengthStaysOffTheNaturalSide(t *testing.T) {
 	}
 }
 
-// The upstream's length classes are not constants: when it unified the
-// turn-state format on 2026-09-22 the same buckets that signed 292 began
-// signing 780, and a fixed whitelist would file that healthy traffic under
-// "other" forever. The tally therefore learns per bucket: a recurring
-// unrecognised length promotes to normal, so a format change costs exactly
-// one "other" sighting instead of a permanent misclassification.
+// 长度分类不是天条：2026-09-22 统一格式把原来 292 改成 780，硬白名单会永远记 other。
+// 因此按 bucket 学习，未知长度再次出现便晋升 normal；换格式只付一次 other 学费，不罚终身。
 func TestRecurringUnrecognisedLengthPromotesToNormal(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -128,18 +116,15 @@ func TestRecurringUnrecognisedLengthPromotesToNormal(t *testing.T) {
 		t.Errorf("NaturalOther = %d, want still 1: the first sighting keeps its own record", cell.NaturalOther)
 	}
 
-	// Learning is per bucket: another (account, model) seeing 780 for the first
-	// time starts from "other" again. The signature is upstream's, but the
-	// evidence is this bucket's.
+	// 学习按 bucket 分班；另一组（account, model）第一次见 780 仍从 other 学起，
+	// 签名属于上游，证据却不能从隔壁班抄。
 	recordObservation(cfg, "b.json", "gpt-6-astra", 780, false)
 	if cell := observedBucket(t, "b.json", "gpt-6-astra"); cell.NaturalOther != 1 || cell.NaturalNormal != 0 {
 		t.Errorf("fresh bucket seeing 780: NaturalOther=%d NaturalNormal=%d, want 1/0", cell.NaturalOther, cell.NaturalNormal)
 	}
 }
 
-// The degraded signature is the one alarm the tally has, so it must never be
-// learnable: however often a bucket signs replace_length, it stays "limited"
-// and never enters the candidate table.
+// replace_length 是降级警铃，响再多也不能学成正常；始终 limited，不进候选表，坏习惯不发毕业证。
 func TestDegradedLengthIsNeverLearned(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -156,8 +141,7 @@ func TestDegradedLengthIsNeverLearned(t *testing.T) {
 	}
 }
 
-// The candidate table is bounded: a peer cycling through distinct lengths must
-// not grow it without limit. Past the cap the rarest entry is dropped.
+// 候选表有上限，来客轮着报新长度也不能无限加座；满员淘汰最少见的条目。
 func TestSignedLensTableStaysBounded(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -170,14 +154,10 @@ func TestSignedLensTableStaysBounded(t *testing.T) {
 	}
 }
 
-// --- served-model downgrade: the unified format's degraded signature --------
-//
-// Since the format moved, every response signs the same 780 and the throttle
-// bit is no longer in the header length -- it is the SSE payload declaring a
-// model other than the requested one (the x-codex-safety-buffering fallback
-// answering the turn). The watch arms at header-init, where the relayed auth
-// and steer context still exist, and the first payload chunk carrying a
-// "model" field settles it.
+// --- 实服模型降级：统一票长后的另一只警铃 ---
+// 格式统一后都签 780，限流不再写在长度脸上，而是 SSE 报非请求模型
+// （x-codex-safety-buffering 回退接演）。header-init 尚有账号和引导上下文时布哨，
+// 首个带 model 字段的载荷块定案，不等大结局。
 
 func streamChunk(t *testing.T, chunk pluginapi.StreamChunkInterceptRequest) {
 	t.Helper()
@@ -208,8 +188,7 @@ func TestStreamedModelMismatchRecordsDowngrade(t *testing.T) {
 	req.RequestID = requestID
 	interceptAfter(t, req)
 
-	// Header-init signs a normal-looking 780 -- the signature that used to mean
-	// degraded no longer carries it.
+	// header-init 签一张看似正常的 780；旧长度降级暗号已经换岗。
 	streamChunk(t, pluginapi.StreamChunkInterceptRequest{
 		RequestID:       requestID,
 		Model:           "gpt-6-astra",
@@ -217,7 +196,7 @@ func TestStreamedModelMismatchRecordsDowngrade(t *testing.T) {
 		ResponseHeaders: harvestResponseHeaders(fakeToken(780, wallClock())),
 	})
 
-	// The first payload chunk declares the fallback model instead.
+	// 首个载荷块亮出回退模型名牌，替身到场。
 	streamChunk(t, pluginapi.StreamChunkInterceptRequest{
 		RequestID:  requestID,
 		Model:      "gpt-6-astra",
@@ -238,8 +217,7 @@ func TestStreamedModelMismatchRecordsDowngrade(t *testing.T) {
 		t.Fatalf("feed[0] = %+v, want kind=limited served=gpt-5.6-luna", feed[0])
 	}
 
-	// The watch is consumed: a later chunk repeating the mismatch must not
-	// count again -- response.completed restates the same object every event.
+	// 监视记录用一次就撤；后续块再报相同错配不能重复算账，response.completed 会重述同一对象。
 	streamChunk(t, pluginapi.StreamChunkInterceptRequest{
 		RequestID:  requestID,
 		Model:      "gpt-6-astra",
@@ -251,7 +229,7 @@ func TestStreamedModelMismatchRecordsDowngrade(t *testing.T) {
 	}
 }
 
-// Serving the asked model is the common case and must produce no reading.
+// 请求谁就服务谁是正常剧情，不新增读数来抢版面。
 func TestStreamedModelMatchRecordsNothing(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessHarvestConfig(dir))
@@ -283,8 +261,7 @@ func TestStreamedModelMatchRecordsNothing(t *testing.T) {
 	}
 }
 
-// A chunk naming a request the plugin never armed must do nothing -- otherwise
-// unrelated streams on the same hook would spend effort or misattribute.
+// 没布过哨的请求 ID 传来块就不管；同钩子的无关流别被硬拉来记考勤。
 func TestStreamedChunkWithoutWatchIsIgnored(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessHarvestConfig(dir))
@@ -304,7 +281,7 @@ func TestStreamedChunkWithoutWatchIsIgnored(t *testing.T) {
 	}
 }
 
-// servedModelFromChunk reads the first model field out of an SSE payload.
+// servedModelFromChunk 从 SSE 载荷摘第一个 model 字段，先看首张名牌。
 func TestServedModelFromChunk(t *testing.T) {
 	for _, tc := range []struct {
 		body string
@@ -323,11 +300,9 @@ func TestServedModelFromChunk(t *testing.T) {
 	}
 }
 
-// LastSigned* is what the dashboard ages, and it must advance on ANY reading
-// where the upstream put a state on the wire. A 292 signed on a request we had
-// injected into is the upstream saying it serves this account normally -- the
-// most direct evidence available, and it used to be filed as no evidence at
-// all, leaving a healthy bucket showing "blind" while holding the proof.
+// 页面给 LastSigned* 算年龄，所以凡上游真签 state 都要更新。
+// 注入请求仍回 292，是上游正常服务该账号的直接证据；旧逻辑当没证据，
+// 健康 bucket 揣着证明还显示 blind，不能让证件在柜台里隐身。
 func TestLastSignedTracksInjectedReadingsToo(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -344,16 +319,14 @@ func TestLastSignedTracksInjectedReadingsToo(t *testing.T) {
 		t.Errorf("LastNaturalKind = %q, want empty: the natural side stays unprompted-only", cell.LastNaturalKind)
 	}
 
-	// Silence never counts as a signed state: under injection it means our own
-	// template was accepted, which is nobody signing anything.
+	// 静默不算签发；注入后的静默只说明自己的模板被接纳，没人签新票，别凭空盖章。
 	recordObservation(cfg, "a.json", "gpt-5.5", 0, true)
 	if cell := observedBucket(t, "a.json", "gpt-5.5"); cell.LastSignedKind != observationNormal {
 		t.Errorf("LastSignedKind = %q after a silent response, want it unchanged at normal", cell.LastSignedKind)
 	}
 }
 
-// The history exists so "is this worse than yesterday" has an answer. Lifetime
-// totals cannot give one.
+// 小时历史用来答“比昨天更差吗”；终身累计只会报总账，不会记昨天吃了什么。
 func TestHourlyHistoryRollsUpAndStaysBounded(t *testing.T) {
 	cfg := resetObservations(t, "")
 	recordObservation(cfg, "a.json", "gpt-5.5", 312, false)
@@ -366,8 +339,7 @@ func TestHourlyHistoryRollsUpAndStaysBounded(t *testing.T) {
 		t.Errorf("this hour's NaturalLimited = %d, want 1", cell.Hourly[0].NaturalLimited)
 	}
 
-	// A second observation in the same hour reuses the slot rather than
-	// opening another; otherwise the ring holds minutes, not days.
+	// 同小时第二次观测复用槽，不再开房；否则环装的是分钟，不是天数。
 	recordObservation(cfg, "a.json", "gpt-5.5", 312, false)
 	if cell := observedBucket(t, "a.json", "gpt-5.5"); len(cell.Hourly) != 1 {
 		t.Errorf("Hourly has %d slot(s) after a second observation in the same hour, want 1", len(cell.Hourly))
@@ -378,7 +350,7 @@ func TestHourlyHistoryRollsUpAndStaysBounded(t *testing.T) {
 		t.Errorf("24h rollup NaturalLimited = %d, want 2", got.NaturalLimited)
 	}
 
-	// Hours outside the window are excluded rather than summed in.
+	// 窗口外小时不相加，过期账本别塞进当日报表。
 	stale := bucketObservation{Hourly: []hourlyObservation{
 		{Hour: now.Add(-40 * time.Hour).UTC().Truncate(time.Hour).Format(time.RFC3339),
 			observationCounts: observationCounts{NaturalLimited: 500}},
@@ -389,7 +361,7 @@ func TestHourlyHistoryRollsUpAndStaysBounded(t *testing.T) {
 		t.Errorf("24h rollup over a 40h-old slot = %d, want 7: the old hour must not be counted", got.NaturalLimited)
 	}
 
-	// The ring is capped. Past the cap the oldest hour goes, not the newest.
+	// 环满淘汰最老小时，不赶刚进门的新客。
 	var ring bucketObservation
 	for i := observationsHourlyMax + 10; i >= 0; i-- {
 		ring.hourSlot(now.Add(-time.Duration(i)*time.Hour)).add(false, observationLimited)
@@ -404,9 +376,7 @@ func TestHourlyHistoryRollsUpAndStaysBounded(t *testing.T) {
 	}
 }
 
-// addAll is hand-written, so a counter added to the struct and forgotten here
-// would silently read as zero in every rollup. Walk the type instead of
-// trusting the list.
+// addAll 手写易漏新计数器，漏了汇总就静默变零；遍历类型核对，别信账房口头说全记了。
 func TestObservationCountsAddAllCoversEveryField(t *testing.T) {
 	var src observationCounts
 	value := reflect.ValueOf(&src).Elem()
@@ -416,7 +386,7 @@ func TestObservationCountsAddAllCoversEveryField(t *testing.T) {
 			t.Fatalf("observationCounts.%s is a %s; this test assumes every counter is an int64",
 				value.Type().Field(i).Name, field.Kind())
 		}
-		field.SetInt(int64(i + 1)) // distinct, so a copied-wrong field shows up
+		field.SetInt(int64(i + 1)) // 各值不同，抄错字段就会当场露馅
 	}
 
 	var dst observationCounts
@@ -427,8 +397,7 @@ func TestObservationCountsAddAllCoversEveryField(t *testing.T) {
 	}
 }
 
-// Silence with nothing injected is the majority of traffic and says nothing
-// about serving state. Recording it would bury the readings that matter.
+// 未注入且静默占多数，也不说明服务状态；别把空气记满账本淹掉关键读数。
 func TestObservationIgnoresUninterestingSilence(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -437,15 +406,14 @@ func TestObservationIgnoresUninterestingSilence(t *testing.T) {
 		t.Errorf("a silent, untouched response was recorded: %d bucket(s), %d event(s)", len(buckets), len(recent))
 	}
 
-	// But silence AFTER we injected is the signal that the template was taken.
+	// 注入之后的静默却说明模板被接纳，同样沉默，台词含义不同。
 	recordObservation(cfg, "a.json", "gpt-5.5", 0, true)
 	if cell := observedBucket(t, "a.json", "gpt-5.5"); cell.InjectedSilent != 1 {
 		t.Errorf("InjectedSilent = %d, want 1: silence after an injection is how acceptance is seen", cell.InjectedSilent)
 	}
 }
 
-// An observation with no account cannot be filed. Bucketing it anywhere would
-// put one customer's throttling on another customer's row.
+// 没账号就无处入账，硬塞 bucket 会把甲客户限流记在乙客户桌上。
 func TestObservationRequiresAFullKey(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -458,11 +426,8 @@ func TestObservationRequiresAFullKey(t *testing.T) {
 	}
 }
 
-// The blind spot, asserted directly. While a bucket holds a template every
-// request is injected and the upstream signs nothing, so LastNatural stops
-// advancing even though LastAt keeps moving. The dashboard ages the natural
-// reading off these two fields; if injected traffic refreshed LastNatural,
-// an hour-old "normal" would render as current.
+// 直接钉住盲区：有模板时每请求都注入，上游不签新票，LastNatural 不动但 LastAt 前进。
+// 页面据此显示自然观测年龄；若注入流量刷新 LastNatural，一小时前的正常就会冒充现做热菜。
 func TestInjectedObservationsDoNotRefreshTheNaturalReading(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -472,7 +437,7 @@ func TestInjectedObservationsDoNotRefreshTheNaturalReading(t *testing.T) {
 		t.Fatalf("natural reading not recorded: kind=%q at=%q", first.LastNaturalKind, first.LastNaturalAt)
 	}
 
-	time.Sleep(1100 * time.Millisecond) // RFC3339 is second-resolution
+	time.Sleep(1100 * time.Millisecond) // RFC3339 只认整秒，等时钟跨过门槛
 	recordObservation(cfg, "a.json", "gpt-5.5", 0, true)
 	recordObservation(cfg, "a.json", "gpt-5.5", 0, true)
 
@@ -489,8 +454,7 @@ func TestInjectedObservationsDoNotRefreshTheNaturalReading(t *testing.T) {
 	}
 }
 
-// A 312 arriving while we hold a template is the one alarm here: the bucket
-// cannot be rescued by what this plugin does.
+// 手里有模板还收到 312 才是真警报：这个 bucket 不在插件能救的范围，房卡也治不了停电。
 func TestInjectedLimitedIsCountedSeparately(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -519,7 +483,7 @@ func TestObservationFeedIsBoundedAndNewestFirst(t *testing.T) {
 	if len(recent) != observationsRecentMax {
 		t.Fatalf("feed holds %d events, want the cap of %d", len(recent), observationsRecentMax)
 	}
-	// Last one in was i = max+39, which is odd, so a 292.
+	// 最后进来的是 i=max+39，奇数，所以这回票长 292，排队号别算错。
 	if recent[0].Len != 292 {
 		t.Errorf("feed[0].Len = %d, want the most recent event (292)", recent[0].Len)
 	}
@@ -552,7 +516,7 @@ func TestObservationSnapshotRoundTrips(t *testing.T) {
 		t.Fatalf("snapshot holds %d bucket(s) and %d event(s), want 2 and 2", len(snap.Buckets), len(snap.Recent))
 	}
 
-	// Reload into a cleared tally: the counts must come back.
+	// 清空账本再载入快照，计数要原样归队，存档不是装饰。
 	observations.mu.Lock()
 	observations.dir = ""
 	observations.since = time.Time{}
@@ -567,8 +531,7 @@ func TestObservationSnapshotRoundTrips(t *testing.T) {
 	}
 }
 
-// A snapshot from a future or unknown format is dropped, not guessed at. There
-// is deliberately no migration path: these are discardable counts.
+// 未来或未知快照格式直接丢弃，不猜；这些计数可抛弃，特意不设迁移，别替陌生账本算命。
 func TestObservationSnapshotRejectsForeignVersion(t *testing.T) {
 	dir := t.TempDir()
 	resetObservations(t, dir)
@@ -596,7 +559,7 @@ func TestObservationSnapshotRejectsForeignVersion(t *testing.T) {
 	}
 }
 
-// A malformed model id must not be able to grow the map without bound.
+// 坏模型 ID 不能让 map 无限添桌，来客报乱码也要守容量。
 func TestObservationBucketsAreCapped(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -609,9 +572,8 @@ func TestObservationBucketsAreCapped(t *testing.T) {
 	}
 }
 
-// The observation is taken before the harvest path's own checks, so it sees
-// responses the harvester discards -- a 312 above all, which is the reading
-// that matters most and is never stored as a template.
+// 观测在采集路径自检前发生，得看见采集拒收的响应，尤其 312：
+// 最关键的限流读数偏偏从不存模板，验票口不能兼任遮羞布。
 func TestHarvestPathRecordsTheDegradedObservation(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -635,17 +597,14 @@ func TestHarvestPathRecordsTheDegradedObservation(t *testing.T) {
 	}
 }
 
-// dry_run exists to watch without touching anything. If a dry-run decision
-// counted as an injection, every observation taken in that mode would be filed
-// under the wrong half of the split.
+// dry_run 只看不碰；若把决定当注入，整批观测就站错分账队，纸上打拳不能算真出手。
 func TestDryRunDecisionIsNotCountedAsAnInjection(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
 	resetObservations(t, "")
 
 	rememberRequestAuth("req-dry", "codex-alpha.json")
-	// markRequestSteered is what interceptAfterAuth calls only past the dry_run
-	// check; a dry run reaches its return without calling it.
+	// interceptAfterAuth 过 dry_run 检查才调 markRequestSteered；演习提前返回，不盖实战章。
 	authID, steered, _ := recallRequestRecord("req-dry")
 	if authID != "codex-alpha.json" {
 		t.Fatalf("recall = %q, want the recorded account", authID)
@@ -665,9 +624,9 @@ func TestDryRunDecisionIsNotCountedAsAnInjection(t *testing.T) {
 	}
 }
 
-// --- the status document ---------------------------------------------------
+// --- 状态文档：账本上桌 ---
 
-// The tally has to reach the page, attached to the row it belongs to.
+// 计数要跟所属行一起到页面，不准邮寄到隔壁房间。
 func TestStatusCarriesObservationsOnTheBucketRow(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -704,20 +663,16 @@ func TestStatusCarriesObservationsOnTheBucketRow(t *testing.T) {
 	}
 }
 
-// A bucket nothing has been seen for must not carry an empty tally, which the
-// page would have to tell apart from a real zero.
+// 从没观测过的 bucket 不挂空计数，页面才分得清“没客人”和“真计数为零”。
 func TestStatusOmitsObservationsForUnseenBuckets(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
 	resetObservations(t, "")
-	// A stored bucket gives the matrix a row to render. Without one the loop
-	// below would pass over nothing.
+	// 先存一个 bucket 让矩阵有行可画；没行的话下方循环会考一张空白卷。
 	seedMgmtBucket(t, dir, "codex-alpha.json", "gpt-5.5", wallClock().Add(-time.Minute))
 
 	status := mustManagementStatus(t)
-	// The seeded cell carries its tally; the sibling cell -- same account, a
-	// model nothing has been seen for -- must render without one, or the page
-	// cannot tell "no traffic" apart from a real zero.
+	// 种过数据的格子带计数；同账号但未见过的兄弟模型不带，别把无流量扮成真零值。
 	seen := false
 	for _, bucket := range status.Buckets {
 		if bucket.AuthID == "codex-alpha.json" && bucket.Model == "gpt-5.6-sol" {
@@ -735,13 +690,11 @@ func TestStatusOmitsObservationsForUnseenBuckets(t *testing.T) {
 	}
 }
 
-// The case that would otherwise be invisible: a model the upstream throttles so
-// hard that no template ever lands has no store record, and if it is also not
-// in the configured list it gets no matrix row either. Its throttling would be
-// missing from the one page that exists to show throttling.
+// 最容易隐身的模型被限流到从没存过模板，若还不在配置列表，矩阵连一行都不给。
+// 这个页面本为看限流而建，不能把最惨的观众请出摄影范围。
 func TestStatusGivesARowToAnObservedButUnconfiguredModel(t *testing.T) {
 	dir := t.TempDir()
-	mustConfigure(t, probeRoleConfig(dir)) // configures gpt-5.5 and gpt-5.6-sol
+	mustConfigure(t, probeRoleConfig(dir)) // 给 gpt-5.5 与 gpt-5.6-sol 安排座位
 	cfg := resetObservations(t, "")
 
 	recordObservation(cfg, "codex-alpha.json", "gpt-6-astra", 312, false)
@@ -757,8 +710,7 @@ func TestStatusGivesARowToAnObservedButUnconfiguredModel(t *testing.T) {
 	if bucket.Ready {
 		t.Error("the drift row reports ready, but nothing was ever stored for it")
 	}
-	// It is drift, not a target: counting it would report progress against a
-	// denominator the operator never chose.
+	// 这是漂移不是目标，不能计入进度；分母要由运营者点菜，系统别偷加人数。
 	for _, model := range status.Models {
 		if model == "gpt-6-astra" {
 			t.Fatal("gpt-6-astra leaked into the configured models list")

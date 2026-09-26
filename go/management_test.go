@@ -16,9 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 )
 
-// Paths are spelled out rather than imported from the implementation. These
-// tests are the contract for the management surface: renaming a route in
-// production should break them loudly, not have them follow along.
+// 路由路径手写，不借实现常量；这是管理接口合同，生产改名就该当场响铃，不能跟着一起换招牌。
 const (
 	mgmtStatusPath   = "/v0/management/codex-turn-state/status"
 	mgmtClearPath    = "/v0/management/codex-turn-state/buckets/clear"
@@ -26,22 +24,17 @@ const (
 	mgmtConfigPath   = "/v0/management/codex-turn-state/config"
 	mgmtResourcePath = "/v0/resource/plugins/codex-turn-state/"
 
-	// The probe runner's controls, on the unauthenticated resource prefix where
-	// the rest of the keyless actions live.
+	// 探测运行控制与其他免密动作同住未鉴权资源前缀，不另起收费柜台。
 	opsProbeStartPath  = mgmtResourcePath + "ops/probe/start"
 	opsProbeCancelPath = mgmtResourcePath + "ops/probe/cancel"
 
-	// The scope editor's menu, on the same unauthenticated prefix. Unlike its
-	// neighbours it only reads, so it takes no confirm=1 -- which is itself part
-	// of the contract asserted below.
+	// 范围编辑菜单也在同一免密前缀，但它只读，不要 confirm=1；只看菜单不必先签点菜确认书。
 	opsChoicesPath = mgmtResourcePath + "ops/choices"
 )
 
-// --- wire shapes ---------------------------------------------------------
-//
-// Decoded into local structs so the tests do not bind to internal type names.
-// The pluginapi management types carry no JSON tags, so they travel under their
-// Go field names -- StatusCode, Headers, Body -- which is what these mirror.
+// --- 线上形状：信封也有规矩 ---
+// 解到本地结构，不绑内部类型名。pluginapi 管理类型没 JSON tag，线上用 Go 字段名
+// StatusCode、Headers、Body，这里照样摆座位。
 
 type mgmtResponse struct {
 	StatusCode int         `json:"StatusCode"`
@@ -70,8 +63,7 @@ type mgmtBucket struct {
 	IssuedAt    string `json:"issued_at"`
 	ExpiresAt   string `json:"expires_at"`
 	SecondsLeft int64  `json:"seconds_left"`
-	// Observed is absent on a bucket nothing has been seen for, which is why
-	// this is a pointer: "no traffic" and "normal" must stay distinguishable.
+	// 未见流量 bucket 不带 Observed，用指针分清“没人来”与“正常”，空椅子不能冒充好评。
 	Observed *mgmtObserved `json:"observed"`
 }
 
@@ -112,10 +104,8 @@ type mgmtStatus struct {
 	Buckets        []mgmtBucket `json:"buckets"`
 	TargetsTotal   int          `json:"targets_total"`
 	TargetsReady   int          `json:"targets_ready"`
-	// AccountsSource is "host" when the credential list came from
-	// host.auth.list and "store" when it had to be inferred from what the store
-	// already holds. Under "store" a never-probed account is invisible, so the
-	// distinction is what stops an empty matrix reading as "nothing to probe".
+	// AccountsSource 为 host 表示 host.auth.list 名单，store 表示从库存推断。
+	// store 看不到从未探测账号，必须说明来源，别把短名单说成客人都到齐。
 	AccountsSource    string                 `json:"accounts_source"`
 	AccountsError     string                 `json:"accounts_error"`
 	StoreError        string                 `json:"store_error"`
@@ -123,9 +113,8 @@ type mgmtStatus struct {
 	ObservationsSince string                 `json:"observations_since"`
 	ObservationFeed   []mgmtObservationEvent `json:"observation_feed"`
 	ProbeAccounts     []string               `json:"probe_accounts"`
-	// ProbeProxies is plaintext, and that is the contract now rather than an
-	// oversight -- see TestStatusShowsProbeProxiesInTheClear for why it changed
-	// and what still stays masked. ProbeProxyCount survived the change.
+	// ProbeProxies 明文是现在的刻意合同，不是手滑；理由见 TestStatusShowsProbeProxiesInTheClear。
+	// 其他遮罩边界仍在，ProbeProxyCount 也留着，换招牌不拆计数器。
 	ProbeProxyCount int      `json:"probe_proxy_count"`
 	ProbeProxies    []string `json:"probe_proxies"`
 }
@@ -134,30 +123,13 @@ type mgmtClearResult struct {
 	Cleared int `json:"cleared"`
 }
 
-// mgmtSelftestResult mirrors the selftest body. Harvested is spelled out here
-// even though it is always false: the field existing and reading false is the
-// contract, so it has to be decoded to be asserted.
-//
-// AuthID is a request-side echo, never a discovery.
-//
-// Reading back which credential answered is not possible: CPA's
-// HostModelExecutionResponse carries only StatusCode, Headers and Body, with no
-// account identity anywhere, and no auth-id response header exists to look for.
-// An earlier revision guessed at header names; that whole approach was removed
-// because it could only ever invent an answer.
-//
-// The direction that does work is the request side.
-// pluginapi.HostModelExecutionRequest.AuthID "optionally locks execution to an
-// exact credential ID" and the host forwards it verbatim
-// (internal/pluginhost/host_callbacks.go:330). So the plugin does not learn
-// which account was used -- it decides, and echoes back what it asked for.
-//
-// Targeted exists because auth_id alone is ambiguous. An empty auth_id could be
-// read as "the scheduler picked nothing", which never happens; what it actually
-// means is "we did not specify one, and cannot find out which was used".
-// targeted:false says that out loud, so nobody reads an empty string as a
-// finding. See TestSelftestEchoesTargetingHonestly and
-// TestSelftestAuthIDIsNeverFabricated.
+// mgmtSelftestResult 镜像自检响应，Harvested 虽恒 false 也要解码断言，字段存在和否定都算合同。
+// AuthID 只能回显请求，不能冒充发现：CPA 的 HostModelExecutionResponse 只有 StatusCode、Headers、Body，
+// 无账号身份也无 auth-id 响应头。旧版猜头名已撤掉，猜对口音不算查过身份证。
+// 可行方向是请求：HostModelExecutionRequest.AuthID 可锁精确凭据，宿主原样转发
+// （internal/pluginhost/host_callbacks.go:330）。插件决定用谁，再回显自己点的名，不是事后侦察。
+// Targeted 消除空 auth_id 歧义：空值并非调度器没选，而是未指定且无法知道选了谁。
+// targeted:false 直说未点名，见 TestSelftestEchoesTargetingHonestly 与 TestSelftestAuthIDIsNeverFabricated。
 type mgmtSelftestResult struct {
 	Reached    bool   `json:"reached"`
 	StatusCode int    `json:"status_code"`
@@ -169,11 +141,10 @@ type mgmtSelftestResult struct {
 	Error      string `json:"error"`
 }
 
-// --- drivers -------------------------------------------------------------
+// --- 驱动：真流程上台，道具来配合 ---
 
-// decodeMgmtEnvelope unwraps the plugin's ok/error envelope. Kept separate from
-// main_test.go's interceptAfter so a failing management call reports the
-// plugin's own error text instead of a generic decode failure.
+// decodeMgmtEnvelope 拆插件 ok/error 信封，与 main_test.go 的 interceptAfter 分开；
+// 管理调用失败要报插件原话，不让通用解码失败抢了真凶台词。
 func decodeMgmtEnvelope(t *testing.T, raw []byte) json.RawMessage {
 	t.Helper()
 	var env struct {
@@ -193,8 +164,7 @@ func decodeMgmtEnvelope(t *testing.T, raw []byte) json.RawMessage {
 	return env.Result
 }
 
-// truncateMgmtLog keeps a failure message readable when a body is large. It also
-// means a leaked token would not be splashed across the full test log.
+// truncateMgmtLog 把大响应失败信息截短，既便于读，也不让意外漏 token 满屏巡演。
 func truncateMgmtLog(raw []byte) string {
 	const limit = 200
 	if len(raw) <= limit {
@@ -203,7 +173,7 @@ func truncateMgmtLog(raw []byte) string {
 	return string(raw[:limit]) + "..."
 }
 
-// driveManagement drives one management.handle call end to end.
+// driveManagement 端到端走一次 management.handle，整段戏不跳场。
 func driveManagement(t *testing.T, method, path string, body []byte) mgmtResponse {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
@@ -226,15 +196,14 @@ func driveManagement(t *testing.T, method, path string, body []byte) mgmtRespons
 			t.Fatalf("decode management response: %v", errUnmarshal)
 		}
 	}
-	// Zero means 200 per the SDK contract; normalise so callers compare one
-	// value rather than two.
+	// SDK 规定零即 200，先归一，调用者别对一张票验两种字号。
 	if resp.StatusCode == 0 {
 		resp.StatusCode = http.StatusOK
 	}
 	return resp
 }
 
-// driveManagementJSON drives a call whose body is a JSON object.
+// driveManagementJSON 带 JSON 对象正文发一次调用，参数装正经信封。
 func driveManagementJSON(t *testing.T, method, path string, payload any) mgmtResponse {
 	t.Helper()
 	body, err := json.Marshal(payload)
@@ -244,7 +213,7 @@ func driveManagementJSON(t *testing.T, method, path string, payload any) mgmtRes
 	return driveManagement(t, method, path, body)
 }
 
-// driveManagementRegister drives management.register and returns the declared routes.
+// driveManagementRegister 跑 management.register，取回声明路由花名册。
 func driveManagementRegister(t *testing.T) mgmtRegistration {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
@@ -268,7 +237,7 @@ func driveManagementRegister(t *testing.T) mgmtRegistration {
 	return reg
 }
 
-// mustManagementStatus fetches and decodes the status document.
+// mustManagementStatus 获取并解码状态文档，坏信封当场报错。
 func mustManagementStatus(t *testing.T) mgmtStatus {
 	t.Helper()
 	resp := driveManagement(t, http.MethodGet, mgmtStatusPath, nil)
@@ -282,8 +251,7 @@ func mustManagementStatus(t *testing.T) mgmtStatus {
 	return status
 }
 
-// probeRoleConfig is a probe-role config pointed at dir. businessConfig already
-// exists in main_test.go; this is its counterpart.
+// probeRoleConfig 给 probe 指 dir 地址，与 main_test.go 的 businessConfig 结对，不串角色。
 func probeRoleConfig(dir string) string {
 	return fmt.Sprintf(`role: probe
 store_dir: %q
@@ -298,10 +266,8 @@ models:
 `, dir)
 }
 
-// businessConfigWithModels is businessConfig (main_test.go) plus a models list.
-// The self-test validates its model against that list in either role, so a
-// business-role fixture without one could only ever produce a 400 and would
-// never reach the behaviour under test.
+// businessConfigWithModels 给 businessConfig 加模型表；两角色自检都照表验模型。
+// 没表只会 400，永远到不了要考的戏，入场券先备齐。
 func businessConfigWithModels(dir string) string {
 	return fmt.Sprintf(`role: business
 store_dir: %q
@@ -316,8 +282,7 @@ models:
 `, dir)
 }
 
-// probeRoleConfigModels is probeRoleConfig with a caller-chosen model list, so
-// a test can vary the width of the readiness matrix.
+// probeRoleConfigModels 接自选模型表，让测试能拉宽就绪矩阵这张桌。
 func probeRoleConfigModels(dir string, models ...string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `role: probe
@@ -335,22 +300,20 @@ models:
 	return b.String()
 }
 
-// seedMgmtBucket records one observation for the bucket and returns a fake
-// token the caller can hunt for in bodies -- it must never appear on the wire.
+// seedMgmtBucket 记一次观测，回假 token 供搜响应抓泄漏；道具票也不准走上公开台面。
 func seedMgmtBucket(t *testing.T, dir, authID, model string, issued time.Time) string {
 	t.Helper()
 	recordObservation(defaultConfig(), authID, model, 292, false)
 	return fakeToken(292, issued)
 }
 
-// observedCellCount is the observation-row analogue of a store snapshot: a
-// rejected call must leave the tally exactly as it found it.
+// observedCellCount 像给观测行拍库存照；拒绝调用后账本必须原封不动，门没开就不该少东西。
 func observedCellCount() int {
 	cells, _, _ := observationsSnapshot()
 	return len(cells)
 }
 
-// mgmtBucketByKey finds one bucket in a status document.
+// mgmtBucketByKey 在状态文档按键找 bucket，按门牌不按脸熟。
 func mgmtBucketByKey(status mgmtStatus, authID, model string) (mgmtBucket, bool) {
 	for _, bucket := range status.Buckets {
 		if bucket.AuthID == authID && bucket.Model == model {
@@ -360,11 +323,9 @@ func mgmtBucketByKey(status mgmtStatus, authID, model string) (mgmtBucket, bool)
 	return mgmtBucket{}, false
 }
 
-// --- 1. secrecy ----------------------------------------------------------
+// --- 1. 保密：库房物件不出橱窗 ---
 
-// The whole design rests on values never leaving the store. The status document
-// is the most likely place to leak one by accident, because it is assembled
-// from the very records that hold them.
+// 设计立在值不离开存储这条底线上；状态文档从含值记录组装，最易顺手漏货，柜台尤其要查。
 func TestManagementStatusNeverLeaksTokenValues(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -382,23 +343,18 @@ func TestManagementStatusNeverLeaksTokenValues(t *testing.T) {
 	}
 	body := string(resp.Body)
 	for i, secret := range secrets {
-		// A 40-character prefix is far past the point where a collision could
-		// be accidental, and short enough to catch a truncated leak.
+		// 取 40 字符前缀足够排除偶然撞脸，又能抓截短泄漏，不能只认全身照。
 		needle := secret[:40]
 		if strings.Contains(body, needle) {
 			t.Errorf("status body leaked token %d", i)
 		}
 	}
-	// Guard against the assertion passing because the body is empty or the
-	// buckets never made it in: the test must be looking at real data.
+	// 先证响应非空且真有 bucket，别让泄漏断言对一张白纸夸“保密不错”。
 	if len(resp.Body) == 0 {
 		t.Fatal("status body is empty; the leak assertions above proved nothing")
 	}
-	// The status document enumerates *target* buckets -- configured models
-	// crossed with the accounts seen -- so missing ones show up as not-ready
-	// rather than being absent. Asserting a total would therefore be asserting
-	// that arithmetic, not that the leak checks saw real data. Checking the
-	// seeded buckets are present and ready is the assertion that matters.
+	// 状态列的是目标桶：配置模型 × 已见账号，缺桶显示未就绪而非失踪。
+	// 因此不拿总数替代泄漏检查，只确认种下的桶存在且 ready，验货不考乘法口诀。
 	status := mustManagementStatus(t)
 	for _, want := range [][2]string{
 		{"codex-alpha.json", "gpt-5.5"},
@@ -412,10 +368,8 @@ func TestManagementStatusNeverLeaksTokenValues(t *testing.T) {
 	}
 }
 
-// The resource shell is served on the unauthenticated prefix. It must therefore
-// be a fixed asset: the moment it renders anything derived from runtime state,
-// that state is public. Byte equality across a store mutation is the assertion
-// that keeps it honest.
+// 资源壳走免密前缀，必须是固定资产；一旦渲染运行时状态就把它公开。
+// 改存储前后字节相等才算守约，壳别偷偷长出库存窗口。
 func TestResourceShellIsStaticAndDataFree(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -448,7 +402,7 @@ func TestResourceShellIsStaticAndDataFree(t *testing.T) {
 	}
 }
 
-// --- 2. capability and route declaration ---------------------------------
+// --- 2. 能力与路由声明：门牌挂哪，权限就在哪 ---
 
 func TestRegistrationAdvertisesManagementAPI(t *testing.T) {
 	dir := t.TempDir()
@@ -482,12 +436,9 @@ func TestRegistrationAdvertisesManagementAPI(t *testing.T) {
 	}
 }
 
-// This is the sharpest footgun on the management surface. CPA's
-// routeDeclaresLegacyMenuResource (internal/pluginhost/management.go:156) treats
-// any GET route carrying a Menu label as a *legacy resource*, and re-registers
-// it under /v0/resource/plugins/<id>/ -- which is not management-authenticated.
-// Putting a Menu on the status route would therefore publish the whole status
-// document, silently, with no other symptom.
+// 管理接口最尖的坑：CPA 的 routeDeclaresLegacyMenuResource
+// （internal/pluginhost/management.go:156）把带 Menu 的 GET 当旧资源，
+// 再挂 /v0/resource/plugins/<id>/，不经管理鉴权。status 一挂 Menu 就悄悄公开整份文档，招牌变了万能钥匙。
 func TestManagementDataRoutesCarryNoMenu(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -504,15 +455,9 @@ func TestManagementDataRoutesCarryNoMenu(t *testing.T) {
 	}
 }
 
-// Exactly one resource may carry a Menu, and it is the dashboard shell.
-//
-// The invariant is about the Menu, not the resource count. There are two
-// resources now -- the shell and an anonymous /status the shell fetches -- and
-// there may be more later. What must never grow is the set of *menu-bearing*
-// ones: a Menu turns a resource into a management-centre entry, and every such
-// entry lives on the unauthenticated /v0/resource prefix. One page is intended
-// to be reachable without a key (the user asked for a no-login dashboard);
-// anything else acquiring a Menu would be an accident that quietly publishes it.
+// 只准 dashboard 壳一个资源带 Menu；限制的是 Menu，不是资源总数。
+// 壳与匿名 /status 已是两项，以后还可增；Menu 会把资源挂进管理中心，而每个入口都走免密前缀。
+// 用户只要求免登录看板，其他项不能不声不响蹭招牌开门。
 func TestManagementRegisterExposesExactlyOneMenuResource(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -536,11 +481,8 @@ func TestManagementRegisterExposesExactlyOneMenuResource(t *testing.T) {
 	}
 }
 
-// The anonymous /status resource is the dashboard's data source: same handler
-// and same JSON as the authenticated management status, reachable without a key
-// because the resource prefix is not authenticated. It must NOT carry a Menu --
-// a Menu is for pages an operator navigates to, and this is a fetch target; the
-// menu-bearing entry is the dashboard alone (see the test above).
+// 匿名 /status 是看板数据源，与鉴权状态同处理器同 JSON，资源前缀使其免密。
+// 它是 fetch 目标不是导航页面，不挂 Menu；菜单名额只给 dashboard，送菜单的别抢餐桌。
 func TestManagementRegisterExposesAnonymousStatusResource(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -561,11 +503,8 @@ func TestManagementRegisterExposesAnonymousStatusResource(t *testing.T) {
 	}
 }
 
-// The status document served on the anonymous resource path is the same one the
-// authenticated route returns, so it must be held to the same secrecy bar. The
-// account filenames it exposes are the user's informed choice; the token values
-// are never anyone's choice. This re-runs the no-leak check against the resource
-// path specifically, because that is the one an unauthenticated caller reaches.
+// 匿名状态与鉴权路由同文档，同守保密线；账号文件名公开是用户知情选择，token 值绝不在选择题里。
+// 专在资源路径重跑防泄漏，免密来客走的正是这扇门。
 func TestAnonymousStatusResourceNeverLeaksTokenValues(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -588,8 +527,7 @@ func TestAnonymousStatusResourceNeverLeaksTokenValues(t *testing.T) {
 			t.Errorf("anonymous status leaked token %d", i)
 		}
 	}
-	// Prove the body is the real status document, not an error or a stub, so
-	// the leak assertions were exercised against actual bucket data.
+	// 证明正文是真状态文档，不是错误或空替身；泄漏检查得真对 bucket 数据照灯。
 	var status mgmtStatus
 	if err := json.Unmarshal(resp.Body, &status); err != nil {
 		t.Fatalf("anonymous status body is not a status document: %v", err)
@@ -599,18 +537,14 @@ func TestAnonymousStatusResourceNeverLeaksTokenValues(t *testing.T) {
 	}
 }
 
-// The clear endpoint takes an account and a model straight from a request body
-// and turns them into a filesystem path. Without sanitising, "auth_id": ".."
-// walks out of the store and deletes whatever is next door.
+// clear 把请求账号、模型拼成文件路径，必须先净化；auth_id 为 ".." 可走出 store 删隔壁，清洁工不能兼职拆迁。
 func TestClearBucketRejectsPathTraversal(t *testing.T) {
 	base := t.TempDir()
 	dir := filepath.Join(base, "store")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir store: %v", err)
 	}
-	// The sentinel sits one level above the store, exactly where "../<model>"
-	// lands. Its name matches the <model>.json shape so a successful traversal
-	// would actually remove it.
+	// 哨兵放 store 上一层，正是 ../<model> 落点，名字也像 <model>.json；真穿越就真会删它，道具摆在刀口上。
 	sentinel := filepath.Join(base, "sentinel.json")
 	if err := os.WriteFile(sentinel, []byte("untouched"), 0o600); err != nil {
 		t.Fatalf("write sentinel: %v", err)
@@ -648,9 +582,8 @@ func TestClearBucketRejectsPathTraversal(t *testing.T) {
 		})
 	}
 
-	// The legitimate bucket must still be there: a blanket refusal that also
-	// broke normal clears would pass every assertion above. "There" is an
-	// observation row now -- the per-bucket file store is gone.
+	// 合法 bucket 仍须在；全拒绝也会过前面题，但会误伤正常清理。
+	// 如今“在”指观测行，逐桶文件存储已撤，别去旧地址查房。
 	if _, ok := mgmtBucketByKey(mustManagementStatus(t), "codex-alpha.json", "gpt-5.5"); !ok {
 		t.Fatal("the ordinary bucket was collateral damage")
 	}
@@ -688,18 +621,12 @@ func TestClearBucketRejectsMalformedBody(t *testing.T) {
 	}
 }
 
-// --- 4. selftest ---------------------------------------------------------
-//
-// This route used to be /probe and claimed to harvest. It cannot: a request
-// issued through host.model.execute is marked to skip the calling plugin's own
-// interceptors (host_callbacks_unix.go:43 -> host_callbacks.go:304 -> :306), so
-// the response never reaches interceptResponse and nothing is ever stored. It
-// is now a connectivity self-test, and the tests below encode that.
+// --- 4. 自检：通路检查不是采集丰收 ---
+// 旧 /probe 曾声称采集，但 host.model.execute 标记跳过调用插件自有拦截器
+// （host_callbacks_unix.go:43 → host_callbacks.go:304 → :306），响应不到 interceptResponse，根本不会存。
+// 现在只做连通性自检，测试不让它再报虚假产量。
 
-// The self-test says nothing about buckets, so it is not a probe-role
-// operation. Refusing it under role: business would only stop an operator
-// checking whether the business role can still reach upstream -- which is
-// exactly when they most want to ask.
+// 自检不谈 bucket，不限 probe；business 也要查能否回源，越忙越不能把检查员赶出去。
 func TestSelftestWorksRegardlessOfRole(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -713,8 +640,7 @@ func TestSelftestWorksRegardlessOfRole(t *testing.T) {
 			mustConfigure(t, tc.cfg(dir))
 
 			resp := driveManagementJSON(t, http.MethodPost, mgmtSelftestPath, map[string]any{"model": "gpt-5.5"})
-			// Without a host API the call cannot succeed, so the assertion is
-			// about *why* it failed: never because of the role.
+			// 没有宿主 API 注定不成功，查的是为什么失败；不能赖角色穿错衣服。
 			if resp.StatusCode == http.StatusConflict {
 				t.Errorf("selftest refused with 409 under role %s: %s", tc.name, truncateMgmtLog(resp.Body))
 			}
@@ -725,8 +651,7 @@ func TestSelftestWorksRegardlessOfRole(t *testing.T) {
 	}
 }
 
-// The model must be one the operator configured. Firing at an arbitrary string
-// would spend quota on a model nobody is tracking.
+// 只准已配置模型，自检不能向任意字符串开火，配额不替陌生菜单买单。
 func TestSelftestRejectsUnconfiguredModel(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -735,54 +660,26 @@ func TestSelftestRejectsUnconfiguredModel(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("selftest with an unconfigured model returned %d, want 400", resp.StatusCode)
 	}
-	// A configured one must get past this guard, or the assertion above would
-	// hold for the wrong reason.
+	// 已配置模型要能过门；否则全拒绝也能糊弄前题，门卫不是木板。
 	next := driveManagementJSON(t, http.MethodPost, mgmtSelftestPath, map[string]any{"model": "gpt-5.5"})
 	if next.StatusCode == http.StatusBadRequest {
 		t.Error("a configured model was also rejected as unconfigured")
 	}
 }
 
-// Without a host API there is nothing to execute against. A self-test reports
-// its finding in the body rather than as an HTTP error -- 200 means "the
-// self-test ran", and `reached` carries the answer -- so what has to hold here
-// is that it reports honestly: it did not reach, it harvested nothing, and it
-// left the store alone. Claiming reached on a call that never left the process
-// is the failure this guards against.
+// 无宿主 API 就无执行对象；正常已运行的自检以 200 表示检查完成，reached 承载通路结果。
+// 这里须诚实区分根本没出进程：未到达、未采集、未碰存储，不能足不出户就报旅行成功；无宿主的 HTTP 状态以下方 503 专项为准。
 func TestSelftestFailsClosedWithoutHostAPI(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
 
 	resp := driveManagementJSON(t, http.MethodPost, mgmtSelftestPath, map[string]any{"model": "gpt-5.5"})
 
-	// 503, and deliberately not 200 or a loose >= 400.
-	//
-	// This assertion was rewritten three times while the endpoint was being
-	// built -- >= 400, then 200 with reached:false, then back to 503 -- so the
-	// reasoning is recorded here rather than left to be re-derived. It is
-	// settled: do not widen or relax it.
-	//
-	// Two failures look similar from the outside and are not:
-	//
-	//   no host callback table  -- the self-test never ran. The plugin did not
-	//                              get its host interface, so nothing was
-	//                              attempted. This says nothing whatsoever
-	//                              about upstream.
-	//   host present, no answer -- the self-test ran and the path is broken.
-	//                              That is what reached:false means, and it is
-	//                              reported with 200 because the self-test
-	//                              itself succeeded in finding out.
-	//
-	// Reporting the first as 200 + reached:false sends an operator to check the
-	// network, the credentials and the upstream, when the actual fault is that
-	// the plugin was loaded wrong. That is an expensive detour, and it lands
-	// hardest during a 3am incident -- which is exactly when someone reaches
-	// for a self-test. 503 Service Unavailable is the accurate statement: this
-	// service is unavailable, not the one behind it.
-	//
-	// The 503 body comes from managementError, which carries only `error`.
-	// There is deliberately no `note`: note explains why a run that *did*
-	// happen stored nothing, and no run happened here.
+	// 严格断言 503，不是 200，也不是随便 >=400；建接口时这题从 >=400 改 200+reached:false 又回 503，定案不再放宽。
+	// 两种失败不能混：无 host 回调表是自检根本没运行，插件没拿接口，不能说明上游；
+	// host 在但没答复则检查已运行、通路坏，才用 200+reached:false 表示查到了故障。
+	// 把第一种报 200 会让凌晨值班者去查网络、凭据、上游，实际只是插件没装对，别拿内部断电指挥人修隔壁路灯。
+	// 503 来自 managementError，只带 error，故意无 note；note 解释运行过却没存，这里压根没运行。
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("selftest with no host API returned %d, want 503: %s", resp.StatusCode, truncateMgmtLog(resp.Body))
 	}
@@ -829,15 +726,8 @@ func TestSelftestRejectsMalformedBody(t *testing.T) {
 	}
 }
 
-// auth_id is caller-supplied and gets interpolated into an outbound request, so
-// it goes through the same sanitiser as a store path. The cases mirror
-// TestClearBucketRejectsPathTraversal: one rule for "is this identifier safe to
-// pass on" rather than two that can drift apart.
-//
-// The ordering matters as much as the rejection. The sanitiser runs before the
-// host-availability check, so a bad auth_id gets its own specific 400 instead
-// of being masked by the 503 -- an operator who typo'd an account name is told
-// that, not told the plugin is unloaded.
+// auth_id 来自请求且进入出站请求，按存储路径同一净化规矩，案例照 TestClearBucketRejectsPathTraversal，
+// 不另养一套会走样的门卫。还须先净化再查 host：坏 ID 得具体 400，不能被缺 host 的 503 盖住，写错名字别报剧院倒闭。
 func TestSelftestRejectsUnsafeAuthID(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -853,20 +743,15 @@ func TestSelftestRejectsUnsafeAuthID(t *testing.T) {
 		{"leading slash", "/etc/passwd"},
 		{"embedded null", "codex\x00.json"},
 	}
-	// An all-whitespace auth_id is deliberately absent from that list. The
-	// implementation trims before testing for emptiness, so "   " means "I did
-	// not ask to target anything" -- identical to omitting the field -- rather
-	// than an unsafe value. Rejecting it would make a blank form field an error
-	// instead of a default.
+	// 全空白 auth_id 刻意不在坏值表；先 Trim，再判空，"   " 等于没指定账号，
+	// 空表单是默认行为，不是来客伪造身份证。
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := driveManagementJSON(t, http.MethodPost, mgmtSelftestPath, map[string]any{
 				"model":   "gpt-5.5",
 				"auth_id": tc.authID,
 			})
-			// 400 specifically, not merely "an error": a 503 here would mean
-			// the unsafe value slipped past the sanitiser and was only stopped
-			// by the missing host API, which would not stop it in production.
+			// 必须 400；503 只说明坏值混过净化，被缺 host 临时拦下，生产可没这位替补门卫。
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Errorf("unsafe auth_id %q returned %d, want 400: %s",
 					tc.authID, resp.StatusCode, truncateMgmtLog(resp.Body))
@@ -874,9 +759,7 @@ func TestSelftestRejectsUnsafeAuthID(t *testing.T) {
 		})
 	}
 
-	// A well-formed account name must get *past* the sanitiser, or every
-	// assertion above would hold for the wrong reason. It stops at the 503
-	// because this process has no host API -- which is the proof it got through.
+	// 合法账号要过净化而停在缺 host 的 503，这才证明不是门卫把所有人都拦了。
 	ok := driveManagementJSON(t, http.MethodPost, mgmtSelftestPath, map[string]any{
 		"model":   "gpt-5.5",
 		"auth_id": "codex-alpha.json",
@@ -885,18 +768,12 @@ func TestSelftestRejectsUnsafeAuthID(t *testing.T) {
 		t.Errorf("a well-formed auth_id was rejected as unsafe: %s", truncateMgmtLog(ok.Body))
 	}
 
-	// Deliberately not tested: whether a *nonexistent* account is rejected.
-	// The implementation passes an unknown id straight through and lets the
-	// scheduler answer, rather than keeping a second view of the credential
-	// list that could disagree with the real one. Asserting a 4xx here would
-	// pin a contract that does not exist.
+	// 故意不考不存在账号的拒绝：未知 ID 交真实调度器答，不养第二份可能分歧的名单。
+	// 硬断言 4xx 是给不存在的合同盖章。
 }
 
-// managementFuncBody returns the source text of one top-level function in
-// management.go. Used by the assertions below, which pin properties that cannot
-// be reached behaviourally: the self-test bails at the host-availability check
-// long before it builds a response, so anything downstream of that check is
-// only observable in the source.
+// managementFuncBody 取 management.go 顶层函数源码；自检无 host 提前返回，下游响应逻辑单测走不到，
+// 只能在源码上验规矩，不假装已经看过真人演出。
 func managementFuncBody(t *testing.T, name string) string {
 	t.Helper()
 	src, err := os.ReadFile("management.go")
@@ -908,7 +785,7 @@ func managementFuncBody(t *testing.T, name string) string {
 	if start < 0 {
 		t.Fatalf("management.go has no func %s; the selftest contract requires it", name)
 	}
-	// Top-level functions close with a brace in column zero.
+	// 顶层函数由第零列右花括号谢幕，按它认场界。
 	end := strings.Index(text[start:], "\n}")
 	if end < 0 {
 		t.Fatalf("could not find the end of func %s", name)
@@ -916,19 +793,9 @@ func managementFuncBody(t *testing.T, name string) string {
 	return text[start : start+end]
 }
 
-// auth_id must only ever be echoed from what the caller asked for.
-//
-// CPA reports no credential identity on the way back: HostModelExecutionResponse
-// carries only StatusCode, Headers and Body, and a sweep of the CPA source found
-// no auth-id response header of any name. This is settled, not merely
-// unconfirmed -- there is nothing to look for. So any auth_id the plugin did
-// not receive as input is fabricated -- and a fabricated account name in a
-// self-test result is worse than an empty one, because an operator will act on
-// it: check that account's quota, disable it, hand it to a colleague. The empty
-// string is honest and `targeted` says why it is empty.
-//
-// Asserted at source level because the response is only built after the
-// host-availability check, which a unit test cannot get past.
+// auth_id 只能回显调用者要求。CPA 响应只有 StatusCode、Headers、Body，源码查过无任何 auth-id 响应头，
+// 不是尚未找到，而是根本不存在。非输入得来的账号名就是编造，会误导人查额度、禁账号、转交同事。
+// 空串更诚实，targeted 解释其为空；单测过不了 host 检查，因此从源码堵住“看相认账号”。
 func TestSelftestAuthIDIsNeverFabricated(t *testing.T) {
 	body := managementFuncBody(t, "runSelftest")
 
@@ -952,9 +819,7 @@ func TestSelftestAuthIDIsNeverFabricated(t *testing.T) {
 			continue
 		}
 		assignments++
-		// authID is the sanitised value taken from the request body. Anything
-		// else -- a header lookup, a helper that inspects the response -- is a
-		// guess dressed up as an answer.
+		// authID 是请求净化后的值；头查找或读响应助手都只是把猜测穿上答案戏服。
 		if !strings.HasPrefix(value, "authID") {
 			line := strings.Count(body[:at], "\n")
 			t.Errorf("runSelftest assigns AuthID from %q (about %d lines into the function); "+
@@ -967,19 +832,9 @@ func TestSelftestAuthIDIsNeverFabricated(t *testing.T) {
 	}
 }
 
-// The echo must be verbatim and `targeted` must be derived from it.
-//
-// Nothing else covers this. If the echo ever crosses wires -- reporting the
-// account the caller did not name -- a self-test run against a suspect account
-// would come back describing a healthy different one, and the operator would
-// clear the wrong credential. And if `targeted` were hard-coded or computed
-// from something other than "was an auth_id supplied", an empty auth_id would
-// stop being readable: the whole point of the flag is that auth_id:"" plus
-// targeted:false means "we never asked", which is a different statement from
-// anything the scheduler did.
-//
-// Source level for the same reason as the tests around it: the response is
-// built after the host-availability check, which a unit test cannot pass.
+// 回显必须原样，targeted 必须从是否提供 auth_id 得来。串线会让查疑似坏账号却报告另一好账号，运营者就清错凭据。
+// 硬编码 targeted 或从别处猜，会让 auth_id:"" 不再可读；配 targeted:false 才表示从未指定，不描述调度器选择。
+// 同样因无 host 过不了响应构造前门，按源码验，不能凭空宣称现场验证。
 func TestSelftestEchoesTargetingHonestly(t *testing.T) {
 	body := managementFuncBody(t, "runSelftest")
 
@@ -993,32 +848,22 @@ func TestSelftestEchoesTargetingHonestly(t *testing.T) {
 	}
 	literal := body[at : at+end]
 
-	// The echo is the sanitised request value, unmodified.
+	// 回显净化后的请求值，不加工成另一个人名。
 	if !strings.Contains(literal, "AuthID:") {
 		t.Error("the selftestResponse does not set AuthID, so the caller is never told which account was targeted")
 	} else if !strings.Contains(literal, "AuthID:    authID") && !strings.Contains(literal, "AuthID: authID") {
 		t.Errorf("AuthID is not echoed verbatim from the request; literal was:\n%s", literal)
 	}
 
-	// targeted must be "did the caller supply one", nothing else.
+	// targeted 只问调用者是否提供，别夹带调度器小道消息。
 	if !strings.Contains(literal, `Targeted:  authID != ""`) && !strings.Contains(literal, `Targeted: authID != ""`) {
 		t.Errorf(`Targeted is not derived from 'authID != ""'; it must say whether the caller asked, not anything about the outcome. Literal was:`+"\n%s", literal)
 	}
 }
 
-// Targeting must actually be applied, not merely reported.
-//
-// targeted:true is a claim that this self-test exercised one specific
-// credential. If auth_id is validated and echoed but never put on the outbound
-// HostModelExecutionRequest, the scheduler picks whichever account it likes and
-// the result describes a request that was never made. An operator testing a
-// suspect account would read a clean result for a different one -- the exact
-// wrong conclusion, delivered confidently.
-//
-// HostModelExecutionRequest.AuthID is documented as "optionally locks execution
-// to an exact credential ID" and is passed through verbatim by the host
-// (internal/pluginhost/host_callbacks.go:330), so setting it is all that is
-// required.
+// 定向必须真应用，不只是回报。targeted:true 表示这次真用了指定凭据；
+// 若只验证回显却不放进 HostModelExecutionRequest，调度器随便选人，干净结果就替错人洗白。
+// AuthID 文档承诺锁精确凭据，宿主原样转发（internal/pluginhost/host_callbacks.go:330），设上即可，别只给准考证拍照不带进考场。
 func TestSelftestTargetingIsActuallyApplied(t *testing.T) {
 	body := managementFuncBody(t, "runSelftest")
 
@@ -1038,15 +883,8 @@ func TestSelftestTargetingIsActuallyApplied(t *testing.T) {
 	}
 }
 
-// harvested must be a hard-coded false, never a computed value.
-//
-// The self-test genuinely cannot harvest -- the host marks its request to skip
-// this plugin's own interceptors -- so any code that decides the field at
-// runtime is expressing a belief that is false, and would eventually report a
-// harvest that did not happen. An operator trusting that would then stop
-// probing. Because the field can only be observed on a successful call, and a
-// unit test has no host API to produce one, this is asserted at the source
-// level: every assignment to Harvested must be the literal false.
+// harvested 必须字面量 false，不能运行时猜。宿主跳过本插件拦截器，自检真采不到；
+// 动态计算迟早会报虚假采集，让人停探测。单测无 host 无法成功运行，从源码查每次赋值都是 false，假收成别进账。
 func TestSelftestNeverClaimsHarvest(t *testing.T) {
 	src, err := os.ReadFile("management.go")
 	if err != nil {
@@ -1069,10 +907,8 @@ func TestSelftestNeverClaimsHarvest(t *testing.T) {
 		idx = at + len(field)
 
 		rest := strings.TrimLeft(text[idx:], " \t")
-		// Struct-literal form "Harvested: <value>" and assignment form
-		// "Harvested = <value>" are the two ways the value gets set. A field
-		// declaration ("Harvested bool `json:...`") and prose in comments are
-		// neither, and are skipped.
+		// 只看结构字面量 Harvested:<value> 与赋值 Harvested=<value>；
+		// 字段声明 Harvested bool `json:...` 和注释台词不算出手，别误抓背景板。
 		var value string
 		switch {
 		case strings.HasPrefix(rest, ":") && !strings.HasPrefix(rest, ":="):
@@ -1094,18 +930,14 @@ func TestSelftestNeverClaimsHarvest(t *testing.T) {
 	}
 }
 
-// --- 5. unknown paths and malformed input --------------------------------
+// --- 5. 未知路径与坏输入：乱投简历也别炸前台 ---
 
 func TestManagementUnknownPathReturns404(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
 
-	// "/v0/management/codex-turn-state" and "" are deliberately absent: the
-	// implementation maps any path ending in the plugin id -- and the empty
-	// path -- onto the data-free dashboard shell (isDashboardPath in
-	// management.go), because the resource route arrives as the plugin root.
-	// Serving the shell there is a choice, not a bug, and the shell carries no
-	// data. These are the paths that must genuinely 404.
+	// 故意不列 /v0/management/codex-turn-state 与空路径：实现把插件 ID 结尾路径及空值映射到无数据 dashboard 壳
+	// （management.go 的 isDashboardPath），资源请求本就到插件根。这是选择不是 bug；这里列的才真该 404。
 	for _, path := range []string{
 		"/v0/management/codex-turn-state/nope",
 		"/v0/management/other-plugin/status",
@@ -1121,7 +953,7 @@ func TestManagementUnknownPathReturns404(t *testing.T) {
 	}
 }
 
-// A wrong method on a known path must not fall through to the handler.
+// 已知路径用错方法必须拦住，不能换个嗓音就混进处理器。
 func TestManagementRejectsWrongMethod(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -1147,8 +979,7 @@ func TestManagementRejectsWrongMethod(t *testing.T) {
 	}
 }
 
-// handleMethod must not panic on input the host would never send but an
-// attacker on the management port could.
+// host 不会发但管理端口来客可构造的输入，也不能让 handleMethod panic，门口吵架别把楼震塌。
 func TestManagementHandleSurvivesMalformedInput(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -1161,20 +992,16 @@ func TestManagementHandleSurvivesMalformedInput(t *testing.T) {
 		[]byte(`{"Method":42}`),
 		[]byte(`{"Path":null,"Method":null}`),
 	} {
-		// A panic here fails the test by unwinding; an error return is a
-		// perfectly good outcome too. The only unacceptable result is a crash,
-		// which would take the whole CPA process down with it.
+		// panic 自会展开失败；返回错误完全可接受，唯一不准的是崩掉整个 CPA 进程，一人闹事不能全店停业。
 		if _, err := handleMethod(pluginabi.MethodManagementHandle, raw); err != nil {
 			t.Logf("management.handle rejected %q: %v", truncateMgmtLog(raw), err)
 		}
 	}
 }
 
-// --- 6. counters ---------------------------------------------------------
+// --- 6. 计数：只算本场账 ---
 
-// Counters are process-global and every other test in this package also drives
-// decisions, so the assertions compare deltas. Absolute values would make this
-// test depend on execution order.
+// 计数全进程共用，其他用例也会驱动决定；只比增量，不比总量，别把前桌饭钱记到本桌。
 func TestManagementCountersTrackDecisions(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, businessConfig(dir, false))
@@ -1185,11 +1012,10 @@ func TestManagementCountersTrackDecisions(t *testing.T) {
 
 	base := mustManagementStatus(t).Counters
 
-	// Two attributable Codex requests: both steered -- the pool is global, so
-	// the second account rides the same pair rather than passing.
+	// 两个可归属 Codex 请求都引导；池是全局的，第二账号也拿同 pair，不是空手放行。
 	interceptAfter(t, request("codex-alpha.json", "gpt-5.5", fakeToken(312, issued)))
 	interceptAfter(t, request("codex-beta.json", "gpt-5.6-sol", fakeToken(312, issued)))
-	// No auth id: one skip.
+	// 没 auth id，记一次 skip，查不到人就别硬分座位。
 	noAuth := request("", "gpt-5.5", fakeToken(312, issued))
 	interceptAfter(t, noAuth)
 
@@ -1202,7 +1028,7 @@ func TestManagementCountersTrackDecisions(t *testing.T) {
 	}
 }
 
-// --- status content ------------------------------------------------------
+// --- 状态内容：能报尺寸，不能晒真票 ---
 
 func TestStatusReflectsConfiguredValues(t *testing.T) {
 	dir := t.TempDir()
@@ -1226,11 +1052,8 @@ func TestStatusReflectsConfiguredValues(t *testing.T) {
 	}
 }
 
-// The per-bucket len reports the *length* of the stored value, never the value.
-// A length is a safe thing to publish -- it is the whole tell this plugin keys
-// on, 292 against 312 -- but a field sitting right next to the token is exactly
-// where one gets pasted by accident, so this asserts both halves: the number is
-// a plausible length, and the document still carries no token.
+// 每桶 len 只报长度，不报值；292 对 312 是插件辨别线索，可公开。
+// 但字段挨着 token 最容易复制手滑，所以既查数字像长度，也查文档不带真票，量身高别顺手交身份证。
 func TestStatusBucketLenIsALengthNotAValue(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -1257,7 +1080,7 @@ func TestStatusBucketLenIsALengthNotAValue(t *testing.T) {
 	if stored.Len != 292 {
 		t.Errorf("len = %d for a stored 292-character template, want 292", stored.Len)
 	}
-	// A bucket that was never harvested has no value and so no length.
+	// 从未采集 bucket 无值也无长度，空仓库别报货物尺寸。
 	missing, ok := mgmtBucketByKey(status, "codex-alpha.json", "gpt-5.6-sol")
 	if !ok {
 		t.Fatal("the unharvested target bucket is missing from status")
@@ -1267,29 +1090,16 @@ func TestStatusBucketLenIsALengthNotAValue(t *testing.T) {
 	}
 }
 
-// --- 6b. upstream error classification -----------------------------------
-//
-// reached is decided in three tiers, and the whole point is to stop a working
-// path being reported as a broken one:
-//
-//	1. an upstream error body parses   -> reached, because only the upstream
-//	                                      produces that schema
-//	2. "failed with status N" is found -> reached, with the code
-//	3. neither                         -> a genuine transport failure
-//
-// handleSelftest bails at the host-availability check long before it gets here,
-// so these exercise the two classifiers directly. They are unexported but in
-// this package, so no seam is needed.
+// --- 6b. 上游错误分类：到门口被拒不等于没路 ---
+// reached 分三级：上游错误体可解析则已到（该 schema 来自上游）；
+// 找到完整 failed with status N 则已到且有码；两者都无才是真传输失败。
+// handleSelftest 无 host 早退到不了这儿，直接测同包两分类器，不另挖接缝。
 
-// The messages below were captured from the real deployment, not invented.
-// Keeping the exact strings matters: the classifier is parsing someone else's
-// output, and a plausible-looking paraphrase would test a format nobody sends.
+// 以下消息来自真实部署，原文必须留；分类器读别人的输出，改成“差不多”台词只会考不存在的协议。
 const (
-	// Observed verbatim on OVH.
+	// OVH 原样观测到的台词，别替上游润色。
 	msgOverloaded = `host_call_failed: {"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2}`
-	// Observed on OVH; the message text was truncated in capture, so it is
-	// completed here. The error fields -- the only part the classifier reads --
-	// are as recorded.
+	// OVH 观测消息正文截断过，这里补全；分类器所读 error 字段仍照实记录，不把台词补写冒充证据。
 	msgServerError = `host_call_failed: {"error":{"type":"server_error","code":"server_error","message":"An error occurred while processing your request.","param":null},"sequence_number":1}`
 )
 
@@ -1300,15 +1110,12 @@ func TestUpstreamErrorClassification(t *testing.T) {
 		wantBody   bool
 		wantCode   string
 		wantType   string
-		wantStatus int  // 0 when no status should be recovered
-		wantOKStat bool //nolint:revive // mirrors the classifier's second return
+		wantStatus int  // 找不到状态码就记 0，不凭空补票
+		wantOKStat bool //nolint:revive // 照分类器第二返回值报到，不另演一套
 	}{
 		{
-			// The case this whole tier exists for. server_is_overloaded is the
-			// same signal as a 312 degraded state (FINDINGS.md): recovering the
-			// code is what tells an operator to wait rather than to go hunting
-			// for a broken link. Reported as reached=false, it sent people to
-			// check the network while the real answer was "it is overloaded".
+			// 这级专治 server_is_overloaded：同 312 降级信号（FINDINGS.md），取回 code 才知该等而非查断网。
+			// 误报 reached=false 曾把人指去修网络，其实厨房只是忙不过来。
 			name:     "overloaded, no status",
 			message:  msgOverloaded,
 			wantBody: true,
@@ -1339,7 +1146,7 @@ func TestUpstreamErrorClassification(t *testing.T) {
 			wantOKStat: true,
 		},
 		{
-			// Tier 3: nothing recoverable, so reached=false is the honest answer.
+			// 第三级无可恢复线索，诚实报 reached=false，不编到店打卡。
 			name:    "transport failure",
 			message: "host_call_failed: dial tcp 127.0.0.1:8317: connect: connection refused",
 		},
@@ -1368,7 +1175,7 @@ func TestUpstreamErrorClassification(t *testing.T) {
 				t.Errorf("status = %d, want %d", status, tc.wantStatus)
 			}
 
-			// The tier rule: either signal means the request arrived.
+			// 任一层到达信号成立，就说明请求到了，不能还说路断了。
 			if reached := okBody || okStatus; reached != (tc.wantBody || tc.wantOKStat) {
 				t.Errorf("reached would be %t, want %t", reached, tc.wantBody || tc.wantOKStat)
 			}
@@ -1376,10 +1183,7 @@ func TestUpstreamErrorClassification(t *testing.T) {
 	}
 }
 
-// An unrelated JSON object appearing in a message is not the upstream
-// answering. Treating it as one would flip reached to true on a pure transport
-// failure -- the opposite of the bug this tier was added to fix, and harder to
-// spot because it reports success.
+// 消息夹无关 JSON 不算上游回答；否则纯传输失败也变 reached=true，假成功比真报错更会藏猫猫。
 func TestUpstreamErrorFromRejectsUnrelatedJSON(t *testing.T) {
 	for _, message := range []string{
 		`host_call_failed: {"foo":"bar"}`,
@@ -1397,23 +1201,18 @@ func TestUpstreamErrorFromRejectsUnrelatedJSON(t *testing.T) {
 	}
 }
 
-// The status marker is the complete phrase "failed with status ", not a bare
-// "status ". Upstream messages are now embedded in the same string, and they
-// contain prose: "check status page" would otherwise be mined for an HTTP code.
-// Loosening this match reintroduces that silently, so it is pinned here.
+// 状态标记必须完整 failed with status ，不能只找 status 。上游正文同在消息里，
+// check status page 等人话不该被挖成 HTTP 码；放宽就会让路边数字冒充收据。
 func TestStatusFromExecutionErrorRequiresTheFullPhrase(t *testing.T) {
 	rejected := []string{
-		// The discriminating case: a digit follows "status " inside upstream
-		// prose, so a matcher keyed on the bare word would mine 503 out of a
-		// sentence and report it as the HTTP result. Only the full phrase
-		// rejects this. If this case is ever softened, the loose matcher passes
-		// again and the misreading returns unannounced.
+		// 区分题：上游人话 status 后跟数字，宽松匹配会挖出 503 当 HTTP 结果。
+		// 只有完整短语才拒收；软化此题，老误读又会穿新衣回来。
 		`host_call_failed: {"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Overloaded -- check status 503 page for updates."}}`,
 		"host_call_failed: status 429",
 		"host_call_failed: http status 500",
 		"host_call_failed: failed with status",
 		"host_call_failed: failed with status abc",
-		// Outside the plausible HTTP range: a number that is not a status code.
+		// 超合理 HTTP 范围的数字不是状态码，门牌再长也不是票价。
 		"host_call_failed: failed with status 42",
 		"host_call_failed: failed with status 900",
 	}
@@ -1425,8 +1224,7 @@ func TestStatusFromExecutionErrorRequiresTheFullPhrase(t *testing.T) {
 		})
 	}
 
-	// Reverse control: the real phrasing must still be recognised, or every
-	// assertion above would hold for the wrong reason.
+	// 反向对照仍须认真实短语；否则聋门卫什么都拒，也能过上面题。
 	accepted := map[string]int{
 		"host_call_failed: request failed with status 429": 429,
 		"host_call_failed: request failed with status 500": 500,
@@ -1446,10 +1244,8 @@ func TestStatusFromExecutionErrorRequiresTheFullPhrase(t *testing.T) {
 	}
 }
 
-// The two upstream fields carry no omitempty, so the response shape is constant
-// whether or not a code was recovered. A field that vanishes when empty makes a
-// dashboard read "undefined" rather than "no code", and makes a missing field
-// indistinguishable from a field that was never implemented.
+// 两上游字段不带 omitempty，有无码形状都恒定；空就消失会让页面读 undefined，
+// 分不清“无代码”和“没实现字段”，空盘也得留桌上。
 func TestSelftestUpstreamFieldsHaveNoOmitempty(t *testing.T) {
 	src, err := os.ReadFile("management.go")
 	if err != nil {
@@ -1463,32 +1259,21 @@ func TestSelftestUpstreamFieldsHaveNoOmitempty(t *testing.T) {
 	}
 }
 
-// --- 6c. 312 degraded state is attributed but never stored ---------------
-//
-// A 312 is the throttled/degraded state, not a template (FINDINGS.md): it is
-// what the upstream issues under load, the same signal as server_is_overloaded.
-// The harvest path runs attribution over it anyway -- only so the log can name
-// *which* account is throttled, "account X is degraded" rather than "auth=-" --
-// but it must never reach the store. Storing a 312 and later injecting it would
-// replay a degraded token, which the upstream rejects as
-// "could not be decrypted". This is the store's half of that rule; the
-// classifier's half is tested in the upstream-error section above.
+// --- 6c. 312 归属可查，仓库不收 ---
+// 312 是上游负载下的降级/限流 state，与 server_is_overloaded 同信号（FINDINGS.md）。
+// 采集仍归属只是为日志指出哪个账号降级，不再 auth=-；不能入库。
+// 存后重放降级票会被拒 could not be decrypted。这里守存储半边，上方分类器守诊断半边，坏票可登记不可转卖。
 
-// harvestResponseHeaders builds the response headers a probe would see, with the
-// turn-state value the caller wants attributed.
+// harvestResponseHeaders 按探针所见造响应头，装入调用者要归属的 state 道具。
 func harvestResponseHeaders(value string) http.Header {
 	h := http.Header{}
 	h.Set(testHeader, value)
 	return h
 }
 
-// resetHarvestState clears the in-memory bucket cache and the route-cookie
-// pool. harvestFromResponse short-circuits a repeat write when the cache
-// already holds the same value for a key (Codex mints a fresh token per turn,
-// so an identical one means a replay), and both caches are process-global and
-// not reset between tests. A test that drives the harvest path must start from
-// a clean slate or a prior test's entry could suppress the write under
-// examination -- or lend its cookies to an account they do not belong to.
+// resetHarvestState 清内存 bucket 缓存与路由 Cookie 池；harvestFromResponse 遇同键同值会跳过重复写。
+// Codex 每轮铸新票，相同说明重放；两缓存进程全局不随测试自动清。
+// 开始先清场，免得旧记录压掉待测写入，或旧 Cookie 混到别的账号手里。
 func resetHarvestState(t *testing.T) {
 	t.Helper()
 	state.mu.Lock()
@@ -1503,25 +1288,13 @@ func resetHarvestState(t *testing.T) {
 	})
 }
 
-// --- 6d. sole-account attribution: the cross-account firewall ------------
-//
-// When a request or response carries no selected_auth_id, the plugin may infer
-// the account from the spec §7 invariant that a probe enables exactly one Codex
-// account at a time. That inference is the single most dangerous line in the
-// codebase: infer wrong and account A's template is written under, or injected
-// into, account B -- a direct breach of §0 rule 1 (a state is never shared
-// across accounts). The tests here exist to make that failure impossible to
-// introduce silently. The `count != 1` refusal in soleEnabledCodexAuth is the
-// firewall; the 2+ cases below are the ones that must never regress.
-//
-// codexAuthLister is a package-level seam (management.go). Every test that
-// swaps it MUST restore it and drop the cache, or the fake account list leaks
-// into every later test. resetAuthCache() is required after each swap because
-// the lookup sits behind a 2-second cache.
+// --- 6d. 单账号归属：最危险的猜人环节 ---
+// 无 selected_auth_id 时可依规范 §7 “probe 一次只启一个 Codex 账号”推断。猜错会把 A 模板写到或注入 B，
+// 直接违 §0 规则 1 不跨账号共享 state。soleEnabledCodexAuth 的 count!=1 就是门禁，尤其 2+ 情形绝不能悄悄退化。
+// codexAuthLister 是 management.go 包级接缝；每次替换须还原并 resetAuthCache()，
+// 查找有 2 秒缓存，假名单不能串到下场，门卫的记忆也要清。
 
-// withAuthList installs a fake credential list for the duration of one test and
-// guarantees restoration. Centralising the swap/restore means no individual
-// test can forget the defer -- the failure mode the coordinator flagged.
+// withAuthList 给单用例装假名单并保证恢复；集中换还流程，别让某用例忘 defer 留下假演员占岗。
 func withAuthList(t *testing.T, accounts []codexAuth, err error) {
 	t.Helper()
 	codexAuthLister = func() ([]codexAuth, error) {
@@ -1542,21 +1315,14 @@ func enabledAccounts(names ...string) []codexAuth {
 	return out
 }
 
-// harvestNoAuthMeta is the metadata a minimal probe request carries: none. The
-// account is absent, which is exactly what forces the inference path.
+// harvestNoAuthMeta 就是最简探针的空元数据；故意没账号，才逼归属推断真正上台。
 var harvestNoAuthMeta = map[string]any{}
 
-// --- 7. the readiness matrix --------------------------------------------
+// --- 7. 就绪矩阵：空座位也得画出来 ---
 
-// Degradation must be visible. A unit test has no host API, so host.auth.list
-// always fails here and the account list falls back to whatever the store
-// happens to hold -- which is precisely the state where the page is most
-// misleading if it says nothing: a never-probed account is invisible, so an
-// empty or short matrix reads as "there is nothing to probe" when it means "we
-// could not ask what there is".
-//
-// Silent degradation has been the recurring failure on this surface, so this
-// asserts both halves: the source is named, and the reason is carried.
+// 降级必须看得见。单测无 host API，host.auth.list 总失败，只能从存储推账号；
+// 从未探测的账号隐身，若不说明，短或空矩阵会被看成没目标，而不是问不到名单。
+// 静默降级反复出事，所以来源与理由都得写，别把门卫失联讲成宾客绝迹。
 func TestStatusReportsDegradedAccountSource(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -1571,17 +1337,13 @@ func TestStatusReportsDegradedAccountSource(t *testing.T) {
 	}
 }
 
-// The matrix is the set of buckets we intend to fill, not the set already
-// filled. Straight after a deploy nothing is harvested, and that is exactly
-// when an operator needs to see "0 of N" and pick something to act on.
+// 矩阵是打算填的桶，不只已填桶；刚部署一无所获时最需要看 0/N 才知道该干啥，空仓库也要挂货架图。
 func TestStatusMatrixCoversEveryTarget(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfigModels(dir, "gpt-5.5", "gpt-5.6-sol"))
 
 	issued := wallClock().Add(-time.Minute)
-	// Two accounts become visible through the store (the degraded path derives
-	// them from records), crossed with two configured models: a 2x2 matrix of
-	// which only three cells are filled.
+	// 存储推断出两账号，配两模型得 2×2 矩阵，只填三格；第四把空椅子不能藏起来。
 	seedMgmtBucket(t, dir, "codex-alpha.json", "gpt-5.5", issued)
 	seedMgmtBucket(t, dir, "codex-alpha.json", "gpt-5.6-sol", issued)
 	seedMgmtBucket(t, dir, "codex-beta.json", "gpt-5.5", issued)
@@ -1594,7 +1356,7 @@ func TestStatusMatrixCoversEveryTarget(t *testing.T) {
 		t.Errorf("targets_total = %d for 2 accounts x 2 models, want 4", status.TargetsTotal)
 	}
 
-	// The unharvested cell must be present and honest about being empty.
+	// 没采集那格必须在并诚实报空，别把欠账划掉当结清。
 	gap, ok := mgmtBucketByKey(status, "codex-beta.json", "gpt-5.6-sol")
 	if !ok {
 		t.Fatal("the never-harvested combination is missing from the matrix; the page would not show it as a gap")
@@ -1612,9 +1374,7 @@ func TestStatusMatrixCoversEveryTarget(t *testing.T) {
 		t.Errorf("a never-harvested cell reports seconds_left = %d, want 0", gap.SecondsLeft)
 	}
 
-	// Reverse control: widen the model list and the matrix must widen with it.
-	// Without this, an implementation that just listed on-disk records would
-	// satisfy every assertion above.
+	// 反向加宽模型表，矩阵也要加宽；否则只列磁盘记录的懒掌柜也能过前题。
 	mustConfigure(t, probeRoleConfigModels(dir, "gpt-5.5", "gpt-5.6-sol", "gpt-6-astra"))
 	wider := mustManagementStatus(t)
 	if wider.TargetsTotal != 6 {
@@ -1622,15 +1382,13 @@ func TestStatusMatrixCoversEveryTarget(t *testing.T) {
 	}
 }
 
-// The page re-fetches on a timer. Unstable ordering would make rows and columns
-// jump under the operator's cursor mid-read.
+// 页面定时重取，顺序不稳会让行列在鼠标下跳舞，看板不是打地鼠。
 func TestStatusBucketOrderIsStable(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfigModels(dir, "gpt-5.6-sol", "gpt-5.5"))
 
 	issued := wallClock().Add(-time.Minute)
-	// Seeded out of order on purpose, so a pass-through of map or disk order
-	// would not accidentally come out sorted.
+	// 故意乱序种数据，别让 map/磁盘原序恰好排对，靠运气过考不算。
 	seedMgmtBucket(t, dir, "codex-zulu.json", "gpt-5.6-sol", issued)
 	seedMgmtBucket(t, dir, "codex-alpha.json", "gpt-5.5", issued)
 	seedMgmtBucket(t, dir, "codex-mike.json", "gpt-5.6-sol", issued)
@@ -1648,8 +1406,7 @@ func TestStatusBucketOrderIsStable(t *testing.T) {
 				second.Buckets[i].AuthID, second.Buckets[i].Model)
 		}
 	}
-	// Stable is not enough on its own -- a consistently wrong order is stable
-	// too. The contract is (auth_id, model) lexicographic.
+	// 稳定还不够，稳定排错也是错；合同按（auth_id, model）字典序，座次写清。
 	for i := 1; i < len(first.Buckets); i++ {
 		prev, cur := first.Buckets[i-1], first.Buckets[i]
 		if prev.AuthID > cur.AuthID || (prev.AuthID == cur.AuthID && prev.Model > cur.Model) {
@@ -1659,12 +1416,8 @@ func TestStatusBucketOrderIsStable(t *testing.T) {
 	}
 }
 
-// An empty store must not produce a bare empty array with no explanation. On
-// the degraded path there is genuinely nothing to list -- the accounts can only
-// come from records that do not exist -- so the empty matrix is correct, but it
-// has to arrive labelled. "We could not ask" and "there is nothing to probe"
-// render identically otherwise, and this is the defect that motivated the
-// accounts_source field.
+// 空存储在降级路径确实没账号可列，空矩阵可以，但不能只甩空数组。
+// 须标明来源，否则“问不到”与“没人可探”长一样；accounts_source 就是给这张白纸写清来历。
 func TestStatusEmptyStoreStillNamesItsSource(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeRoleConfig(dir))
@@ -1684,24 +1437,17 @@ func TestStatusEmptyStoreStillNamesItsSource(t *testing.T) {
 	}
 }
 
-// --- 9. the probe scope's secrets, and the one that stopped being one -----
-//
-// Three values live in the probe scope that nothing else does: the proxy list,
-// which is now published in the clear on purpose, and the two bearers the probe
-// runner uses, which are published nowhere at all. Both halves are pinned below,
-// because they are easy to confuse and the second is what makes the first
-// survivable.
+// --- 9. 探测秘密：一项刻意公开，两把钥匙仍不露脸 ---
+// 范围里代理列表如今按要求明文公开；runner 两个 bearer 则哪里都不公布。
+// 两边都钉牢，别看隔壁开窗就把保险柜也拆了。
 
 const (
-	// Distinctive on purpose: the assertions below check these strings appear
-	// nowhere, so they must not collide with anything a formatter might emit.
+	// 密钥起独特道具名，断言到处搜它，不能撞上合法格式化文字造成冤案。
 	testProbeManagementKey = "mk-probe-management-never-show-me"
 )
 
-// probeConfigWithSecrets is probeRoleConfig plus every secret-bearing probe
-// field: a proxy carrying a password (testProxyWithPW, probe_scope_test.go) and
-// the bearer. One fixture drives both halves of the contract -- the proxy list
-// rendered verbatim, the key rendered nowhere.
+// probeConfigWithSecrets 在 probeRoleConfig 上加带密码代理（probe_scope_test.go 的 testProxyWithPW）与 bearer。
+// 同一份道具考两条线：代理列表原样展示，key 哪里都不露。
 func probeConfigWithSecrets(dir string) string {
 	return probeRoleConfig(dir) + fmt.Sprintf(`probe_accounts:
   - codex-a.json
@@ -1711,16 +1457,9 @@ probe_management_key: %s
 `, testProxyWithPW, testProbeManagementKey)
 }
 
-// The proxy list is served in the clear, which is a deliberate reversal of what
-// this document used to do. The masked field made the editor write-only: a
-// textarea seeded with "socks5h://***@exit:1080" can only be saved by retyping
-// every entry, so every scope edit cost the whole proxy list. The operator
-// instructed that it show the real values.
-//
-// What this pins is the reversal itself, so a later "surely this should be
-// masked" tidy-up breaks loudly rather than quietly restoring the unusable
-// editor. Masking everywhere else is covered by probe_scope_test.go and by
-// TestProbeKeysAreNeverDisplayedOrLogged below.
+// 代理列表明文是刻意反转旧遮罩：textarea 塞 socks5h://***@exit:1080 就变只能写不能读，
+// 每次存范围都得重输整表，运营者明确要求真实值。测试钉住这个决定，
+// 后人别以“这该遮罩吧”又修回不可用编辑器。其他位置遮罩见 probe_scope_test.go 与 TestProbeKeysAreNeverDisplayedOrLogged。
 func TestStatusShowsProbeProxiesInTheClear(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeConfigWithSecrets(dir))
@@ -1733,9 +1472,7 @@ func TestStatusShowsProbeProxiesInTheClear(t *testing.T) {
 		t.Fatalf("probe_proxies = %v, want the configured entry verbatim", status.ProbeProxies)
 	}
 
-	// The anonymous resource path serves the same document, and it is the route
-	// that actually publishes this. Asserting only the keyed path would miss the
-	// half that matters.
+	// 匿名资源真公开的也是这份文档；只考带 key 路由等于只检查锁着的窗，不看大门。
 	resp := driveManagement(t, http.MethodGet, mgmtResourcePath+"status", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("anonymous status returned %d, want 200 (body: %s)", resp.StatusCode, truncateMgmtLog(resp.Body))
@@ -1748,24 +1485,18 @@ func TestStatusShowsProbeProxiesInTheClear(t *testing.T) {
 		t.Fatalf("anonymous probe_proxies = %v, want the same verbatim entry", anonymous.ProbeProxies)
 	}
 
-	// The field that was replaced must be gone rather than kept alongside: a
-	// page reading the old name would show masks while the real values sat in
-	// the same document, which is the worst of both.
+	// 被替换的旧字段要消失，不能并排留；否则页面看遮罩，真值却躺同文档，保密与可用两头都输。
 	if strings.Contains(string(resp.Body), "probe_proxies_masked") {
 		t.Error("status still carries probe_proxies_masked; the masked field was replaced, not supplemented")
 	}
 }
 
-// The two probe keys exist so the dashboard can start a run without anyone
-// typing a key. That only holds up if the keys themselves never come back out:
-// the status document is anonymously readable, and a configure log line gets
-// copied into tickets. Neither may carry one in any form -- there is no masked
-// rendering of these, because no caller has any business seeing one.
+// 两个探测 key 让看板不用人输 key 就能开跑，前提是它们绝不回流。
+// 状态免密、configure 日志会贴工单，两处任何形式都不能带 key，连遮罩展示都不设，钥匙不参加时装秀。
 func TestProbeKeysAreNeverDisplayedOrLogged(t *testing.T) {
 	dir := t.TempDir()
 
-	// configure is the only place the keys are read, so its log line is the one
-	// that could leak them.
+	// configure 是读 key 的地方，它那行日志最容易把钥匙带出门。
 	logged := captureLog(t, func() { mustConfigure(t, probeConfigWithSecrets(dir)) })
 	if strings.TrimSpace(logged) == "" {
 		t.Fatal("configure logged nothing; the leak assertions below would prove nothing")
@@ -1775,17 +1506,14 @@ func TestProbeKeysAreNeverDisplayedOrLogged(t *testing.T) {
 			t.Error("the configure log line carried a probe key verbatim")
 		}
 	}
-	// Presence, and only presence. "Is it configured at all" is the one question
-	// an operator answers from a log; anything more is a hint.
+	// 只报存在与否；日志需要回答配没配，不需要任何长相提示。
 	for _, want := range []string{"probe_management_key=set"} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("the configure log line does not report %q, so a missing key would be invisible: %s", want, logged)
 		}
 	}
 
-	// Every place the configuration is rendered: both status routes, and the
-	// keyed config route, which returns the configuration verbatim and is the
-	// one most likely to grow a field by accident.
+	// 所有配置展示位置一起查：两状态路由、原样返配置的鉴权 config 路由；后者最易无意长出新字段。
 	for name, path := range map[string]string{
 		"management status": mgmtStatusPath,
 		"anonymous status":  mgmtResourcePath + "status",
@@ -1804,10 +1532,8 @@ func TestProbeKeysAreNeverDisplayedOrLogged(t *testing.T) {
 				t.Errorf("%s leaked a probe key", name)
 			}
 		}
-		// The field name matters as much as the value. A key rendered as "" or
-		// as "***" reads as "nothing configured" while the plugin is in fact
-		// holding one, and it invites the next person to fill the field in for
-		// real.
+		// 字段名同样不能露：把 key 写成 "" 或 "***" 会像未配置，还诱导下一人填真值，
+		// 空保险柜招牌也会招来错误装修。
 		for _, field := range []string{"probe_management_key"} {
 			if strings.Contains(body, field) {
 				t.Errorf("%s carries a %q field; these are never displayed, not even empty or masked", name, field)
@@ -1816,11 +1542,8 @@ func TestProbeKeysAreNeverDisplayedOrLogged(t *testing.T) {
 	}
 }
 
-// The probe runner's two controls are keyless by choice -- the whole point of
-// the button is that nobody types a key to press it -- so they must be
-// resources. Being GETs that spend quota and stop a run in flight, they must
-// also refuse to fire without confirm=1, or a bare navigation or a link prefetch
-// could do either.
+// runner 两控制有意免密，所以必须 Resources；GET 会花配额或停在途运行，
+// 缺 confirm=1 必须拒绝，预取路过不能替人喊开机、停机。
 func TestProbeRunRoutesAreKeylessResourcesGuardedByConfirm(t *testing.T) {
 	dir := t.TempDir()
 	mustConfigure(t, probeConfigWithSecrets(dir))
@@ -1844,9 +1567,7 @@ func TestProbeRunRoutesAreKeylessResourcesGuardedByConfirm(t *testing.T) {
 			t.Errorf("%s is not registered as a resource, so it would demand a management key the dashboard does not have", path)
 			continue
 		}
-		// A Menu on a GET route is what demotes one to the resource prefix by
-		// accident. These belong there on purpose, and a Menu would also
-		// misrepresent them as pages to navigate to.
+		// GET 带 Menu 会意外降到资源前缀；这些本来就该在那里，不带 Menu，也别把动作假扮导航页面。
 		if strings.TrimSpace(res.Menu) != "" {
 			t.Errorf("%s declares Menu %q; it is fetched by the page, not navigated to", path, res.Menu)
 		}
@@ -1855,9 +1576,7 @@ func TestProbeRunRoutesAreKeylessResourcesGuardedByConfirm(t *testing.T) {
 		}
 	}
 
-	// Asserted again here, beside the routes being added: adding a route is
-	// exactly when the config route gets copied into the resource list by
-	// mistake, and that response returns the configuration verbatim.
+	// 新增路由时再查 config 不入资源表；复制黏贴最会让原样配置响应跟错队伍。
 	for _, res := range reg.Resources {
 		if strings.HasSuffix(res.Path, "/config") {
 			t.Errorf("config route %q is registered as a resource; it must stay behind the management key", res.Path)
@@ -1870,54 +1589,32 @@ func TestProbeRunRoutesAreKeylessResourcesGuardedByConfirm(t *testing.T) {
 			t.Errorf("GET %s without confirm=1 returned %d, want 400 (body: %s)", path, resp.StatusCode, truncateMgmtLog(resp.Body))
 		}
 	}
-	// And nothing started. A refused request that still kicked off a run would
-	// be the exact failure confirm=1 exists to prevent.
+	// 拒绝后还要确认没启动；嘴上拒绝手里开跑，正是 confirm=1 要防的双簧。
 	if snapshot := probeRunSnapshot(); snapshot.Running {
 		t.Error("a probe run is in flight after two requests that were refused for lack of confirm=1")
 	}
 }
 
-// --- /ops/choices --------------------------------------------------------
-//
-// The scope editor's menu replaces three hand-typed lists with checkboxes, so
-// the properties worth pinning are the ones that decide whether the operator can
-// trust what they tick:
-//
-//   - it answers with no key and no confirm, or the page renders empty boxes;
-//   - `selected` mirrors the saved scope, or a save silently drops whatever the
-//     page failed to re-tick;
-//   - `label` never carries the customer's email, because this route is
-//     anonymously readable;
-//   - a credential list that cannot be fetched still renders, with the reason.
+// --- /ops/choices：勾选菜单别替人忘事 ---
+// 三份手输列表改复选框，须免 key、免 confirm，否则空框；selected 忠实映保存范围，否则下一次保存丢未重勾项；
+// 展示 label 不带客户邮件；名单取不到也保模型菜单并说明原因，不能柜台断网就把餐厅招牌摘了。
 
-// choicesCPAFile is one entry of the auth-files listing the fake publishes.
-// Fields are a map rather than a struct so a case can publish a document with
-// the wrong shape if it ever needs to.
+// choicesCPAFile 是假 auth-files 的一条，用 map 不用结构，方便按题故意造坏形状，道具可换脸。
 type choicesCPAFile map[string]any
 
-// choicesCPA stands in for CPA's GET /v0/management/auth-files, the only call
-// /ops/choices makes.
-//
-// Local to this file rather than probe_runner_test.go's fakeCPA, which stamps
-// provider "codex" on every entry it publishes: two of the cases below turn on
-// entries the filter must reject, and one of those is a non-Codex provider.
+// choicesCPA 只扮 /ops/choices 要用的 GET /v0/management/auth-files。
+// 不借 probe_runner_test.go 那个给所有条目标 codex 的 fakeCPA，因为两题要过滤，其中一个正是非 Codex，替身不能先替坏人洗白。
 type choicesCPA struct {
 	server *httptest.Server
 
-	// Everything below is read by the server goroutine and written by the test
-	// goroutine, so it all lives under one mutex rather than relying on the
-	// happens-before edge a request round trip happens to provide.
+	// 下面状态被服务 goroutine 读、测试 goroutine 写，统一 mutex 守门；不赌请求往返刚好带来的 happens-before。
 	mu sync.Mutex
-	// status is what the listing answers with. 401 is a case, not a malfunction:
-	// it is what a stale probe_management_key produces in production.
+	// status 控制名单回应，401 是考题不是片场故障，生产过期 probe_management_key 就会这样。
 	status int
 	files  []choicesCPAFile
-	// hold blocks the handler until the test closes it, standing in for a CPA
-	// that has accepted the connection and stopped answering.
+	// hold 卡处理器直到测试关掉，扮 CPA 收连接后装没听见。
 	hold chan struct{}
-	// authSeen records the Authorization headers received, so a test can assert
-	// the route really presents the configured key rather than having reached an
-	// unauthenticated listing by accident.
+	// authSeen 收 Authorization 头，实证带了配置 key，不是碰巧摸进未鉴权名单柜。
 	authSeen []string
 }
 
@@ -1930,8 +1627,7 @@ func newChoicesCPA(t *testing.T, files ...choicesCPAFile) *choicesCPA {
 		fake.authSeen = append(fake.authSeen, r.Header.Get("Authorization"))
 		fake.mu.Unlock()
 
-		// Outside the lock: a stalled handler holding it would block every other
-		// request instead of just this one.
+		// 阻塞在锁外，别让一个发呆处理器把其他客人全锁在门口。
 		if hold != nil {
 			<-hold
 		}
@@ -1942,9 +1638,7 @@ func newChoicesCPA(t *testing.T, files ...choicesCPAFile) *choicesCPA {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if status != http.StatusOK {
-			// Shaped like CPA's own refusal, body and all: a response body is one
-			// of the things that could carry something quotable into the error
-			// string the page renders.
+			// 照 CPA 拒绝格式连 body 一起演；错误体可能被引用进页面报错，别让带秘密台词混过去。
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
@@ -1954,15 +1648,14 @@ func newChoicesCPA(t *testing.T, files ...choicesCPAFile) *choicesCPA {
 	return fake
 }
 
-// refuse makes the listing answer with status and an error body.
+// refuse 让名单端点按 status 与错误体拒客。
 func (f *choicesCPA) refuse(status int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.status = status
 }
 
-// stall makes every request block until the test ends, so the plugin's own
-// timeout is the only thing that can end the call.
+// stall 让每请求堵到测试结束，只准插件自己的超时出来喊停，不能靠对手演员提醒散场。
 func (f *choicesCPA) stall(t *testing.T) {
 	t.Helper()
 	gate := make(chan struct{})
@@ -1978,24 +1671,18 @@ func (f *choicesCPA) authHeaders() []string {
 	return append([]string(nil), f.authSeen...)
 }
 
-// The credentials the fake publishes. Spelled in the production shape --
-// codex-<hex>-<email>-<tier>.json -- because the masking under test is defined
-// against exactly that shape. The addresses are at example.com, which RFC 2606
-// reserves, so nothing here is a real customer.
+// 假凭据按生产 codex-<hex>-<email>-<tier>.json 命名，遮罩就考这种衣服。
+// 邮件全用 RFC 2606 保留 example.com，不请真实客户来当泄漏道具。
 const (
 	choicesAuthPro  = "codex-620f5a42-luo.swmu@example.com-pro.json"
 	choicesAuthPlus = "codex-aa11bb22-someone@example.com-plus.json"
-	// A backup copy, which must never become a checkbox: ticking one would put an
-	// operator's backup into a sweep that enables credentials.
+	// 备份不能变复选框；一勾就可能被扫进启用凭据的队伍，副本不领主演工牌。
 	choicesAuthBak = "codex-620f5a42-luo.swmu@example.com-pro.json.bak"
-	// Not a Codex credential at all. CPA holds these alongside; probing one would
-	// spend a request on a provider this plugin knows nothing about.
+	// 这不是 Codex 凭据，CPA 同库放着它；若探它就是给插件不懂的提供商白花请求，别乱认同行。
 	choicesAuthOther = "gemini-someone@example.com.json"
 )
 
-// choicesConfig is a probe-role config pointed at a fake CPA. Written here
-// rather than reusing probeTestConfig so these cases do not move when the
-// runner's fixtures do.
+// choicesConfig 独立写指向假 CPA 的 probe 配置，不借 probeTestConfig，runner 道具改装别带这场戏换布景。
 func choicesConfig(dir, baseURL, mgmtKey string, accounts, models []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "role: probe\nstore_dir: %q\nlog_decisions: false\ndry_run: true\n", dir)
@@ -2028,17 +1715,15 @@ type mgmtChoiceModel struct {
 	Selected bool   `json:"selected"`
 }
 
-// mgmtChoices mirrors the wire shape the dashboard decodes. Error is spelled
-// without omitempty on the production side; decoding it here as a plain string
-// is what would break if that changed to a pointer or vanished when empty.
+// mgmtChoices 镜像看板解码形状；生产 Error 不带 omitempty，这里按普通字符串解，
+// 防未来改指针或空时消失，空盘也该能认得出来。
 type mgmtChoices struct {
 	Accounts []mgmtChoiceAccount `json:"accounts"`
 	Models   []mgmtChoiceModel   `json:"models"`
 	Error    string              `json:"error"`
 }
 
-// mustChoices fetches /ops/choices exactly as the dashboard does: a bare GET on
-// the unauthenticated prefix, no key, no confirm, no parameters.
+// mustChoices 按看板原样取 /ops/choices：免密前缀裸 GET，无 key、无 confirm、无参数，空手看菜单。
 func mustChoices(t *testing.T) (mgmtChoices, mgmtResponse) {
 	t.Helper()
 	resp := driveResource(t, opsChoicesPath, url.Values{})
@@ -2061,10 +1746,8 @@ func choiceAccountByName(choices mgmtChoices, name string) (mgmtChoiceAccount, b
 	return mgmtChoiceAccount{}, false
 }
 
-// The route is keyless like the rest of /ops, and -- unlike the rest of /ops --
-// takes no confirm=1. Both halves matter: a key would leave the dashboard, which
-// holds none, with empty checkboxes, and a confirm requirement would do the same,
-// because the page fetches this on load before there is anything to confirm.
+// 路由与 /ops 其他项同免密，却不同于它们，不需 confirm=1。
+// 看板不持 key，又在加载时就取菜单尚无事可确认；任加一门槛都会只剩空框，不能先点菜才准看菜单。
 func TestChoicesIsAKeylessResourceNeedingNoConfirm(t *testing.T) {
 	dir := t.TempDir()
 	fake := newChoicesCPA(t, choicesCPAFile{"name": choicesAuthPro, "provider": "codex"})
@@ -2083,9 +1766,7 @@ func TestChoicesIsAKeylessResourceNeedingNoConfirm(t *testing.T) {
 	if declared == nil {
 		t.Fatal("/ops/choices is not registered as a resource, so it would demand a management key the dashboard does not have")
 	}
-	// A Menu on a GET route is the documented way one gets silently re-registered
-	// under the resource prefix. This one belongs there on purpose, and a Menu
-	// would also misrepresent a fetched document as a page to navigate to.
+	// GET 的 Menu 会被宿主重挂资源前缀；这里有意免密但无 Menu，取数文档别伪装成导航页面。
 	if strings.TrimSpace(declared.Menu) != "" {
 		t.Errorf("/ops/choices declares Menu %q; it is fetched by the page, not navigated to", declared.Menu)
 	}
@@ -2095,23 +1776,20 @@ func TestChoicesIsAKeylessResourceNeedingNoConfirm(t *testing.T) {
 		}
 	}
 
-	// The fetch itself: no key, no confirm, and a body that decodes.
+	// 真取一次：无 key、无 confirm，还要能解 body，门口牌子别只写得好看。
 	choices, _ := mustChoices(t)
 	if len(choices.Models) == 0 {
 		t.Error("choices returned no models on a keyless fetch; the checkboxes would render empty")
 	}
 }
 
-// The listing is CPA's, filtered to Codex credentials, with the saved scope
-// already ticked. Each assertion below stands for one way the editor would
-// mislead: an unfiltered list offers a checkbox that cannot be probed, and a
-// missing `selected` makes the next save drop whatever the operator did not
-// re-tick from memory.
+// CPA 名单过滤为 Codex，保存范围预先勾好；不滤会出现探不了的选项，
+// 丢 selected 会让用户下次保存忘勾从前选择，编辑器不能兼职清场员。
 func TestChoicesListsCPACredentialsAndMarksTheScope(t *testing.T) {
 	dir := t.TempDir()
 	const mgmtKey = "mk-choices-never-show-me"
 	fake := newChoicesCPA(t,
-		// Out of order on purpose: the page must not reshuffle between refreshes.
+		// 故意乱序来，页面刷新不能让菜单换座位。
 		choicesCPAFile{"name": choicesAuthPlus, "provider": "codex", "disabled": true},
 		choicesCPAFile{"name": choicesAuthPro, "provider": "codex", "disabled": false},
 		choicesCPAFile{"name": choicesAuthBak, "provider": "codex"},
@@ -2119,8 +1797,7 @@ func TestChoicesListsCPACredentialsAndMarksTheScope(t *testing.T) {
 	)
 	mustConfigure(t, choicesConfig(dir, fake.server.URL, mgmtKey,
 		[]string{choicesAuthPro},
-		// One known model and one the fallback menu has never heard of, so the
-		// union is exercised in both directions at once.
+		// 一个已知模型加一个 fallback 菜单没听过的，同时考并集两头，别只会招待熟客。
 		[]string{"gpt-5.5", "gpt-local-only"}))
 
 	choices, resp := mustChoices(t)
@@ -2128,14 +1805,12 @@ func TestChoicesListsCPACredentialsAndMarksTheScope(t *testing.T) {
 		t.Fatalf("choices reported an error against a healthy CPA: %q", choices.Error)
 	}
 
-	// --- accounts ---
+	// --- 账号：先验工牌再排座 ---
 	gotNames := make([]string, 0, len(choices.Accounts))
 	for _, account := range choices.Accounts {
 		gotNames = append(gotNames, account.Name)
 	}
-	// Sorted by name -- which puts the "620f..." credential ahead of the
-	// "aa11..." one the fake published first -- and neither the .bak copy nor the
-	// non-Codex credential is present.
+	// 按 name 排，620f... 应到先发布的 aa11... 前；.bak 和非 Codex 不入场，先到不等于合格。
 	wantNames := []string{choicesAuthPro, choicesAuthPlus}
 	if len(gotNames) != len(wantNames) {
 		t.Fatalf("accounts = %v, want exactly %v (a .bak copy or a non-Codex credential leaked into the menu)", gotNames, wantNames)
@@ -2157,22 +1832,20 @@ func TestChoicesListsCPACredentialsAndMarksTheScope(t *testing.T) {
 	if unselected.Selected {
 		t.Error("an account that is not in probe_accounts came back selected; ticking it was nobody's decision")
 	}
-	// CPA's own flag, passed through rather than used as a filter: a disabled
-	// credential is still a legitimate target, and hiding it would look like the
-	// account had been deleted.
+	// CPA disabled 只透传不拿来过滤；禁用凭据也是合法目标，藏起来会像账号被删，暂停演员仍在名单上。
 	if !unselected.Disabled {
 		t.Error("a credential CPA reports as disabled came back enabled")
 	}
 
-	// --- models ---
+	// --- 模型：菜单合并不漏菜 ---
 	wantModels := []struct {
 		name     string
 		selected bool
 	}{
-		{"gpt-5.5", true},        // configured and in the fallback menu
-		{"gpt-5.6-sol", false},   // menu only
-		{"gpt-6-astra", false},   // menu only
-		{"gpt-local-only", true}, // configured by hand, unknown to the menu
+		{"gpt-5.5", true},        // 配置与备用菜单都点了名
+		{"gpt-5.6-sol", false},   // 只在菜单候场
+		{"gpt-6-astra", false},   // 只在菜单候场
+		{"gpt-local-only", true}, // 手动配置点的客人，菜单还不认得
 	}
 	if len(choices.Models) != len(wantModels) {
 		t.Fatalf("models = %+v, want %d entries (the union of the configured list and the fallback menu, de-duplicated)", choices.Models, len(wantModels))
@@ -2187,7 +1860,7 @@ func TestChoicesListsCPACredentialsAndMarksTheScope(t *testing.T) {
 		}
 	}
 
-	// --- what must not be in the body ---
+	// --- 正文禁区：这些秘密不上桌 ---
 	body := string(resp.Body)
 	if strings.Contains(body, mgmtKey) {
 		t.Error("the choices body carries probe_management_key; this route answers without any key at all")
@@ -2195,8 +1868,7 @@ func TestChoicesListsCPACredentialsAndMarksTheScope(t *testing.T) {
 	if strings.Contains(body, "probe_management_key\"") {
 		t.Error("the choices body carries a probe_management_key field; these are never displayed, not even empty")
 	}
-	// The fetch really was authenticated. Without this the test would still pass
-	// against a route that reached an unauthenticated listing by accident.
+	// 真检查获取名单已鉴权，否则误入免密名单接口也会过题，门卫得真验过票。
 	headers := fake.authHeaders()
 	if len(headers) == 0 {
 		t.Fatal("the fake CPA saw no request; the accounts above came from somewhere else")
@@ -2206,16 +1878,9 @@ func TestChoicesListsCPACredentialsAndMarksTheScope(t *testing.T) {
 	}
 }
 
-// The labels are the whole reason this route can be keyless. A credential
-// filename carries a customer's email address, and this document is readable by
-// anyone who can reach the plugin, so what the page *displays* must not contain
-// one.
-//
-// The four shapes below are the ones that decide whether the rule holds: the
-// normal one, a name with no email at all, a name with extra dashes, and the
-// empty string. The last two cases pin the safety property directly -- an email
-// in the final position, which a first-and-last rule applied in the wrong order
-// would publish.
+// label 遮邮件是页面显示边界：文件名含客户邮件，文档任何可达者可读，展示名不能带地址。
+// 四类形状包括通常名、无邮件、额外横线、空串；末尾邮件尤其考验先删邮件再取首尾，
+// 顺序反了就把地址当艺名挂出来。
 func TestMaskAuthLabel(t *testing.T) {
 	cases := []struct {
 		name string
@@ -2224,7 +1889,7 @@ func TestMaskAuthLabel(t *testing.T) {
 	}{
 		{
 			name: "the normal codex-<hex>-<email>-<tier>.json shape",
-			in:   "codex-620f5a42-luo.swmu@gmail.com-pro.json",
+			in:   "codex-620f5a42-luo.swmu@example.com-pro.json",
 			want: "620f5a42…pro",
 		},
 		{
@@ -2233,10 +1898,9 @@ func TestMaskAuthLabel(t *testing.T) {
 			want: "620f5a42…pro",
 		},
 		{
-			// An email containing a dash splits into parts, and the middle carries
-			// a tag nobody needs to see. First and last survive; the rest does not.
+			// 含横线邮件会拆多段，中间 tag 没必要晒；保留合规首尾，其他请下镜头。
 			name: "extra dashes around the email",
-			in:   "codex-620f5a42-luo-swmu@gmail.com-team-pro.json",
+			in:   "codex-620f5a42-luo-swmu@example.com-team-pro.json",
 			want: "620f5a42…pro",
 		},
 		{
@@ -2245,15 +1909,14 @@ func TestMaskAuthLabel(t *testing.T) {
 			want: "",
 		},
 		{
-			// The case the ordering exists for: drop the email parts first, and
-			// only then take first and last. The other order publishes the address.
+			// 先删邮件部分再取首尾，反过来就把地址上墙，这道顺序题不能倒着演。
 			name: "email in the final position",
-			in:   "codex-620f5a42-luo@gmail.com.json",
+			in:   "codex-620f5a42-luo@example.com.json",
 			want: "620f5a42",
 		},
 		{
 			name: "nothing but an email",
-			in:   "codex-luo@gmail.com.json",
+			in:   "codex-luo@example.com.json",
 			want: "…",
 		},
 	}
@@ -2262,18 +1925,15 @@ func TestMaskAuthLabel(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: maskAuthLabel(%q) = %q, want %q", c.name, c.in, got, c.want)
 		}
-		// Belt and braces, and cheap: whatever the shape, an "@" in a label means
-		// an address reached a page that needs no key.
+		// 再上一道便宜保险：无论什么形状，label 有 @ 就说明邮件上了免密页面。
 		if strings.Contains(got, "@") {
 			t.Errorf("%s: maskAuthLabel(%q) = %q, which still carries an email address", c.name, c.in, got)
 		}
 	}
 }
 
-// A credential list that cannot be fetched must still leave a usable page: 200,
-// an empty account list, the models half intact, and a sentence saying why. A
-// 5xx here would blank the whole editor over a setting the operator could fix in
-// ten seconds if anything told them what it was.
+// 名单取不到仍给可用页面：200、空账号、模型完整、解释原因。
+// 报 5xx 会因一个十秒可修配置清空整个编辑器，别为找不到一位客人就拉闸餐厅。
 func TestChoicesDegradesWhenCredentialListUnavailable(t *testing.T) {
 	t.Run("management key unset", func(t *testing.T) {
 		dir := t.TempDir()
@@ -2287,13 +1947,11 @@ func TestChoicesDegradesWhenCredentialListUnavailable(t *testing.T) {
 		if !strings.Contains(choices.Error, "probe_management_key") {
 			t.Errorf("error = %q; it must name the setting that is missing, or the operator has nothing to act on", choices.Error)
 		}
-		// The models half needs no CPA call, so it must survive a failure of the
-		// half that does.
+		// 模型半边不用 CPA，另一半摔倒不能把它也拽下台。
 		if len(choices.Models) != len(knownCodexModels) {
 			t.Errorf("models = %+v, want the fallback menu; a credential fetch failure must not take the model list with it", choices.Models)
 		}
-		// No request should have been made at all: firing an unauthenticated GET
-		// and reporting CPA's 401 would blame the server for a setting on this side.
+		// 没 key 就根本不该发请求；裸 GET 后拿 CPA 401 告状，是把自己的漏钥匙赖给门锁。
 		if headers := fake.authHeaders(); len(headers) != 0 {
 			t.Errorf("CPA was called %d time(s) with no key configured; the refusal must be local", len(headers))
 		}
@@ -2316,17 +1974,14 @@ func TestChoicesDegradesWhenCredentialListUnavailable(t *testing.T) {
 		if len(choices.Models) == 0 {
 			t.Error("the model list went missing along with the accounts")
 		}
-		// The failure path is the one most likely to quote something back. It must
-		// not quote the key.
+		// 失败路径最爱引用原文，key 绝不能被引进台词里。
 		if strings.Contains(string(resp.Body), mgmtKey) {
 			t.Error("the error body carries probe_management_key verbatim")
 		}
 	})
 }
 
-// An unresponsive CPA must not hang the dashboard. The page cannot render until
-// this returns, so "eventually" is not good enough: the fetch is bounded, and
-// what comes back is the same graceful degradation as any other fetch failure.
+// CPA 装死不能挂住看板；页面等它才渲染，所以得有限超时，返回同样可理解的降级结果，不接受“总有一天回”。
 func TestChoicesDoesNotHangOnUnresponsiveCPA(t *testing.T) {
 	dir := t.TempDir()
 	fake := newChoicesCPA(t, choicesCPAFile{"name": choicesAuthPro, "provider": "codex"})
@@ -2337,10 +1992,8 @@ func TestChoicesDoesNotHangOnUnresponsiveCPA(t *testing.T) {
 	choicesFetchTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { choicesFetchTimeout = previous })
 
-	// Driven by hand rather than through mustChoices: the call has to happen on
-	// another goroutine so this one can time it out, and t.Fatal must not be
-	// called from there -- it would stop the wrong goroutine and leave the test
-	// hanging on exactly the failure it is meant to report.
+	// 手驱动不用 mustChoices：调用放另一 goroutine，主测试才能计时；
+	// 那里不能 t.Fatal，停错 goroutine 会让测试就卡在自己要报告的死局，报警员不能先把电话砸了。
 	request, errMarshal := json.Marshal(map[string]any{
 		"Method": http.MethodGet, "Path": opsChoicesPath,
 		"Headers": http.Header{}, "Query": url.Values{}, "Body": nil,
@@ -2384,7 +2037,7 @@ func TestChoicesDoesNotHangOnUnresponsiveCPA(t *testing.T) {
 			t.Error("the model list went missing on a timeout, though it needs no CPA call")
 		}
 	case <-time.After(10 * time.Second):
-		// Generous on purpose: what is asserted is "bounded", not "fast".
+		// 期限故意宽松，只验有界，不争谁跑得快，考试不是竞速。
 		t.Fatal("/ops/choices did not return against an unresponsive CPA")
 	}
 }

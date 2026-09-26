@@ -1,5 +1,5 @@
 'use strict';
-// 独立示例验收；Playwright 可安装在临时目录，通过 PLAYWRIGHT_MODULE 指定。
+// 示例单独上台验收；Playwright 住临时目录也能演，PLAYWRIGHT_MODULE 负责报住址。
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
 const path = require('node:path');

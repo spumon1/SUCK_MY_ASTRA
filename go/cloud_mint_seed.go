@@ -11,7 +11,7 @@ type cloudMintRoute struct {
 	Cookie string
 }
 
-// 只取请求显式携带的 LB pair；无关 Cookie 不出业务链路，不从其他账号池借用。
+// 只拿请求明确带来的 LB pair；无关 Cookie 留在业务链路，不向其他账号池借盘子。
 func cloudMintSeedCookie(raw, gateway string, now time.Time) (string, error) {
 	pairs := map[string]string{}
 	for _, part := range strings.Split(raw, ";") {

@@ -1,46 +1,14 @@
-// Package main implements a CLIProxyAPI native plugin that steers official
-// Codex traffic onto healthy upstream gateway nodes by replaying the
-// load-balancer cookies (__cflb/__oailb) the upstream itself issues.
-//
-// The mechanism, measured 2026-09-22 (FINDINGS.md): the upstream fronts many
-// gateway nodes (chat.gateway.unified-N.api.openai.com). Which node a request
-// lands on is decided by the routing cookies on it -- a node-independent,
-// account-independent credential -- and a request carrying a live pair from a
-// good node keeps being served normally. The X-Codex-Turn-State ticket this
-// plugin used to harvest and substitute turned out to be unnecessary for
-// that: the cookie alone steers. So this plugin does exactly three things:
-//
-//   - collect    every upstream response's Set-Cookie __cflb/__oailb pairs into
-//     a GLOBAL pool (account-agnostic: one pair works for any account).
-//   - steer      on every attributable request, merge the pool's best live
-//     pair into the outgoing Cookie header.
-//   - observe    record what serving state the upstream actually signed
-//     (the configured normal/degraded classes, plus whatever signature each
-//     bucket has learned as its own) per (account, model), and
-//     deprioritise a pair whose steered requests keep coming back degraded.
-//
-// The probe runner is the collector's offline half: it dials the upstream once
-// per configured exit using any working credential, because each exit IP lands
-// on a different node and mints a different pair -- "hitting many IPs" is
-// really "collecting many nodes". It is OFF BY DEFAULT, started by hand
-// through /ops/probe/start; sending traffic an account did not ask for is the
-// kind of thing accounts get banned for, so the standing policy is
-// passive-first: take what responses carry, dial exits only on request.
-//
-// Rules enforced here:
-//  1. a request is steered only when the account can be determined --
-//     selected_auth_id, or a sole enabled Codex credential. Without that the
-//     request might not be Codex traffic at all, and replaying OpenAI cookies
-//     onto another provider's upstream would leak them.
-//  2. only __cflb/__oailb are ever replayed -- device/session cookies are
-//     filtered at capture and never leave the process.
-//  3. a pair is usable for ttl_seconds (default 3900) from when it was last
-//     seen, shortened by the credential's own deadline -- the __oailb JWT's
-//     exp when the value carries one, else the declared Max-Age/Expires.
-//     Cookie values are never logged: the pair is credential material.
-//
-// What role still means: business attaches cookies; probe leaves every request
-// exactly as it found it. Both roles collect and observe.
+// Package main 是 CLIProxyAPI 原生插件：在池模式回放上游发的 __cflb/__oailb，给官方 Codex 流量带位。
+// 2026-09-22 实测见 FINDINGS.md：上游有 chat.gateway.unified-N.api.openai.com 等节点，
+// 路由 pair 与账号无关，带着健康节点的活 pair 可正常服务；这条池路径单靠 Cookie，不用旧 turn-state 替换。
+// 池模式做三件事：收 Set-Cookie pair 进全局池；给可归属请求合并最佳活 pair；
+// 按账号模型观察上游正常、降级及桶学习的签名，给反复降级的 pair 降低座次。
+// 离线探测用可用凭据访问配置出口，收更多节点的 pair；默认关闭，手动 /ops/probe/start 才开工。
+// 额外流量有账号风险，所以先捡已有响应，不擅自替客人点菜。
+// 引导只对可确认的 Codex 账号：selected_auth_id 或唯一启用凭据；认不清就不动，免得 OpenAI Cookie 串桌到别家。
+// 只回放 __cflb/__oailb，设备与会话 Cookie 在采集时过滤。pair 自最近见到起受 ttl_seconds（默认 3900）约束，
+// 有 __oailb JWT exp 取它，否则用 Max-Age/Expires 再限期；Cookie 值是凭据，绝不写日志。
+// business 负责附 Cookie，probe 请求原样，两角色都采集观察。云端票注入是独立分支，详见 cloud_mint_service.go。
 package main
 
 /*
@@ -116,35 +84,28 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// turnStateHeader is read on responses only: its signed length is the serving-
-// state signal the observation tally classifies. The plugin never writes it.
+// turnStateHeader 给观察器读取响应签名长度；池路径不改它。
+// 云端模式另有注入分支，不能把观察员“不写字”误当整个插件永不动笔。
 const turnStateHeader = "X-Codex-Turn-State"
 
-// selectedAuthMetadataKey mirrors cliproxyexecutor.SelectedAuthMetadataKey.
-// It is inlined so the plugin does not depend on the executor package.
+// selectedAuthMetadataKey 内联 cliproxyexecutor.SelectedAuthMetadataKey，免得为借一个门牌把 executor 整栋楼搬来。
 const selectedAuthMetadataKey = "selected_auth_id"
 
-// selectedAuthIndexMetadataKey mirrors cliproxyexecutor.SelectedAuthIndexMetadataKey,
-// published alongside the id. The index is the stabler of the two: it survives
-// a credential rename, which is exactly when the name would mislead.
+// selectedAuthIndexMetadataKey 对齐 cliproxyexecutor.SelectedAuthIndexMetadataKey，与 id 一起发布。
+// index 能跨凭据改名保持稳定，演员改艺名也别认丢身份证。
 const selectedAuthIndexMetadataKey = "selected_auth_index"
 
 const logPrefix = "[codex-turn-state] "
 
-// The two roles. A process is one of them for the whole of a config generation;
-// switching is done by editing config.yaml and letting the host reconfigure.
+// 两种角色每个配置代次选其一；改 config.yaml 后由宿主 reconfigure 换班，不在半场随手换帽子。
 const (
 	roleProbe    = "probe"
 	roleBusiness = "business"
 )
 
-// runtimeOverrideFileName holds the two fields the dashboard can change without a
-// management key: role and dry_run. It lives in the store dir and is layered over
-// the config-file values on every configure. It exists so a change made from the
-// keyless dashboard survives the CPA restart that a role switch requires anyway
-// (capability renegotiation); without it, a restart would silently revert role
-// and dry_run to config.yaml and undo the operator's last action. It carries no
-// secret -- a role string and a bool -- so it is not sensitive to read.
+// runtimeOverrideFileName 在 store 目录保存面板无 key 可改的 role、dry_run，每次 configure 叠到配置之上。
+// 角色切换需重启协商能力，没有这本便条，CPA 一重启就把操作者刚选的角色和 dry_run 当没听见。
+// 只有角色字符串和布尔值，不放秘密，公开便条也不等于公开钥匙。
 const runtimeOverrideFileName = "runtime.json"
 
 var state = pluginState{
@@ -152,24 +113,18 @@ var state = pluginState{
 	cookies: make(map[string]*routeCookieEntry),
 }
 
-// hostAPI is the *C.cliproxy_host_api the host passes to cliproxy_plugin_init,
-// kept so the management handlers can call back into the host. It is written
-// once during init and read from handler goroutines, hence the atomic.
+// hostAPI 保存 init 收到的 *C.cliproxy_host_api，供管理处理器回调宿主。
+// 只在初始化写一次，goroutine 会读，用 atomic 传递这张总机号码。
 var hostAPI unsafe.Pointer
 
-// hostAPIAvailable reports whether the host handed over a callback table. It is
-// worth asking separately from just letting hostCall fail: "the plugin cannot
-// make any outbound call" and "the upstream did not answer" are different
-// findings, and a diagnostic that reported the first as the second would send
-// the operator looking at the network when the problem is the load.
+// hostAPIAvailable 单独查宿主有无回调表，不能只等 hostCall 失败。
+// “根本没电话”和“对方没接”不同，别让装载问题把操作者赶去修网线。
 func hostAPIAvailable() bool {
 	return atomic.LoadPointer(&hostAPI) != nil
 }
 
-// hostCall invokes a host callback and returns its raw RPC envelope. A nil host
-// API means the plugin was loaded by something that never handed one over, which
-// is a configuration problem rather than a request failure -- the management
-// routes that need it say so rather than pretending the call returned nothing.
+// hostCall 调宿主回调并回原始 RPC 信封。API 为 nil 是装载方没交回调表的配置问题，
+// 不是上游请求空手而归；需要它的管理路由会明说，不装作电话已拨通。
 func hostCall(method string, request []byte) ([]byte, error) {
 	raw := atomic.LoadPointer(&hostAPI)
 	if raw == nil {
@@ -187,8 +142,7 @@ func hostCall(method string, request []byte) ([]byte, error) {
 
 	var response C.cliproxy_buffer
 	rc := C.cliproxy_invoke_host(host, cMethod, requestPtr, C.size_t(len(request)), &response)
-	// request is Go memory handed to C for the duration of the call; the host
-	// copies it out before returning, but it must not be collected mid-call.
+	// 把 Go request 内存借给 C 到调用结束，宿主返回前会复制；中途不能让 GC 把椅子抽走。
 	runtime.KeepAlive(request)
 
 	if response.ptr != nil {
@@ -203,12 +157,11 @@ func hostCall(method string, request []byte) ([]byte, error) {
 	return C.GoBytes(response.ptr, C.int(response.len)), nil
 }
 
-// decisionCounters tallies what the plugin did, for the management status page.
-// Outcomes only -- never a cookie value.
+// decisionCounters 给管理状态页记操作次数，只记结果，不把 Cookie 值写成菜单。
 type decisionCounters struct {
-	// Harvest counts responses that contributed a pair to the pool.
+	// Harvest 数真正给池添了 pair 的响应，空手路过不记进货。
 	Harvest int64 `json:"harvest"`
-	// Steer counts requests that left this process carrying a pooled pair.
+	// Steer 数确实带着池 pair 出门的请求，心里想带不算带。
 	Steer int64 `json:"steer"`
 	Pass  int64 `json:"pass"`
 	Skip  int64 `json:"skip"`
@@ -217,110 +170,92 @@ type decisionCounters struct {
 type pluginState struct {
 	mu     sync.Mutex
 	config pluginConfig
-	// cookies is the GLOBAL pool of live routing pairs, keyed by the pair set
-	// itself (cookieEntryKey). The pair is account-agnostic, so the pool is not
-	// partitioned by anything: writers are the response hooks and the probe,
-	// readers are the request hook picking the best live entry.
+	// cookies 是以 cookieEntryKey 为键的全局活 pair 池，不按账号分包间。
+	// 响应钩子和探测写入，请求钩子挑最佳可用项；pair 与账号无关，一池共用。
 	cookies map[string]*routeCookieEntry
-	// cookiesDirty tracks whether the pool has unsaved changes; the file is
-	// flushed at most once per routeCookieFlushInterval and once at shutdown.
+	// cookiesDirty 记未落盘修改，最多每 routeCookieFlushInterval 写一次，关闭再补一笔，别每夹一筷就报账。
 	cookiesDirty   bool
 	cookiesFlushed time.Time
-	// counts and countsAt back the management status page. They are reset when a
-	// role change invalidates what the tallies describe.
+	// counts 与 countsAt 给状态页供数；角色换了导致口径失效就清零，不把前班业绩塞后班口袋。
 	counts   decisionCounters
 	countsAt time.Time
-	// configErrors holds complaints about the probe scope -- a malformed account
-	// name, model id or proxy URL. They are collected rather than returned from
-	// configure: probe scope is not load bearing for steering, and refusing to
-	// register over a typo in a field the request path never reads would take
-	// the production role down for a probe-time mistake. They surface on the
-	// status page instead, where the operator who typed them will see them.
+	// configErrors 收探测范围的账号名、模型 ID、代理 URL 错误，不让 configure 因此拒绝注册。
+	// 这些字段不是业务引导的承重柱，探测菜单写错不能逼营业厅停业；错误交状态页给操作者看。
 	configErrors []string
 }
 
 type pluginConfig struct {
 	CloudMint cloudMintConfig `yaml:"cloud_mint"`
-	// Role is "probe" or "business". Empty means "business": that is the role
-	// that steers requests, which is what every deployed process is for; the
-	// probe role is kept only as "touch nothing" for a collection-only box.
+	// Role 只取 probe 或 business，空值按 business，也就是正常引导请求的角色。
+	// probe 留给只采集不动请求的进程，坐观众席就别抢导演喇叭。
 	Role string `yaml:"role"`
-	// StoreDir is the directory holding the cookie pool file and the other
-	// plugin-owned documents (runtime.json, probe-scope.json, observations.json).
+	// StoreDir 收池文件及 runtime.json、probe-scope.json、observations.json，插件自己的账本归自己柜子。
 	StoreDir string `yaml:"store_dir"`
-	// TemplateLength and ReplaceLength are the two serving-state lengths the
-	// observation tally was calibrated on: 292 was a normal state, 312 degraded,
-	// both on the pre-unification format. They are classifiers now -- nothing
-	// is stored or substituted off them -- and they are anchors rather than a
-	// whitelist: a recurring unrecognised length is learned as its bucket's own
-	// normal (see noteSignedLen), which is what keeps a format change like the
-	// 292 -> 780 unification from misclassifying healthy traffic forever.
+	// TemplateLength、ReplaceLength 是观察分类锚点：统一格式前 292 正常、312 降级。
+	// 现在不据此存或替换票，也不当死白名单；noteSignedLen 学重复未知长度为本桶正常，
+	// 避免 292 -> 780 换制服后健康流量一直被当生面孔。
 	TemplateLength int `yaml:"template_length"`
 	ReplaceLength  int `yaml:"replace_length"`
-	// TTLSeconds bounds how long a pooled pair stays usable, measured from when
-	// it was last seen, shortened by the credential's own deadline -- the JWT's
-	// exp when the value carries one, else the declared Max-Age/Expires.
+	// TTLSeconds 从 pair 最近见到时刻限寿，再受 JWT exp 或无 claim 时的 Max-Age/Expires 约束，不给旧票续神仙命。
 	TTLSeconds int `yaml:"ttl_seconds"`
-	// DryRun logs decisions without rewriting the outgoing Cookie header.
+	// DryRun 只记决策，不改出站 Cookie 头，排练不真搬客人的椅子。
 	DryRun bool `yaml:"dry_run"`
-	// LogDecisions emits one line per steer/collect decision.
+	// LogDecisions 给每次引导或采集决策记一行，账本可以热闹，凭据不能露面。
 	LogDecisions bool `yaml:"log_decisions"`
-	// Models is the list of model ids the dashboard offers and the probe uses
-	// for its minting payload. It is no longer a harvest dimension -- the pair
-	// is account-agnostic, so probing per model would just repeat the same
-	// request.
+	// Models 是面板可选模型和探测铸票载荷所用列表，不再是 pair 采集维度。
+	// pair 与账号无关，按模型重复采同类路由凭据，就像给同一把椅子发几张合影。
 	Models []string `yaml:"models"`
-	// ProbeAccounts narrows which credentials a probe run may borrow. One
-	// usable credential is enough for the whole run -- the minted pair is not
-	// bound to the account that minted it -- so this is a borrowing order, not
-	// a coverage list.
+	// ProbeAccounts 限定探测可借的凭据及顺序，一个能用的足够全轮。
+	// pair 不绑铸它的账号，这是借钥匙顺序，不是挨家挨户盖章清单。
 	ProbeAccounts []string `yaml:"probe_accounts"`
-	// ProbeProxies is the ordered list of exits the probe dials. Each exit IP
-	// lands on a different gateway node and mints a different pair, so the
-	// pool's coverage is exactly the exit list.
-	//
-	// These values may carry userinfo. Everything that logs or complains about
-	// them goes through maskProxyURL; the status document now reports them in the
-	// clear at the operator's explicit instruction (see statusResponse).
+	// MintAccounts 缩小后台灌池借用账号范围，非空仅取也在 ProbeAccounts 里的名字。
+	// 空则兼容回退全 ProbeAccounts；铸出的 __cflb/__oailb 仍全账号共享，
+	// 谁负责打水和谁可以喝水是两回事，不给桶贴私人姓氏。
+	MintAccounts []string `yaml:"mint_accounts"`
+	// ProbeProxies 按序列出探测出口，多出口用于覆盖更多网关 pair。
+	// URL 可能有 userinfo，日志和错误一律经 maskProxyURL；状态文档按操作者明确要求明文展示，
+	// 详见 statusResponse，但面板开了灯不代表日志能把钥匙挂街上。
 	ProbeProxies []string `yaml:"probe_proxies"`
-	// ProbeProxiesRotating is the same idea for exits whose address changes on
-	// every connection -- a residential gateway rather than a fixed IP.
-	//
-	// They are a separate list because they are a different resource, not a
-	// different flavour of the same one. A static exit is one IP: it mints one
-	// node per visit. A rotating entry hands out a fresh address per request,
-	// so each attempt may mint a DIFFERENT node -- which is why the rotating
-	// path spends a whole attempt budget per visit instead of one call.
-	//
-	// Same secrecy rule as ProbeProxies: masked in every log line, served in the
-	// clear on the status document at the operator's instruction.
+	// ProbeProxiesRotating 装每次连接换地址的住宅网关，与静态出口分两份账。
+	// 静态项代表一个 IP，一次访问收一个节点；轮换项每次尝试可能换节点，所以每次访问用完整尝试预算，
+	// 不是只打一枪。日志同样脱敏，状态文档按操作者要求明文展示；两种车不能按同一油耗算路。
 	ProbeProxiesRotating []string `yaml:"probe_proxies_rotating"`
-	// The two fields below exist for one reason: so the dashboard can run a probe
-	// without the operator ever typing a key. That was the requirement, not a
-	// convenience -- a run needs a bearer for the management calls, and prompting
-	// for it on every run is exactly the friction the keyless dashboard exists to
-	// remove. Typing it into an anonymously readable page would be worse than
-	// leaving it in config.yaml, so it lives here and is read only by the probe
-	// runner.
-	//
-	// ProbeManagementKey is the Bearer for /v0/management/*, used for the two
-	// read-only calls that list the accounts and download one token.
-	//
-	// It is a secret, and is held to a stricter rule than the proxy list ever was:
-	// it never reaches a log line (the configure line says set/unset and nothing
-	// else), never reaches statusResponse, and never reaches configResponse. There
-	// is no masked rendering of it anywhere, because there is no caller that has
-	// any business seeing it.
+	// 下面两字段让面板无需每次输入 key 就能跑探测。探测管理调用需要 bearer，
+	// 把它放配置并只给 runner 读取，比让用户在匿名可读页面敲秘密更合适。
+	// ProbeManagementKey 用于 /v0/management/* 的列账号、下载 token 两个只读调用。
+	// 它比代理列表更严格：日志只说 set/unset，不进 statusResponse 或 configResponse，
+	// 连掩码展示都不提供，因为无人需要看钥匙长什么样。
 	ProbeManagementKey string `yaml:"probe_management_key"`
-	// ProbeBaseURL is where the probe runner sends both. It defaults to CPA's own
-	// loopback listener because the plugin runs inside CPA: a probe talks to the
-	// process hosting it, not out across the network.
+	// ProbeBaseURL 是这两个管理调用的目的地，默认 CPA 自身回环监听；插件问宿主家事，不绕城找邻居。
 	ProbeBaseURL string `yaml:"probe_base_url"`
 }
 
-// defaultProbeBaseURL is CPA's own loopback listener. It is the default rather
-// than a required setting because the overwhelmingly common case -- the only one
-// deployed -- is the plugin probing the process it is loaded into.
+// fillAccounts 有 MintAccounts 就取经 ProbeAccounts 验证的子集，否则全选 ProbeAccounts。
+// 限定谁铸票不限定谁复用 Cookie，一人打水仍可全桌喝茶。
+func (c pluginConfig) fillAccounts() []string {
+	if len(c.MintAccounts) == 0 {
+		return c.ProbeAccounts
+	}
+	allowed := make(map[string]bool, len(c.ProbeAccounts))
+	for _, a := range c.ProbeAccounts {
+		allowed[a] = true
+	}
+	out := make([]string, 0, len(c.MintAccounts))
+	seen := map[string]bool{}
+	for _, a := range c.MintAccounts {
+		if allowed[a] && !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	// 全部指定项无效则回退全量，避免误配把灌池水泵整个拔电。
+	if len(out) == 0 {
+		return c.ProbeAccounts
+	}
+	return out
+}
+
+// defaultProbeBaseURL 默认 CPA 自身回环监听，常见部署就是插件问承载自己的进程，不必每次填写自家门牌。
 const defaultProbeBaseURL = "http://127.0.0.1:8317"
 
 func defaultConfig() pluginConfig {
@@ -330,11 +265,8 @@ func defaultConfig() pluginConfig {
 		StoreDir:       "",
 		TemplateLength: 292,
 		ReplaceLength:  312,
-		// Measured 2026-09-22: the __oailb JWT signs exp-iat=3900 (the deadline
-		// the gateway actually enforces; Max-Age/Expires declare only 3600 and
-		// pairs have served past it). The default follows the credential's own
-		// claim -- the pair's window is now bounded by that exp, not by the
-		// transport attributes.
+		// 2026-09-22 实测 __oailb 的 exp-iat=3900，这是网关执行的期限。
+		// Max-Age/Expires 只写 3600，观察过越过属性期限仍服务；默认跟凭据 exp，不让包装纸抢证件的话筒。
 		TTLSeconds:   3900,
 		DryRun:       false,
 		LogDecisions: true,
@@ -342,26 +274,19 @@ func defaultConfig() pluginConfig {
 	}
 }
 
-// isProbe reports whether this process is the collection-only half.
+// isProbe 判断当前是不是只采集不改请求的角色，先认工牌再拿工具。
 func (c pluginConfig) isProbe() bool {
 	return strings.EqualFold(strings.TrimSpace(c.Role), roleProbe)
 }
 
-// ttl is the configured pool-entry lifetime as a duration.
+// ttl 把配置池寿命换成 duration，日历换钟表，不替凭据加寿。
 func (c pluginConfig) ttl() time.Duration {
 	return time.Duration(c.TTLSeconds) * time.Second
 }
 
-// maskProxyURL renders a proxy URL safe to log or hand to an unauthenticated
-// reader. Userinfo is replaced wholesale rather than partially: a password's
-// length is itself a hint, and a "first two characters" style mask has leaked
-// more than it hid often enough to not be worth the readability.
-//
-// An unparsable value returns a fixed placeholder rather than itself. That is
-// the important case: a URL malformed enough that net/url rejects it is exactly
-// the one likely to be a password with a stray character in it, and echoing the
-// input back "because we could not parse it" would publish the thing this
-// function exists to hide.
+// maskProxyURL 让代理 URL 能安全进日志或匿名视图，userinfo 整段替换。
+// 不露密码长度、不留头两字，那些都可能是线索，蒙面就别只遮一只眼。
+// 解析不了回固定占位符，绝不回显原输入；坏 URL 很可能恰是密码打错字符，不能越坏越裸奔。
 func maskProxyURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -374,29 +299,21 @@ func maskProxyURL(raw string) string {
 	if parsed.User == nil {
 		return parsed.String()
 	}
-	// Spliced in by hand rather than via url.User("***"): URL.String()
-	// percent-encodes userinfo, so that route renders the mask as %2A%2A%2A --
-	// safe, but unreadable in exactly the place an operator is trying to tell
-	// two exits apart.
+	// 手动拼掩码，不用 url.User("***")，因为 URL.String 会编码成 %2A%2A%2A。
+	// 安全仍要可读，操作者在辨出口，别给他发乱码字谜。
 	stripped := *parsed
 	stripped.User = nil
 	out := stripped.String()
 	marker := parsed.Scheme + "://"
 	if !strings.HasPrefix(out, marker) {
-		// An opaque or otherwise unexpected shape. Splicing into something we do
-		// not recognise risks emitting a mangled URL that still contains part of
-		// the original, so refuse rather than guess.
+		// opaque 或陌生形状直接拒绝，乱拼可能留下原凭据残片；看不懂的锁不拿锤子假装修好。
 		return "<unparsable proxy url>"
 	}
 	return marker + "***@" + out[len(marker):]
 }
 
-// secretPresence renders a secret for a log line, and "set" or "unset" is the
-// entire vocabulary. It exists for probe_management_key, which is never
-// displayed anywhere -- not even masked. A length or a first-few-
-// characters rendering is the obvious alternative and is rejected for the same
-// reason maskProxyURL rejects it: both are hints, and the only question an
-// operator ever has to answer from a log is whether the key is configured at all.
+// secretPresence 只准说 set 或 unset，供 probe_management_key 日志使用。
+// 不报长度、不露前缀，操作者只需知道配没配钥匙，不需要鉴赏钥匙齿。
 func secretPresence(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "unset"
@@ -404,8 +321,7 @@ func secretPresence(value string) string {
 	return "set"
 }
 
-// maskProxyURLs masks a whole list, preserving order so a masked entry can be
-// matched against its position in the real list.
+// maskProxyURLs 整列脱敏但不换顺序，让遮脸的出口还能按座号认出。
 func maskProxyURLs(raw []string) []string {
 	out := make([]string, 0, len(raw))
 	for _, value := range raw {
@@ -414,21 +330,11 @@ func maskProxyURLs(raw []string) []string {
 	return out
 }
 
-// proxySchemes are the exits CPA can actually dial. Anything else is a typo
-// worth reporting: an unsupported scheme fails at request time, deep inside a
-// probe run, where it looks like the upstream refusing rather than the config
-// being wrong.
+// proxySchemes 只列 CPA 真能拨的协议；别让协议拼错拖到探测深处才扮成上游拒客。
 var proxySchemes = map[string]bool{"http": true, "https": true, "socks5": true, "socks5h": true}
 
-// normaliseProbeScope trims and validates the probe-scope lists, returning the
-// cleaned values and one human-readable complaint per rejected entry.
-//
-// Rejected entries are dropped from the returned list, not silently kept: a
-// proxy URL we cannot parse would be PATCHed onto a live account verbatim, and
-// an account name that is not a credential filename would steer a probe run at
-// nothing. But the complaint is carried out so the operator learns which entry
-// went and why -- a scope that quietly shrinks is how a probe run "completes"
-// while covering less than the operator believes.
+// normaliseProbeScope 裁空白、验范围列表，返回干净条目和每个拒收项的可读原因。
+// 坏项确实剔除，但必须解释，不能让探测“跑完”却偷偷少了操作者以为会覆盖的半张菜单。
 func normaliseProbeScope(accounts, models, proxies, rotating []string) ([]string, []string, []string, []string, []string) {
 	var problems []string
 
@@ -438,9 +344,7 @@ func normaliseProbeScope(accounts, models, proxies, rotating []string) ([]string
 		if name == "" {
 			continue
 		}
-		// Shape only. Whether the file exists is deliberately not checked here:
-		// configure runs before CPA has necessarily loaded every credential, and
-		// a "no such account" at this point would be wrong as often as right.
+		// 这里只验名字形状，不查文件存在；configure 时宿主凭据未必加载齐，别在演员还化妆时宣布缺席。
 		if !strings.HasPrefix(strings.ToLower(name), "codex-") || !strings.HasSuffix(strings.ToLower(name), ".json") {
 			problems = append(problems, fmt.Sprintf("probe_accounts: %q is not a Codex credential filename (expected codex-*.json)", name))
 			continue
@@ -473,13 +377,8 @@ func normaliseProbeScope(accounts, models, proxies, rotating []string) ([]string
 	return cleanAccounts, cleanModels, cleanProxies, cleanRotating, problems
 }
 
-// normaliseProxyList validates one pool. Both pools get identical treatment --
-// they differ in how the prober SPENDS them, never in what counts as a valid
-// entry -- so they share this rather than keeping two copies that could drift on
-// which schemes are accepted.
-//
-// field names the list in every complaint, because "unsupported scheme" is
-// useless to an operator looking at two textareas.
+// normaliseProxyList 让静态、轮换两池共用有效性规则，差别只在探测如何花尝试预算。
+// field 写进每条错误，面前有两个输入框时，只喊“协议错了”像对整条街喊“你鞋带松了”。
 func normaliseProxyList(proxies []string, field string) ([]string, []string) {
 	var problems []string
 	clean := make([]string, 0, len(proxies))
@@ -491,9 +390,7 @@ func normaliseProxyList(proxies []string, field string) ([]string, []string) {
 		parsed, errParse := url.Parse(candidate)
 		switch {
 		case errParse != nil || parsed.Host == "":
-			// Reported by its position in the configured list, never by value:
-			// an entry too malformed to parse is the one most likely to be a
-			// mistyped password, and the index is enough to find it.
+			// 错误只报列表序号不报值；越解析不了越可能带错写密码，报座号足够找人，不用当街脱面罩。
 			problems = append(problems, fmt.Sprintf("%s[%d]: not a valid URL", field, index))
 			continue
 		case !proxySchemes[strings.ToLower(parsed.Scheme)]:
@@ -527,9 +424,8 @@ type registration struct {
 	Capabilities  registrationCapability `json:"capabilities"`
 }
 
-// registrationCapability mirrors the host's rpcCapabilities JSON. Note that the
-// stream chunk interceptor is advertised as "response_stream_interceptor", not
-// the name of its Go interface -- getting that wrong is a silent no-op.
+// registrationCapability 对齐宿主 rpcCapabilities JSON。
+// 流式钩子必须叫 response_stream_interceptor，不是 Go 接口名；门铃按错，宿主会安静得像没住人。
 type registrationCapability struct {
 	RequestInterceptor        bool `json:"request_interceptor"`
 	ResponseInterceptor       bool `json:"response_interceptor"`
@@ -545,9 +441,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	if plugin == nil {
 		return 1
 	}
-	// The host API is how the management handlers reach host.auth.list and
-	// host.model.execute. It is handed over exactly once, before any other call,
-	// and the host owns the allocation for the plugin's lifetime.
+	// hostAPI 供管理侧调用 host.auth.list、host.model.execute，初始化最先交一次，插件存活期间内存由宿主持有。
 	if host != nil {
 		atomic.StorePointer(&hostAPI, unsafe.Pointer(host))
 	}
@@ -591,11 +485,10 @@ func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
+	cloudPoolFillerStop()
 	currentCloudMintService().close()
-	// Best effort, and only that: a docker kill never calls this, so the real
-	// upper bound on lost observations stays observationsFlushInterval, and on
-	// unflushed pool entries routeCookieFlushInterval. flushObservationsNow
-	// runs before taking state.mu because it acquires a different lock.
+	// 关闭落盘只是尽力，docker kill 不会调用这里，实际丢账窗口仍是 observationsFlushInterval 和 routeCookieFlushInterval。
+	// flushObservationsNow 取另一把锁，必须在 state.mu 前调用，别让两把门锁互相等钥匙。
 	flushObservationsNow()
 
 	state.mu.Lock()
@@ -618,8 +511,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		}
 		return okEnvelope(pluginRegistration())
 	case pluginabi.MethodRequestInterceptBefore:
-		// Auth is not selected yet, so no bucket can be derived. Never touch
-		// the header here.
+		// 宿主还没选认证，桶名无从得知；此处绝不碰头，客人没到不能先给他换座位牌。
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
 	case pluginabi.MethodRequestInterceptAfter:
 		return interceptAfterAuth(request)
@@ -659,14 +551,9 @@ func configure(raw []byte) error {
 		return err
 	}
 
-	// Layer the keyless dashboard override on top of the config-file values.
-	// role and dry_run are the two fields the dashboard changes without a
-	// management key; persisting and re-applying them here is what lets a flip
-	// survive the CPA restart a role change requires. The override only carries a
-	// field the operator actually set, so an untouched field keeps its
-	// config.yaml value. Everything below (role validation, the probe store_dir
-	// check) then runs on the merged result, so an override cannot smuggle in an
-	// invalid role.
+	// 把面板持久化的 role、dry_run 叠在配置值上，角色切换所需 CPA 重启也不会丢选择。
+	// 只覆盖操作者真写过的字段，其余保留 config.yaml；后续角色与 store_dir 校验检查合并结果，
+	// 便条能改菜单，不能绕过厨房验收。
 	if ov, okOverride := readRuntimeOverride(strings.TrimSpace(cfg.StoreDir)); okOverride {
 		if ov.Role != nil {
 			cfg.Role = *ov.Role
@@ -676,10 +563,7 @@ func configure(raw []byte) error {
 		}
 	}
 
-	// An empty role means business: the half that neither writes nor harvests.
-	// The deploy order installs the .so before config.yaml gains a role, and a
-	// plugin that refuses to register in that window would look like a broken
-	// build rather than an unfinished deploy.
+	// 角色为空先按 business，兼容先装 .so 后补 config.yaml 的部署窗口，不把装修未完误报成房子塌了。
 	role := strings.ToLower(strings.TrimSpace(cfg.Role))
 	switch role {
 	case "":
@@ -690,16 +574,10 @@ func configure(raw []byte) error {
 	}
 	cfg.Role = role
 	cfg.StoreDir = strings.TrimSpace(cfg.StoreDir)
-	// Trimmed for the same reason store_dir is: a YAML value that picked up a
-	// trailing newline or a stray space would be sent as part of the bearer and
-	// come back as a 401, which reads as "the key is wrong" rather than "the key
-	// has whitespace on it".
+	// 去掉意外空白和尾换行，免得它们混入 bearer 造成 401；钥匙上粘纸屑不是锁坏了。
 	cfg.ProbeManagementKey = strings.TrimSpace(cfg.ProbeManagementKey)
-	// An explicitly empty probe_base_url is pinned to the default rather than left
-	// empty: an absent key already yields the default (defaultConfig supplies it
-	// before the unmarshal), so letting `probe_base_url: ""` mean something
-	// different would be a distinction nobody intends, and it would surface as a
-	// transport error deep inside a probe run.
+	// probe_base_url 显式空串也回默认，与缺省保持一致。
+	// 别让“没写门牌”和“写了空门牌”走两条路，最后才在探测里报运输错误。
 	if cfg.ProbeBaseURL = strings.TrimSpace(cfg.ProbeBaseURL); cfg.ProbeBaseURL == "" {
 		cfg.ProbeBaseURL = defaultProbeBaseURL
 	}
@@ -716,28 +594,18 @@ func configure(raw []byte) error {
 	if cfg.TTLSeconds < 1 {
 		return fmt.Errorf("ttl_seconds must be greater than zero")
 	}
-	// A probe with nowhere to write is a probe that silently collects nothing,
-	// which is worse than failing loudly at configure time.
+	// 探测没地方落盘就直说配置错；默默收一堆又丢光，比开门前说明没仓库更糟。
 	if cfg.isProbe() && cfg.StoreDir == "" {
 		return fmt.Errorf("role %q requires store_dir", roleProbe)
 	}
 
-	// Probe scope is validated but never fatal. These three lists steer a probe
-	// run; none of them is consulted when deciding a substitution, so a typo here
-	// must not stop the business role from registering. The complaints ride out
-	// on the status page instead.
+	// 探测范围照验但不致命，笔误上状态页；业务替换不靠这些列表，不能让隔壁菜单写错就封全店。
 	var scopeProblems []string
 	cfg.ProbeAccounts, cfg.Models, cfg.ProbeProxies, cfg.ProbeProxiesRotating, scopeProblems =
 		normaliseProbeScope(cfg.ProbeAccounts, cfg.Models, cfg.ProbeProxies, cfg.ProbeProxiesRotating)
 
-	// A saved scope overrides config.yaml outright. The dashboard is the editing
-	// surface now, so the alternative -- config.yaml quietly winning -- would
-	// mean the operator saves a selection, sees it applied, and then watches it
-	// revert at the next reconfigure with nothing to explain why. CPA rewrites
-	// config.yaml on its own, so that reconfigure is not hypothetical.
-	//
-	// config.yaml still supplies the starting values: it is what the scope is
-	// before anything has ever been saved.
+	// 已保存 scope 直接覆盖 config.yaml，面板现在是编辑入口；否则保存后又因宿主重写配置而悄悄反悔。
+	// 尚未保存时仍用 config.yaml 起始值，第一次开张用旧菜单，之后尊重掌柜的新批示。
 	scopeSource := "config.yaml"
 	if saved, errScope := loadProbeScope(cfg.StoreDir); errScope != nil {
 		scopeProblems = append(scopeProblems,
@@ -746,17 +614,14 @@ func configure(raw []byte) error {
 		var savedProblems []string
 		cfg.ProbeAccounts, cfg.Models, cfg.ProbeProxies, cfg.ProbeProxiesRotating, savedProblems =
 			normaliseProbeScope(saved.Accounts, saved.Models, saved.Proxies, saved.Rotating)
+		cfg.MintAccounts = saved.MintAccounts
 		scopeProblems = append(scopeProblems, savedProblems...)
 		scopeSource = scopeFileName + " (saved " + saved.UpdatedAt + ")"
 	}
 
 	state.mu.Lock()
-	// The host reconfigures far more often than the config actually changes:
-	// five times during startup alone, and again every time CPA rewrites
-	// config.yaml on its own. swapConfigLocked clears the pool only on a change
-	// that invalidates it, so a no-op reconfigure keeps it intact. The pool is
-	// then (re)loaded: the file is the persistent copy and loading it also folds
-	// in any legacy per-bucket cookie fields -- one cheap scan, idempotent.
+	// 宿主 reconfigure 很频繁，启动就可调用五次，自己重写 config.yaml 又会触发。
+	// swapConfigLocked 只在真失效时清池，空操作不拆家具；再读持久池并幂等并入旧桶 Cookie，廉价扫描保暖场。
 	cloudChanged := state.config.CloudMint != cfg.CloudMint || state.config.DryRun != cfg.DryRun || state.config.Role != cfg.Role
 	cleared, _ := swapConfigLocked(cfg)
 	state.cookies = loadRouteCookiePool(cfg.StoreDir)
@@ -766,52 +631,37 @@ func configure(raw []byte) error {
 	state.mu.Unlock()
 	if cloudChanged {
 		resetCloudMintService()
+		cloudPoolFillerReconfigure(cfg)
 	}
 
-	// Outside state.mu: loadObservations takes its own lock and must never be
-	// reached while holding this one. It is a no-op when store_dir has not
-	// changed, which matters because the host reconfigures constantly and the
-	// operator is watching these counts.
+	// loadObservations 必须在 state.mu 外，因为它取自己的锁；store_dir 没变就不动计数，不因频繁重配反复擦账。
 	loadObservations(cfg.StoreDir)
 
 	pool := "pool kept"
 	if cleared {
 		pool = "pool cleared"
 	}
-	// Counts, not contents. probe_proxies may carry userinfo, so the only safe
-	// thing to say about it in a log line is how many there are -- that rule is
-	// unchanged by the status document now showing them, because a log is copied
-	// into tickets and chat windows and the status document is not.
-	//
-	// The probe key gets less than that: set or unset, via secretPresence.
-	// probe_base_url is not a secret and is printed, because "the probe cannot
-	// reach CPA" is diagnosed from exactly that value.
+	// 日志只报代理数量不报内容，userinfo 不能随着工单或聊天扩散，即便状态文档按要求展示也一样。
+	// 探测 key 更只报 set/unset；probe_base_url 非秘密可打印，定位“到不了 CPA”还得看门牌。
 	log.Printf(logPrefix+"configured role=%s store_dir=%q template_length=%d replace_length=%d ttl_seconds=%d dry_run=%t models=%d probe_accounts=%d probe_proxies=%d probe_proxies_rotating=%d probe_base_url=%q probe_management_key=%s scope_from=%s (%s)",
 		cfg.Role, cfg.StoreDir, cfg.TemplateLength, cfg.ReplaceLength, cfg.TTLSeconds, cfg.DryRun,
 		len(cfg.Models), len(cfg.ProbeAccounts), len(cfg.ProbeProxies), len(cfg.ProbeProxiesRotating), cfg.ProbeBaseURL,
 		secretPresence(cfg.ProbeManagementKey), scopeSource, pool)
 	for _, problem := range scopeProblems {
-		// One line each, and loud: a dropped scope entry means the next probe run
-		// covers less than whoever edited the config believes it does.
+		// 拒收范围项逐条醒目报告，否则下一轮少跑了半条街，操作者还以为全城走完。
 		log.Printf(logPrefix+"config error (probe scope, not fatal): %s", problem)
 	}
 	return nil
 }
 
-// poolInvalidatedBy reports whether moving from oldCfg to newCfg makes the
-// pooled pairs unusable. The pool is keyed by nothing but the pair values
-// themselves, so almost nothing invalidates it: store_dir moving means the
-// file on disk is a different store's. ttl_seconds is deliberately absent --
-// usability is re-judged against the current ttl on every read, so a shorter
-// ttl takes effect immediately and a longer one does not resurrect dead pairs
-// (their seenAt is still what it was).
+// poolInvalidatedBy 判断配置切换是否需换池。pair 自身为键，主要是 store_dir 换了才代表另一家仓库。
+// ttl_seconds 不触发清池，每次读都按当前 TTL 重算；seenAt 不改，不拿配置调整伪造新出厂日期。
 func poolInvalidatedBy(oldCfg, newCfg pluginConfig) bool {
 	return oldCfg.StoreDir != newCfg.StoreDir
 }
 
-// swapConfigLocked installs cfg as the running config and updates the derived
-// state that depends on it. The caller must hold state.mu. It returns whether
-// the pool was cleared and whether the role changed, for the caller's logging.
+// swapConfigLocked 安装运行配置并更新派生状态，调用方持 state.mu。
+// 回报是否清池、是否换角色，方便记日志，交班不能只换帽子不签账。
 func swapConfigLocked(cfg pluginConfig) (cleared, roleChanged bool) {
 	cleared = poolInvalidatedBy(state.config, cfg)
 	roleChanged = !strings.EqualFold(state.config.Role, cfg.Role)
@@ -821,10 +671,7 @@ func swapConfigLocked(cfg pluginConfig) (cleared, roleChanged bool) {
 		state.cookiesDirty = false
 		state.cookiesFlushed = time.Time{}
 	}
-	// Tallies describe one role's behaviour, and the two roles cannot produce
-	// the same mix: probe never steers, because its request hook returns
-	// untouched. Carrying a count across the switch would leave the status page
-	// attributing one role's decisions to the other.
+	// probe 不引导，两角色决策构成不同；换角色清计数，别把上一班的炒菜量算成这一班洗碗量。
 	if roleChanged {
 		state.counts = decisionCounters{}
 		state.countsAt = time.Now()
@@ -833,28 +680,10 @@ func swapConfigLocked(cfg pluginConfig) (cleared, roleChanged bool) {
 }
 
 func pluginRegistration() registration {
-	// Every hook is advertised in both roles, and the response side is the part
-	// that changed.
-	//
-	// It used to be probe-only, back when harvesting meant reading CPA's own
-	// responses and substituting would have destroyed the very state being
-	// collected. The harvester is offline now -- it calls the upstream directly
-	// and never touches these hooks -- so that exclusion protects nothing and
-	// costs something real: a bucket the probe cannot fill (every exit throttled)
-	// stays empty, its requests therefore go upstream untouched, and the upstream
-	// mints a turn-state on each one that nobody was listening for.
-	//
-	// Reading it is free -- the request was happening anyway, no quota is spent --
-	// and it is self-limiting: once the pool holds a live pair the request hook
-	// steers with it, the edge stops minting fresh pairs, and this side goes
-	// quiet until the pair lapses. See harvestFromResponse.
-	//
-	// The request hook stays declared in both roles too: it deliberately does
-	// nothing under probe, and declaring it keeps the roles on one code path so
-	// "probe rewrote a request" is something the logs can rule out rather than
-	// something the host never offered. The management routes are declared in
-	// both roles because the status page is how an operator checks a role switch
-	// actually took.
+	// 两角色都声明所有钩子和管理路由。早先只有 probe 采集响应，是怕替换污染采集；
+	// 如今离线探测直连上游，不走这些钩子，再禁业务采集只会白丢空桶请求自然带回的状态和 Cookie。
+	// 读现有响应不额外花额度；有活 pair 后引导让边缘不再发新 pair，自然安静到过期，见 harvestFromResponse。
+	// probe 的请求钩子仍声明但不动作，让日志可证明没改请求；管理页两边都有，换班后才有地方核对工牌。
 	capabilities := registrationCapability{
 		RequestInterceptor:        true,
 		ManagementAPI:             true,
@@ -949,8 +778,7 @@ func pluginRegistration() registration {
 	}
 }
 
-// interceptAfterAuth runs once the scheduler has picked a credential, so both
-// halves of the bucket key are known.
+// interceptAfterAuth 在调度器选好凭据后执行，此时桶键两半都有了，演员到齐再排座。
 func interceptAfterAuth(raw []byte) ([]byte, error) {
 	var req pluginapi.RequestInterceptRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
@@ -961,9 +789,7 @@ func interceptAfterAuth(raw []byte) ([]byte, error) {
 	cfg := state.config
 	state.mu.Unlock()
 
-	// The probe must leave requests exactly as it found them. Attaching a pooled
-	// pair here would pin the request onto a node the edge already knows -- the
-	// fresh pair the probe exists to collect would never be minted.
+	// probe 必须让请求原样走；提前附池 pair 会钉住已知节点，反而收不到它来探的新 pair，钓鱼别先把池盖上。
 	if cfg.isProbe() {
 		return noop()
 	}
@@ -973,52 +799,27 @@ func interceptAfterAuth(raw []byte) ([]byte, error) {
 	model := pickModel(req.Model, req.RequestedModel)
 	value := headerValue(req.Headers, turnStateHeader)
 
-	// Hand the account across to the response hook, which cannot see it: CPA
-	// gives the two hooks different metadata maps, so this is the only point in
-	// the request where the harvest side can learn which credential served it.
-	// Recorded before any of the decisions below, and deliberately even for a
-	// request this plugin is going to leave completely alone -- that is
-	// precisely the request whose response carries a fresh state and Set-Cookie
-	// pair worth collecting, because nothing was steered into it.
-	//
-	// Only the observed name is relayed. An inferred one is a guess that belongs
-	// to this request's own decision, not something to hand to another hook that
-	// would then record it as fact.
+	// 请求与响应钩子收到不同 metadata map，只能在此把实际选中账号传给响应侧。
+	// 在所有决策之前记录，哪怕请求最终原样放行，因为这类响应最可能带值得收的新状态与 pair。
+	// 只转交观察到的名字，不转交推断，猜到的亲戚不能给另一位记账员盖成亲属证明。
 	rememberRequestAuth(req.RequestID, authID)
 	if cfg.CloudMint.Enabled {
 		return okEnvelope(interceptCloudMint(req, cfg))
 	}
 
-	// The same metadata gap the collection side has, mirrored here. A minimal
-	// request carries no metadata, so selected_auth_id is absent
-	// (publishSelectedAuthMetadata early-returns on an empty map,
-	// conductor_execution.go:1726). Real Codex traffic sends session metadata and
-	// never enters this branch, but a metadata-less request under a single-account
-	// deployment would otherwise never be steered -- a real defect.
-	//
-	// Inferred under the same condition harvesting uses: exactly one enabled
-	// Codex account. Note what that is now and is not. The offline probe no
-	// longer switches accounts on and off, so a single enabled account is a
-	// property of how the operator happens to have CPA configured, not an
-	// invariant this plugin establishes or can rely on. It is checked on every
-	// call for that reason. With two enabled, a guess would pin the routing
-	// cookies onto a request that may not be Codex at all, so anything but a
-	// clean sole account leaves authID empty and the request untouched.
+	// 空 metadata 请求缺 selected_auth_id：publishSelectedAuthMetadata 遇空 map 早返，见 conductor_execution.go:1726。
+	// 真实 Codex 常带会话元数据，但单账号的无元数据请求也不能永远不引导。
+	// 仅恰有一个启用 Codex 才推断；离线探测不再切账号开关，唯一性是部署现状，必须每次重查。
+	// 零个或多个都留空并原样放行，别闭眼把 OpenAI Cookie 塞进别家提供商口袋。
 	if authID == "" && model != "" {
 		if sole, _, errSole := soleEnabledCodexAuth(); errSole == nil && sole != "" {
 			authID = sole
 		}
 	}
 
-	// Rule 1: steer only onto attributable Codex traffic. The pair is a routing
-	// credential of OpenAI's -- replaying it onto a request heading for another
-	// provider's upstream would leak it there. "Attributable" means the host's
-	// own credential catalog verifies the selected auth as Codex -- the
-	// sole-inferred name above is checked the same way, never trusted on its
-	// own. The filename convention (looksCodexAuthID) survives only for when
-	// the catalog itself cannot be read: a codex-named file holding another
-	// provider's credential is precisely the leak this rule exists for, and
-	// only the provider the host registered catches it.
+	// 第一道门：仅引导可归属 Codex 流量，OpenAI 路由凭据不能泄到别家上游。
+	// 宿主目录必须验证选中账号，唯一账号推断也要同验，不是独苗就免试。
+	// 只有目录整体不可读才用 looksCodexAuthID 命名兜底；目录有答复就以 Provider 为准，外号不能冒充身份证。
 	codex := false
 	if authID != "" || authIndex != "" {
 		if verified, resolved := selectedAuthIsCodex(authID, authIndex); resolved {
@@ -1055,9 +856,7 @@ func interceptAfterAuth(raw []byte) ([]byte, error) {
 		logDecision("steer", authID, model, len(value), "route cookies ready but withheld (dry_run)")
 		return noop()
 	}
-	// Relay the exact pool key so the response hook stamps good/bad onto the
-	// entry this request actually carried -- re-picking "best" on the response
-	// side could land on a different entry once marks shift the scores.
+	// 传实际使用的池键给响应侧，别到那时重新挑“最佳”；成绩变化后可能换了人，奖罚必须认原座号。
 	markRequestSteered(req.RequestID, pairKey)
 	logDecision("steer", authID, model, len(value), "route cookies merged")
 
@@ -1069,14 +868,9 @@ func interceptAfterAuth(raw []byte) ([]byte, error) {
 	return okEnvelope(out)
 }
 
-// interceptResponse is the in-band harvest point for non-streaming responses.
-// It never modifies the response: an empty ResponseInterceptResponse leaves
-// every header and the body exactly as the upstream sent them.
-//
-// Runs in both roles. CPA hands this hook the RAW upstream headers -- the
-// stripping in downstreamHeadersAfterInterceptors happens afterwards and only
-// affects what the client sees -- so the turn-state is visible here even though
-// the client never receives it.
+// interceptResponse 是非流式就地采集点，两角色都运行，返回空 ResponseInterceptResponse 使头和 body 原样。
+// CPA 先给原始上游头，之后 downstreamHeadersAfterInterceptors 才剥给客户端的头；
+// 因此这里能看 turn-state，即便客户端看不到，后台验票员和观众看的是不同票面。
 func interceptResponse(raw []byte) ([]byte, error) {
 	var req pluginapi.ResponseInterceptRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
@@ -1094,19 +888,10 @@ func interceptResponse(raw []byte) ([]byte, error) {
 	return okEnvelope(pluginapi.ResponseInterceptResponse{})
 }
 
-// interceptStreamChunk is the in-band harvest point for SSE responses, which is
-// the path real Codex traffic actually takes. Response headers are only
-// populated on the header-init call. Payload chunks get one cheap check: the
-// first "model" field in the stream is what the upstream actually served, and
-// under the unified turn-state format a mismatch against the requested model is
-// the degraded signature (the safety-buffering fallback answering the turn) --
-// everything else is returned untouched without even looking at it. The watch
-// is armed per request at header-init and fires once, so the steady-state cost
-// per chunk is one map lookup.
-//
-// Runs in both roles, and on the header-init chunk CPA supplies the raw upstream
-// headers alongside the same metadata the request hook saw, so the harvest is
-// attributed to the account CPA actually selected rather than inferred.
+// interceptStreamChunk 负责真实 Codex 常走的 SSE 采集；响应头只在 header-init 有。
+// 随后仅廉价查流中第一个 model，统一格式下与请求模型不符是降级信号；其余片段原样不多看。
+// 每请求在 header-init 设一次观察，得结论就结束，平时每片只查 map。
+// 两角色都运行，初始化时 CPA 带原始头与请求元数据，优先认实际选中账号，不靠看面相猜。
 func interceptStreamChunk(raw []byte) ([]byte, error) {
 	var req pluginapi.StreamChunkInterceptRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
@@ -1128,7 +913,7 @@ func interceptStreamChunk(raw []byte) ([]byte, error) {
 	return okEnvelope(pluginapi.StreamChunkInterceptResponse{})
 }
 
-// WS 仅记录严格解析的 created 声明及终止事件，不逐片段刷屏或输出账号文件名。
+// WS 只记严格解析的 created 声明和终止事件，不逐片刷屏，也不把账号文件名挂字幕上。
 func observeWebSocketEvent(raw []byte) ([]byte, error) {
 	var event pluginapi.WebSocketResponseEvent
 	if err := json.Unmarshal(raw, &event); err != nil {
@@ -1143,28 +928,16 @@ func observeWebSocketEvent(raw []byte) ([]byte, error) {
 	return okEnvelope(struct{}{})
 }
 
-// pendingAuth correlates the two halves of one request.
-//
-// The request hook knows which credential CPA selected; the response hook does
-// not, and the reason is not that the name is unavailable but that CPA hands the
-// two hooks DIFFERENT maps. handlers_interceptors.go:565 passes the executor's
-// req.Metadata -- the map publishSelectedAuthMetadata writes into -- while :595
-// passes the handler's opts.Metadata, which it never touches. Both are called
-// "Metadata", which is why the older comment here claimed they were the same
-// object; measured on 2026-09-18, the response side is always auth=-.
-//
-// Both hooks do carry the same RequestID (:556 and :584), so that is the join
-// key. This is not an inference: the value relayed is the account CPA itself
-// selected, merely carried across a hook boundary that drops it.
+// pendingAuth 跨请求、响应钩子接账号线索：两边名叫 Metadata，却不是同一个 map。
+// handlers_interceptors.go:565 传 executor req.Metadata，:595 传 handler opts.Metadata，后者没被写入选中账号。
+// 2026-09-18 实测响应侧 auth=-；两钩子却共用 RequestID（:556、:584），据此关联。
+// 转交的是 CPA 真选的账号，不是推断；同名信封不代表里面装同一封信。
 type pendingAuthEntry struct {
 	authID string
-	// steered reports whether the request actually went upstream carrying a
-	// pooled pair we put there. Set after the decision, not with it: a dry_run
-	// decision is not a write, and the observation tally's whole
-	// natural-vs-steered split collapses if intent is counted as action.
+	// steered 只在真的把池 pair 写出后置位，不随决策意图抢先置位。
+	// dry_run 只排练，算成真动作会把 natural/steered 分账彻底演乱。
 	steered bool
-	// pairKey is the pool key (cookieEntryKey) of the pair attached, so the
-	// response hook can stamp good_at/bad_at onto exactly that entry.
+	// pairKey 是附加 pair 的 cookieEntryKey，让响应给同一条目写 good_at/bad_at，别把黄牌递隔壁。
 	pairKey string
 	seenAt  time.Time
 }
@@ -1175,24 +948,15 @@ var pendingAuth = struct {
 }{byID: make(map[string]pendingAuthEntry)}
 
 const (
-	// pendingAuthTTL bounds how long a request may take between its two hooks.
-	// A streamed Codex turn can run for minutes, so this is generous; it exists
-	// to stop a request that never produced a response from leaking an entry.
+	// pendingAuthTTL 给两钩子间留足数分钟流式时间，也回收永无响应的悬账，客人不来不能永远占座。
 	pendingAuthTTL = 15 * time.Minute
-	// pendingAuthMax triggers a sweep. Entries are small and short-lived, so this
-	// only matters if responses stop arriving entirely.
+	// pendingAuthMax 触发扫除，条目短小短命，主要防响应全断后候客厅越挤越满。
 	pendingAuthMax = 4096
 )
 
-// rememberRequestAuth records the credential the request hook saw.
-//
-// Called on every request, including the ones where no account was observed.
-// That case has to clear any entry already under this id rather than return:
-// if CPA retries a request under the same RequestID and the second pass
-// carries no selected_auth_id, leaving the first pass's entry in place would
-// file the retry's response against the FIRST account -- one customer's
-// throttling recorded on another's row. Dropping the entry loses the
-// observation instead, which is the right way to be wrong here.
+// rememberRequestAuth 每个请求都记录观察到的账号；没观察到也要清同 ID 旧条目，不可直接返回。
+// CPA 可能用同 RequestID 重试，第二遍缺 selected_auth_id 时留旧值会把新响应算到第一位账号。
+// 宁可缺一次观察，别把甲的限流账单递给乙。
 func rememberRequestAuth(requestID, authID string) {
 	if requestID == "" {
 		return
@@ -1211,23 +975,13 @@ func rememberRequestAuth(requestID, authID string) {
 			}
 		}
 	}
-	// Whole-entry replacement, which resets steered to false. Load bearing: the
-	// decision this id's response should be judged against is the one this
-	// pass is about to make, and carrying a previous pass's steered flag
-	// forward would mark a request we left alone as one we steered.
+	// 整项替换并把 steered 归 false；本轮尚未决策，不能拿上轮“真改过”冒充本轮已上菜。
 	pendingAuth.byID[requestID] = pendingAuthEntry{authID: authID, seenAt: now}
 }
 
-// markRequestSteered records that the request hook really did put a pooled
-// pair on the outgoing request, and which entry it was. Separate from
-// rememberRequestAuth because the account is known before the decision and the
-// decision is known after.
-//
-// A missing entry is not an error: rememberRequestAuth only records an OBSERVED
-// account, so a request attributed by inference has nothing to mark. The
-// observation is then dropped for want of attribution, which is the right
-// outcome -- a guessed account on a throttling tally would blame the wrong
-// customer.
+// markRequestSteered 记录真写出的 pair 及池键，和 rememberRequestAuth 分开，因为先知道账号后知道动作。
+// 缺条目不算错：推断账号不会被 rememberRequestAuth 当事实登记，因此无项可标。
+// 没有可证归属就丢观察，别把猜出的名字写进客户限流账。
 func markRequestSteered(requestID, pairKey string) {
 	if requestID == "" {
 		return
@@ -1241,10 +995,8 @@ func markRequestSteered(requestID, pairKey string) {
 	}
 }
 
-// recallRequestRecord returns what the request hook recorded for this request
-// and forgets it: one request yields one response, so holding the entry
-// afterwards is pure leak. An entry older than pendingAuthTTL is treated as
-// absent.
+// recallRequestRecord 取出就忘掉，一请求一响应，不让用过的座号长期占柜。
+// 超过 pendingAuthTTL 当不存在，旧戏票不能认作今天入场记录。
 func recallRequestRecord(requestID string) (authID string, steered bool, pairKey string) {
 	if requestID == "" {
 		return "", false, ""
@@ -1262,18 +1014,13 @@ func recallRequestRecord(requestID string) (authID string, steered bool, pairKey
 	return entry.authID, entry.steered, entry.pairKey
 }
 
-// pendingModelScan is the same correlation pendingAuth does at the
-// request/response boundary, extended one step further into the stream. Under
-// the unified turn-state format the degraded signal is no longer a length --
-// every refusal path mints the same 780 -- it is the SSE payload declaring a
-// served model different from the requested one (the x-codex-safety-buffering
-// fallback answering the turn). The entry is armed at header-init, where
-// authID/steered/pairKey are all resolved, and consumed by the first payload
-// chunk that yields a "model" field.
+// pendingModelScan 把 pendingAuth 的跨钩子关联再延伸到流片段。
+// 统一格式各拒绝路径都铸 780，降级改看 SSE 声明模型是否不同，即 x-codex-safety-buffering 回退。
+// header-init 时账号、steered、pairKey 齐备就设观察，首个带 model 的片段消费它，不看票长猜演员。
 type pendingModelScanEntry struct {
 	authID  string
-	model   string // the model asked for upstream
-	tsLen   int    // the turn-state length this response signed, for feed context
+	model   string // 向上游点的模型，点菜单原件
+	tsLen   int    // 本响应签的 turn-state 长度，留给播报对账
 	steered bool
 	pairKey string
 	seenAt  time.Time
@@ -1284,15 +1031,11 @@ var pendingModelScans = struct {
 	byID map[string]pendingModelScanEntry
 }{byID: make(map[string]pendingModelScanEntry)}
 
-// pendingModelScanMaxChunk bounds how deep into a stream the watch stays
-// armed: response.created is always the first SSE event, so a chunk this far
-// in without a model field means the stream has nothing to tell us and the
-// entry is dropped rather than carried to the end of the stream.
+// pendingModelScanMaxChunk 限扫描深度，response.created 通常首个 SSE 事件。
+// 这么多片还没 model 就结束观察，不让报幕员守到散场等一个从未报的名字。
 const pendingModelScanMaxChunk = 8
 
-// rememberModelScan arms the watch for one request. Entries are TTL'd by the
-// same sweep pendingAuth uses; a stream that ends without ever declaring a
-// model leaves one to be reclaimed there.
+// rememberModelScan 给请求设观察，沿用 pendingAuth 的 TTL 清扫；流没声明就结束的遗留项也有人收桌。
 func rememberModelScan(requestID, authID, model string, tsLen int, steered bool, pairKey string) {
 	if requestID == "" || authID == "" || model == "" {
 		return
@@ -1312,8 +1055,7 @@ func rememberModelScan(requestID, authID, model string, tsLen int, steered bool,
 	}
 }
 
-// recallModelScan consumes the watch. One request yields one verdict -- the
-// first declared model IS the answer, so the entry never survives being read.
+// recallModelScan 消费观察，一请求只判一次；首个声明模型就是当前答案，不无限复读点名。
 func recallModelScan(requestID string) (pendingModelScanEntry, bool) {
 	pendingModelScans.mu.Lock()
 	defer pendingModelScans.mu.Unlock()
@@ -1327,19 +1069,15 @@ func recallModelScan(requestID string) (pendingModelScanEntry, bool) {
 	return entry, ok
 }
 
-// dropModelScan disarms a watch without a verdict -- the stream ran past the
-// scan window without declaring a model.
+// dropModelScan 在越过扫描窗口仍无声明时撤哨，不伪造结论，收凳子也不算验票成功。
 func dropModelScan(requestID string) {
 	pendingModelScans.mu.Lock()
 	delete(pendingModelScans.byID, requestID)
 	pendingModelScans.mu.Unlock()
 }
 
-// noteServedModelChunk is the payload-chunk path of the stream hook. It must
-// stay cheap: one map lookup per chunk while a watch is armed, and the first
-// extraction ends the watch. Nothing on this path takes state.mu -- a per-chunk
-// lock on the steering mutex would put hook latency on every stream's every
-// chunk; the one exception is the rare mismatch below, which pays it once.
+// noteServedModelChunk 每片只做轻量 map 查询，首个模型提取后结束观察。
+// 常规不取 state.mu，免得每条流每片都排引导锁；仅少见不匹配时取一次，黄牌要登记才去柜台。
 func noteServedModelChunk(req pluginapi.StreamChunkInterceptRequest) {
 	if req.RequestID == "" {
 		return
@@ -1357,26 +1095,21 @@ func noteServedModelChunk(req pluginapi.StreamChunkInterceptRequest) {
 		return
 	}
 	if served == entry.model {
-		// The upstream served what was asked; the watch is over either way.
+		// 上游给的正是请求模型，观察使命结束；报对名字就收话筒。
 		return
 	}
 	recordDowngrade(entry.authID, entry.model, served, entry.tsLen, entry.steered)
 	logDecision("downgrade", entry.authID, entry.model, entry.tsLen, "served="+served)
 	if entry.steered && entry.pairKey != "" {
-		// A downgrade on a steered request says the node did not serve the asked
-		// model -- same weight as a degraded signature on the old format.
+		// 已引导请求仍降级，说明节点没交所求模型，权重等同旧格式降级签名，座位牌没保住节目。
 		state.mu.Lock()
 		state.markRouteCookieOutcomeLocked(entry.pairKey, observationLimited, time.Now())
 		state.mu.Unlock()
 	}
 }
 
-// servedModelFromChunk extracts the first "model" field of a payload chunk. On
-// a Codex SSE stream that is response.created's declared model -- the first
-// event, before any output item -- so the first match is the verdict and no
-// event-name parsing is needed. A value split across a chunk boundary is
-// missed on both sides; that is rare enough (the field sits inside a ~1 KB
-// opening event) that buffering tails would buy nothing.
+// servedModelFromChunk 提取片段首个 model；Codex SSE 的 response.created 首先报模型，所以不用另解析事件名。
+// 字段若跨片，两边都会漏；开场约 1 KB 事件里这种情况少，这里不加尾缓冲，别把轻哨兵改成仓管。
 func servedModelFromChunk(body []byte) (string, bool) {
 	const needle = `"model":"`
 	i := bytes.Index(body, []byte(needle))
@@ -1391,64 +1124,37 @@ func servedModelFromChunk(body []byte) (string, bool) {
 	return string(rest[:j]), true
 }
 
-// harvestFromResponse is where the pool and the observation tally are fed.
-// It never modifies the response, and everything it rejects still costs
-// nothing: a Set-Cookie pair rides on any response, including a degraded one.
+// harvestFromResponse 喂全局池与观察账，绝不改响应；降级响应也可能带 pair，路过顺手收而不额外发请求。
 func harvestFromResponse(cfg pluginConfig, headers http.Header, metadata map[string]any, model, requestID string) {
 	value := headerValue(headers, turnStateHeader)
 	now := time.Now()
 	cookies := routeCookiesFromResponseHeaders(headers, now)
 
-	// Take the request-side record first, and unconditionally. It is consumed
-	// on read, and both the observation below and the outcome marking further
-	// down need it -- reading it twice would hand the second caller nothing.
+	// 请求侧记录先无条件取一次，读完即消费；后面观察和结果标记共享它，别第二次开空信封。
 	relayedAuth, steered, pairKey := recallRequestRecord(requestID)
 
 	authID := metadataString(metadata, selectedAuthMetadataKey)
 	if authID == "" {
-		// Expected on this hook, not exceptional: the response side is handed a
-		// different metadata map than the request side, so the name is never
-		// there. Recover it by RequestID from what the request hook recorded --
-		// see pendingAuth. Still the account CPA selected, not a guess.
+		// 响应 metadata 不同导致缺账号是常态，用 RequestID 找请求侧实录；仍是 CPA 选中的人，不是现场认亲。
 		authID = relayedAuth
 	}
 
-	// Last resort for the account name, and dead code under role: business.
-	//
-	// Normally the name comes off the metadata above, or is relayed by
-	// RequestID from what the request hook recorded (see pendingAuth). Only a
-	// request that carried no metadata at all gets this far, because the host
-	// publishes selected_auth_id only when the request brought a map of its
-	// own (publishSelectedAuthMetadata early-returns on an empty one,
-	// conductor_execution.go:1726).
-	//
-	// The isProbe gate then closes it entirely on the deployment this runs in:
-	// role is business permanently, and the probe is triggered through
-	// /ops/probe/start rather than by switching role, so nothing sets probe.
-	// Measured 2026-09-20 over 3.3h of live traffic: 15 buckets, every one
-	// attributed observed, none inferred. Do not spend effort here.
-	//
-	// Response-side inference is also the weaker of the two: enabled is
-	// !Disabled && !Unavailable behind a 2s cache (cachedCodexAuths), so an
-	// account that entered cooldown after dispatch still reads as enabled.
-	// Any signed state qualifies -- not just the two configured lengths:
-	// those are per-plan measurements, and gating attribution on them would
-	// silently stop working the day the upstream signs a different size.
+	// 账号最后兜底推断只在 probe 角色开放，business 路径不会进这里。
+	// 通常 metadata 或 pendingAuth 已交接；只有完全不带元数据、宿主没发布 selected_auth_id 才会到此，
+	// 见 conductor_execution.go:1726。当前部署常驻 business，由 /ops/probe/start 开探测，不切角色。
+	// 2026-09-20 的 3.3 小时实测 15 桶全为 observed，没有 inferred；别把主要精力押在这条备用小巷。
+	// 响应侧推断更弱：cachedCodexAuths 的 2 秒缓存可能仍把刚冷却账号看作启用。
+	// 任意已签状态都可用于该兜底，不只配置两长度；套餐变尺寸不能让认人规则突然失明。
 	if authID == "" && model != "" && len(value) > 0 && cfg.isProbe() {
 		if sole, _, errSole := soleEnabledCodexAuth(); errSole == nil && sole != "" {
 			authID = sole
 		}
 	}
 
-	// Before the empty check, deliberately. A response carrying no state at all
-	// is the signal that the pair we steered with was ACCEPTED -- the upstream
-	// had no reason to sign a new one. Skipping silence would leave every
-	// healthy bucket looking unobserved. See bucketObservation.
+	// 故意在空状态检查前记录：引导后的静默也值得观察，不能把没新签状态的健康桶全写成无人来过。
 	recordObservation(cfg, authID, model, len(value), steered)
 
-	// A freshly observed __cflb/__oailb pair enters the GLOBAL pool. The pair is
-	// account-agnostic, so this needs no bucket key at all: any live pair serves
-	// any account's next request.
+	// 新见 __cflb/__oailb 直接入全局池，无需桶键；pair 不绑账号，一桌打来的水可供下一桌喝。
 	if len(cookies.pairs) > 0 {
 		state.mu.Lock()
 		state.noteRouteCookiesLocked(cookies, "")
@@ -1456,10 +1162,7 @@ func harvestFromResponse(cfg pluginConfig, headers http.Header, metadata map[str
 		logDecision("harvest", authID, model, len(value), "route-cookie pair pooled")
 	}
 
-	// Stamp the outcome back onto the pair this request carried, when it carried
-	// one. A normal state is evidence the steered node serves well; a degraded
-	// one deprioritises the entry for the next pick (ambiguous -- the account
-	// may be the throttled half -- so it is a nudge, never a delete).
+	// 把结果记回本请求实际携带的 pair：正常加好评，降级降低下次优先级；也可能是账号问题，所以只黄牌不拆椅子。
 	if steered && pairKey != "" {
 		kind := classifyObservation(cfg, len(value))
 		state.mu.Lock()
@@ -1467,27 +1170,19 @@ func harvestFromResponse(cfg pluginConfig, headers http.Header, metadata map[str
 		state.mu.Unlock()
 	}
 
-	// Arm the served-model watch for the payload chunks that follow. The
-	// header-init harvest above read the length signature; the unified format's
-	// degraded signal lives in the stream body instead, and this is where the
-	// request id, resolved account and steer context all exist at once.
+	// 给后续片段设 served-model 观察：长度已在 header-init 看过，统一格式降级却在 body；此时账号和引导上下文还齐全。
 	rememberModelScan(requestID, authID, model, len(value), steered, pairKey)
 }
 
-// runtimeOverride is the persisted form of the two dashboard-settable fields.
-// Both are pointers so "absent" is distinct from "set to the zero value": a file
-// that only ever recorded a dry_run flip must not also assert role="" (business)
-// and silently switch the role. Only a field that was actually written is applied.
+// runtimeOverride 持久化面板两字段，都用指针区别未写与零值。
+// 只写 dry_run 的文件不能顺带主张 role="" 把角色切成 business，没点的菜别替客人下单。
 type runtimeOverride struct {
 	Role   *string `json:"role,omitempty"`
 	DryRun *bool   `json:"dry_run,omitempty"`
 }
 
-// readRuntimeOverride loads the dashboard override from dir. A missing file is the
-// normal case (fresh deploy, nobody has touched the dashboard) and returns
-// ok=false with no error noise. A malformed file is treated the same way rather
-// than failing configure: a corrupt override must never take down registration,
-// and falling back to config.yaml is the safe direction.
+// readRuntimeOverride 从 dir 读覆盖文件，缺失是新部署常态，ok=false 不吵日志。
+// 文件坏了同样退回 config.yaml，不因一张便条破了就拒绝插件注册、整店停业。
 func readRuntimeOverride(dir string) (runtimeOverride, bool) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -1508,9 +1203,7 @@ func readRuntimeOverride(dir string) (runtimeOverride, bool) {
 	return ov, true
 }
 
-// writeRuntimeOverride records the dashboard's current role and dry_run so a
-// restart keeps them. It always writes both fields as a full snapshot of what the
-// dashboard controls, so a later role flip cannot lose an earlier dry_run flip.
+// writeRuntimeOverride 总把当前 role 与 dry_run 一起快照保存，重启保留；后改角色不能冲掉早先的 dry_run 便条。
 func writeRuntimeOverride(dir string, role string, dryRun bool) error {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -1527,34 +1220,24 @@ func writeRuntimeOverride(dir string, role string, dryRun bool) error {
 	return atomicWrite(filepath.Join(dir, runtimeOverrideFileName), append(data, '\n'))
 }
 
-// scopeFileName holds the probe scope the dashboard edits. It lives beside the
-// store because that is the one directory this plugin owns and can write.
-//
-// It exists because the host offers no way for a plugin to persist its own
-// config: there is a host.auth.save callback and nothing equivalent for
-// configuration. Saving through CPA's own
-// PATCH /v0/management/plugins/<id>/config is the alternative, and that route is
-// authenticated -- which would put a management key in front of the one screen
-// the operator asked to be keyless. Owning the file ourselves is what removes
-// the key from the page entirely.
+// scopeFileName 存面板编辑的探测范围，放插件拥有可写的 store 目录。
+// 宿主有 host.auth.save 却没插件配置持久化回调；改用 PATCH /v0/management/plugins/<id>/config 又需要 key。
+// 操作者要无 key 面板，所以自管文件，把钥匙需求留在后台，不让柜台每次问客人开锁。
 const scopeFileName = "probe-scope.json"
 
-// probeScope is the editable half of the configuration: which buckets the next
-// probe run covers and which exits it tries. None of it is read by the business
-// path.
+// probeScope 是可编辑的下轮桶范围和出口列表，业务路径不读这份探测行程单。
 type probeScope struct {
 	Accounts []string `json:"probe_accounts"`
 	Models   []string `json:"models"`
 	Proxies  []string `json:"probe_proxies"`
-	// Absent in files written before the pools were split, which decodes to nil
-	// and is exactly right: everything saved back then was a static exit.
-	Rotating  []string `json:"probe_proxies_rotating,omitempty"`
-	UpdatedAt string   `json:"updated_at"`
+	// 分池前的旧文件没有此项，解成 nil 正合适：当时保存的全是静态出口，别替旧账生出新亲戚。
+	Rotating []string `json:"probe_proxies_rotating,omitempty"`
+	// MintAccounts 限后台灌池借用账号；空或缺失即全部 Accounts，旧文件 nil 也照此，不让老菜单缺栏就断炊。
+	MintAccounts []string `json:"mint_accounts,omitempty"`
+	UpdatedAt    string   `json:"updated_at"`
 }
 
-// loadProbeScope reads the saved scope, or returns nil when none exists. A
-// missing file is the normal state before the operator has saved anything, not
-// an error.
+// loadProbeScope 读已存范围，没有就回 nil；操作者还未保存是正常白纸，不算账本失踪。
 func loadProbeScope(dir string) (*probeScope, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -1574,9 +1257,8 @@ func loadProbeScope(dir string) (*probeScope, error) {
 	return &scope, nil
 }
 
-// writeProbeScope persists the scope atomically. The file carries proxy
-// userinfo, so it is written with the same 0600 the bucket files get -- see
-// atomicWrite, which creates via os.CreateTemp and renames into place.
+// writeProbeScope 原子持久化范围，文件带代理 userinfo，权限与桶文件同为 0600。
+// atomicWrite 经 os.CreateTemp 再 rename，装钥匙的抽屉不能随手敞开。
 func writeProbeScope(dir string, scope probeScope) error {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -1592,9 +1274,7 @@ func writeProbeScope(dir string, scope probeScope) error {
 	return atomicWrite(filepath.Join(dir, scopeFileName), append(data, '\n'))
 }
 
-// pickModel resolves the model the same way on both sides of the plugin. The
-// probe and the business role must agree exactly, or an observation recorded
-// under one name would never be found under the other.
+// pickModel 让探测和业务两边认同一个模型名；同一演员两套艺名，观察账就找不到本人。
 func pickModel(model, requestedModel string) string {
 	if resolved := strings.TrimSpace(model); resolved != "" {
 		return resolved
@@ -1602,9 +1282,8 @@ func pickModel(model, requestedModel string) string {
 	return strings.TrimSpace(requestedModel)
 }
 
-// headerValue finds a header case-insensitively. http.Header.Get would only
-// match the canonical spelling, and these headers reach the plugin through a
-// JSON round trip that preserves whatever key the host used.
+// headerValue 不分大小写找头。经 JSON 往返的键保留宿主拼法，
+// http.Header.Get 只会按规范键取，不能要求来客都戴同款帽子才认人。
 func headerValue(headers http.Header, name string) string {
 	for key, values := range headers {
 		if !strings.EqualFold(key, name) {
@@ -1627,11 +1306,8 @@ func metadataString(metadata map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-// looksCodexAuthID reports whether a selected_auth_id names a Codex credential
-// file -- the filename convention isCodexAuth falls back on when the host does
-// not report a provider. On the steering path it is the degraded check used
-// only when the credential catalog cannot be read at all; when the catalog
-// answers, the provider it registered decides instead (selectedAuthIsCodex).
+// looksCodexAuthID 按凭据文件命名看是否像 Codex，是 isCodexAuth 的兜底线索。
+// 引导路径只在目录完全不可读时才用；目录能答就听 selectedAuthIsCodex 的 Provider 判断，外号不压过档案。
 func looksCodexAuthID(authID string) bool {
 	name := strings.ToLower(strings.TrimSpace(authID))
 	return strings.HasPrefix(name, "codex-") && strings.HasSuffix(name, ".json")
@@ -1644,16 +1320,14 @@ func orDash(value string) string {
 	return value
 }
 
-// logDecision records lengths and bucket identity only. The state value itself
-// is a credential-adjacent secret and never reaches the logs.
+// logDecision 只记长度与桶身份，状态值接近凭据秘密，不能给日志当台词素材。
 func logDecision(decision, authID, model string, valueLen int, reason string) {
 	if decision == "" {
 		return
 	}
 	state.mu.Lock()
 	enabled := state.config.LogDecisions
-	// Counted regardless of log_decisions: the status page should still report
-	// what the plugin is doing when the operator has quietened the log.
+	// log_decisions 关了照样计数；操作者只是让喇叭安静，不是让账房罢工。
 	switch decision {
 	case "harvest":
 		state.counts.Harvest++

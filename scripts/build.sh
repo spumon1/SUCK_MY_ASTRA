@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Builds the plugin as a linux c-shared library inside a throwaway Go
-# container, so the deploy host only needs Docker.
+# 插件在一次性 Go 容器里炼成 Linux c-shared 库；
+# 部署主机只管备好 Docker，不必把整间炼丹房搬回家。
 #
 # Usage: scripts/build.sh [output-dir]
 #        GOARCH=arm64 scripts/build.sh   # cross-compile for arm64
 #
-# The .so must match the CPA binary's architecture exactly -- an arm64 CPA
-# cannot load an amd64 .so and vice versa. Default is the host's own arch;
-# GOARCH=amd64|arm64 cross-compiles via the matching Debian cross gcc inside
-# the container (no qemu needed: the container always runs the host arch's
-# image, only the toolchain targets the other arch).
+# .so 与 CPA 的架构必须对号入座，arm64 与 amd64 不可互借椅子。
+# 默认跟宿主架构走；GOARCH=amd64|arm64 可借容器里的 Debian 交叉 gcc
+# 编出另一种架构。不用请 qemu 来当翻译：容器镜像始终跟宿主同架构，
+# 只有工具链替目标架构干活。
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,16 +35,15 @@ esac
 OUT_DIR="${1:-$REPO_DIR/build/$GOOS/$GOARCH}"
 mkdir -p "$OUT_DIR" "$CACHE_DIR/build" "$CACHE_DIR/mod"
 
-# --user keeps go.sum and the built .so owned by the invoking user rather than
-# root, which matters because the same tree is committed and deployed.
+# --user 让 go.sum 和产出的 .so 认调用者为主人，不跟 root 改姓；
+# 同一棵源码树还要提交、部署，产权别在厨房里弄丢。
 DOCKER_USER=(--user "$(id -u):$(id -g)")
 INNER='go mod tidy && go build -buildmode=c-shared -o /out/codex-turn-state-cloud-mint.so .'
 
 if [ "$GOARCH" != "$host_arch" ]; then
-	# A different GOARCH is a real cross-compile: CGO's c-shared link needs the
-	# target's C toolchain, installed into the throwaway container from Debian's
-	# gcc-*-linux-gnu packages. apt needs root, so --user is dropped and the
-	# output/cache trees are handed back to the invoking user afterwards.
+	# GOARCH 换架构不是换帽子：CGO 的 c-shared 链接真要目标 C 工具链。
+	# 一次性容器从 Debian 的 gcc-*-linux-gnu 包请来这位师傅；
+	# apt 需要 root，就暂撤 --user，完工后把产物与缓存的产权还给调用者。
 	case "$GOARCH" in
 		amd64) CROSS_PKG="gcc-x86-64-linux-gnu";  CROSS_CC="x86_64-linux-gnu-gcc" ;;
 		arm64) CROSS_PKG="gcc-aarch64-linux-gnu"; CROSS_CC="aarch64-linux-gnu-gcc" ;;
@@ -70,8 +68,8 @@ docker run --rm \
 	sh -c "$INNER"
 
 if [ ${#DOCKER_USER[@]} -eq 0 ]; then
-	# Cross builds ran as root for apt; return ownership of everything the build
-	# touched to the invoking user so the tree stays committable.
+	# 交叉构建为 apt 借过 root 的印章；现在把构建碰过的文件还给调用者，
+	# 别让提交源码变成向管理员讨房契。
 	docker run --rm \
 		-v "$REPO_DIR/go":/src \
 		-v "$OUT_DIR":/out \

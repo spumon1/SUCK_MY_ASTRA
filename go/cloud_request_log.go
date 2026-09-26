@@ -17,7 +17,7 @@ const (
 	cloudRequestTTL        = 15 * time.Minute
 )
 
-// 待关联记录只保存摘要；SSE 临时缓冲有界，确认声明后立即释放。
+// 待关联账目只留摘要，SSE 临时缓冲设上限；声明一确认就释放，不让候客厅长成仓库。
 type cloudPendingLog struct {
 	view, response cloudLogView
 	action         string
@@ -71,7 +71,7 @@ func cloudHasRequestLog(id string) bool {
 	return exists
 }
 
-// 合并的只是钩子的观测副本，绝不改动请求本身或增加模型请求。
+// 合并的只是钩子观测副本；请求原件不动，也不多发模型请求，看戏不能偷偷加演。
 func cloudRememberRequest(req pluginapi.RequestInterceptRequest, out pluginapi.RequestInterceptResponse) {
 	if req.RequestID == "" {
 		return
@@ -140,7 +140,7 @@ func cloudStartRequestLog(id string, record *cloudPendingLog) {
 	cloudRequestLogs.items[id] = record
 }
 
-// 兼容已确认的注入观测；正常业务入口同时记录沿用/未改写路径。
+// 兼容已确认的注入观测，正常入口也记沿用和未改写路径；没换票同样有账可查。
 func cloudRememberInjection(id string, entry cloudMintEntry) {
 	cloudStartRequestLog(id, &cloudPendingLog{view: cloudEntryView(entry), action: "注入"})
 }
@@ -195,7 +195,7 @@ func cloudSetCookieNames(headers http.Header) []string {
 		for _, value := range values {
 			name, _, ok := strings.Cut(value, "=")
 			name = strings.TrimSpace(name)
-			// 名称也不可信；不展示任意会话标识或利用 cookie 名携带的内容。
+			// Cookie 名也得防：不展示任意会话标识或借名字夹带的内容，不能只查行李不查帽子。
 			if !ok || (name != "__cf_bm" && name != "__cflb" && name != "__oailb") {
 				name = "其他"
 			}

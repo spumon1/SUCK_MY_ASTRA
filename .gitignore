@@ -1,0 +1,15 @@
+# 编译产物在后台候场，别跟源码一起挤进仓库
+/build/
+/.gocache/
+go/cpa-plugin-codex-turn-state
+
+# Node / Playwright 临时测试班底不上户口（运行 tests/ui 时按需安装，见 tests/ui/README.md）
+/node_modules/
+/package.json
+/package-lock.json
+
+# Claude Code 本地会话的小本本，不是仓库的公共账簿
+/.claude/
+
+# 账号凭据是钥匙串，不是展览品；导入文件禁止入库
+/gpt/

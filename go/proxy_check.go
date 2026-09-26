@@ -1,43 +1,13 @@
-// proxy_check.go -- "can this exit reach OpenAI?", answered for the whole pool
-// at once.
-//
-// # Why this exists
-//
-// The probe walks probe_proxies in order and gives up on an exit that fails,
-// which is the right behaviour during a run but a terrible diagnostic: a pool
-// where half the exits are dead still harvests, just slower and with fewer
-// chances per bucket, and nothing on the page says so. This route answers the
-// question directly, for every exit, without waiting for a probe run.
-//
-// # Why it costs no quota
-//
-// The reachability request carries NO Authorization and NO Chatgpt-Account-Id.
-// An unauthenticated POST to the codex endpoint is answered 401 by OpenAI --
-// measured, not assumed -- and a 401 is the success case here: it proves the
-// request travelled through the exit, terminated TLS at OpenAI's edge, and was
-// answered by the API rather than by the proxy, a captive portal or an
-// interception box. No credential is touched, so a run is safe while business
-// traffic and a probe are both live, and it cannot be the thing that trips a
-// rate limit on an account.
-//
-// # Why the trace request is on chatgpt.com and not a third-party service
-//
-// Cloudflare's /cdn-cgi/trace on the same host reports the address the upstream
-// actually sees, plus its country and edge datacenter. Asking ipinfo.io instead
-// would add a dependency, and would report the exit for a request to ipinfo.io
-// -- not necessarily the one OpenAI sees. It is best-effort: the verdict belongs
-// to the API request alone, so a trace failure costs the address, never the
-// answer.
-//
-// # What must never leak out of this file
-//
-// The results render on a page that needs no key, so every proxy goes out
-// through probeShowProxy (userinfo replaced wholesale) and every error string
-// through probeRedact. The exit address IS reported in the clear: it is strictly
-// less sensitive than the proxy URL the status document already serves in the
-// clear at the operator's instruction, and seeing it is the whole point -- a
-// pool of twenty credentials on one gateway that resolves to three addresses is
-// three exits wearing twenty hats, which nothing else on this page would reveal.
+// 出口体检一次问遍全池：这些出口到底能不能到 OpenAI，不必等探测整轮结束才猜谁瘸腿。
+// 探测按序跳过失败出口，半池坏了也可能继续采集，只是更慢；这里让每条出口单独交体检表。
+// 可达性请求不带 Authorization 或 Chatgpt-Account-Id。实测未认证 Codex POST 回 401，
+// 这里反而算抵达证据：请求经出口到 OpenAI 边缘完成 TLS，由 API 回答，不是代理或拦截页唱戏。
+// 不碰凭据、不花账号额度，能与业务和探测并行，也不会凭空给账号添限流请求。
+// 出口地址查同一 chatgpt.com 的 /cdn-cgi/trace，拿上游实际所见 IP、国家和边缘机房；
+// 不问第三方 ipinfo.io，免得多依赖还问到另一条路的落点。trace 尽力而为，失败只缺地址，不改 API 判定。
+// 结果页无需 key：代理经 probeShowProxy 整体遮 userinfo，错误经 probeRedact；
+// IP 本身明文显示，用来识破“二十顶帽子其实只戴在三个出口头上”。当前状态页按操作者要求已明文展示代理，
+// 但这不等于日志也能裸奔，日志仍严格脱敏。
 package main
 
 import (
@@ -56,46 +26,33 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// proxyCheckTraceURL is Cloudflare's trace endpoint on the very host the probe
-// talks to -- see the package comment for why not a third party. A var, not a
-// const, for the same reason probeUpstreamURL is: the tests point it at a fake.
+// proxyCheckTraceURL 是探测同一主机的 Cloudflare trace 入口，不找第三方代问。
+// 用变量便于测试换假端点，和 probeUpstreamURL 一样，替身只在排练时上场。
 var proxyCheckTraceURL = "https://chatgpt.com/cdn-cgi/trace"
 
 const (
-	// One request's budget. Short on purpose: this is a liveness check, and an
-	// exit that needs more than this to answer is not one the probe wants to
-	// spend a bucket's attempt on either.
+	// 单请求预算刻意短：体检都答得拖拖拉拉的出口，不值得再花一桶探测机会等它系鞋带。
 	proxyCheckRequestTimeout = 8 * time.Second
 
-	// The whole batch's budget. The host serves this synchronously, so it has to
-	// finish well inside any reasonable management timeout. With the parallelism
-	// below, a pool of twenty answers in seconds when healthy and still returns a
-	// complete document when every exit is a black hole.
+	// 整批预算要装进合理管理超时，因为宿主同步等结果。
+	// 配合下面并行度，二十个健康出口几秒答完，全黑洞也要按时交完整答卷。
 	proxyCheckBudget = 45 * time.Second
 
-	// Enough to make a large pool fast, low enough that twenty exits opening at
-	// once does not look like a burst to a shared gateway. This spends no quota,
-	// so unlike the probe's pacing there is no account-level limit to respect --
-	// the only constraint is the gateway itself.
+	// 并行度既要快，也别让二十条出口同时撞共享网关像集体敲锣。
+	// 不花账号额度，所以不受探测的账号节奏约束，但网关承受力仍得顾。
 	proxyCheckParallel = 6
 
-	// Only the status line and a few trace fields matter; bodies are drained to
-	// let the socket be reused and otherwise dropped.
+	// 只要状态行和少量 trace 字段；响应体排空供连接复用后丢弃，不把餐盘都搬回家。
 	proxyCheckMaxBody = 4 << 10
 
-	// The model named in the unauthenticated body. The upstream rejects on the
-	// missing credential before it ever looks at this, so it exists only to make
-	// the request well-formed.
+	// 未认证请求体的模型只为格式完整；上游先因缺凭据拒绝，模型名只是坐在门外的道具。
 	proxyCheckFallbackModel = "gpt-5.5"
 )
 
-// The verdicts. Deliberately more than a boolean: "could not connect" and
-// "connected and was refused" send an operator to completely different places --
-// the first to the proxy vendor, the second to the exit's reputation -- and
-// collapsing them into "failed" is what makes a pool look mysteriously broken.
+// 结果不止成功失败两色：连不上应查代理商，连上却被拒应查出口信誉。
+// 混叫失败就像把没点火和烧糊都叫“饭不好”，操作者无从下手。
 const (
-	// Which list an entry came from. These are the wire values the dashboard
-	// keys its labels on.
+	// 标记条目来自哪个池；这些线上值是面板标签依据，来路不能靠闻味道猜。
 	proxyPoolStatic   = "static"
 	proxyPoolRotating = "rotating"
 
@@ -107,22 +64,14 @@ const (
 )
 
 type proxyCheckResult struct {
-	// Index is 1-based and matches the exit's position within its own pool, which
-	// is also the order the probe tries them in. It is the only stable handle the
-	// page has: a pool of twenty credentials on one gateway masks to twenty
-	// identical strings, so the position is what tells them apart.
+	// Index 从 1 起，对齐出口在自己池里的位置，也是探测尝试顺序。
+	// 二十份同网关凭据脱敏后可能一个模样，只能靠座号认人，别把排序当装饰。
 	Index int    `json:"index"`
 	Pool  string `json:"pool"`
 	Proxy string `json:"proxy"`
-	// Rotated reports that two samples of this entry came back with different
-	// addresses. Mismatch is set only when that DISPROVES the declaration.
-	//
-	// The evidence is deliberately one-directional. Two different addresses prove
-	// an entry declared static is really rotating -- no fixed exit can do that.
-	// Two identical addresses prove nothing about an entry declared rotating: a
-	// small pool repeats by chance, and a gateway may hold an address for a few
-	// seconds. So only the provable direction is ever flagged; the other would be
-	// a false alarm telling the operator to undo a correct configuration.
+	// Rotated 表示两次采样 IP 不同；Mismatch 只在证据反驳声明时点亮。
+	// 不同 IP 足以打脸“静态”；相同 IP 却不能反驳“轮换”，小池会重抽，网关也可能短暂黏住地址。
+	// 证据只能单向用，不能看两次同一辆车就宣布全城只有一辆车。
 	Rotated    bool   `json:"rotated"`
 	Mismatch   string `json:"mismatch,omitempty"`
 	Verdict    string `json:"verdict"`
@@ -141,11 +90,8 @@ type proxyCheckResponse struct {
 	Dead       int `json:"dead"`
 	Other      int `json:"other"`
 	Mismatches int `json:"mismatches"`
-	// DistinctIPs counts addresses across the STATIC pool only. Counting rotating
-	// entries here would be meaningless -- they are supposed to differ every time,
-	// so the number would just restate how many rotating entries there are. The
-	// figure exists to answer one question, "are several static entries secretly
-	// the same exit", and that question does not apply to a gateway.
+	// DistinctIPs 只数静态池地址，回答几个静态条目是否其实共用一个出口。
+	// 轮换池本就应变地址，混进来只会把车牌抽签次数误当固定车位数。
 	StaticChecked int                `json:"static_checked"`
 	DistinctIPs   int                `json:"distinct_ips"`
 	MS            int64              `json:"ms"`
@@ -155,13 +101,9 @@ type proxyCheckResponse struct {
 	Results       []proxyCheckResult `json:"results"`
 }
 
-// runProxyCheck tests every configured exit and reports one row each.
-//
-// It reads the pool the plugin actually holds, never a list supplied by the
-// caller. That is not a limitation to work around: proxy URLs carry passwords,
-// and this route is a keyless GET, so accepting them as query parameters would
-// write the pool's credentials into the host's access log and into browser
-// history. The dashboard tells the operator to save first instead.
+// runProxyCheck 测插件当前配置的出口，每个一行，绝不收调用方临时名单。
+// 这是无 key GET，代理 URL 带密码，放查询参数就会落宿主访问日志和浏览器历史；
+// 请先在面板保存配置，别把钥匙刻到路边指示牌上。
 func runProxyCheck() pluginapi.ManagementResponse {
 	state.mu.Lock()
 	cfg := state.config
@@ -172,8 +114,7 @@ func runProxyCheck() pluginapi.ManagementResponse {
 		model = cfg.Models[0]
 	}
 
-	// One flat list carrying which pool each entry came from, so the whole batch
-	// still runs through a single bounded worker set.
+	// 两池铺成同一列表，但留来源标签，共用一个有界 worker 队列，别各自开无数灶。
 	type target struct {
 		pool  string
 		index int
@@ -189,11 +130,8 @@ func runProxyCheck() pluginapi.ManagementResponse {
 
 	out := proxyCheckResponse{Results: []proxyCheckResult{}}
 	if len(targets) == 0 {
-		// Both pools empty is a real configuration, not an error: probeHarvestBucket
-		// turns it into a single direct attempt, so that is exactly what gets checked
-		// here. Answering "nothing to check" would be wrong about what the probe will
-		// actually do. Note this is only true when BOTH are empty -- a rotating pool
-		// with no static entries does NOT fall back to direct, and neither does this.
+		// 只有两池都空才测一次直连，对齐 probeHarvestBucket 的真实动作，不回“无可检查”。
+		// 仅静态池空而轮换池有条目不回退直连，不能看一口锅空就宣布全店没菜。
 		targets = append(targets, target{pool: proxyPoolStatic, index: 1, url: ""})
 		out.Direct = true
 		out.Note = "两个代理池都是空的 —— 探测会走本机直连，所以这里测的就是直连出口。"
@@ -202,9 +140,7 @@ func runProxyCheck() pluginapi.ManagementResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), proxyCheckBudget)
 	defer cancel()
 
-	// Its own pool, discarded at the end. Sharing the probe run's clients would
-	// couple a diagnostic to a live run's connection state, and these transports
-	// have no reason to outlive the answer.
+	// 自建客户端池，结束就收摊；不借正在探测的连接，免得体检把营业的脉搏也搅乱。
 	pool := newProbeClientPool()
 	defer pool.closeIdle()
 
@@ -214,8 +150,7 @@ func runProxyCheck() pluginapi.ManagementResponse {
 	started := time.Now()
 	for slot, tgt := range targets {
 		wg.Add(1)
-		// Each goroutine writes its own element of a slice that is never resized,
-		// so the results need no mutex.
+		// 每个 goroutine 只写固定 slice 自己那格，slice 不扩容，所以不需要另派互斥门卫。
 		go func(slot int, t target) {
 			defer wg.Done()
 			gate <- struct{}{}
@@ -254,39 +189,33 @@ func runProxyCheck() pluginapi.ManagementResponse {
 	}
 	out.DistinctIPs = len(seen)
 
-	// Counts only. The exits themselves are masked in the response and still have
-	// no business in a log line, which gets copied into tickets and chat windows.
+	// 日志只报数量，不报出口；响应都已脱敏，更不能在会被复制进工单和聊天的日志里露钥匙。
 	log.Printf(logPrefix+"proxy check: %d entr(ies) -> %d ok, %d refused, %d unreachable, %d other; %d misdeclared; %d distinct static address(es) in %dms",
 		out.Checked, out.OK, out.Blocked, out.Dead, out.Other, out.Mismatches, out.DistinctIPs, out.MS)
 
 	return jsonResponse(http.StatusOK, out)
 }
 
-// proxyCheckOne runs both requests for a single exit. The trace comes first so
-// that a dead exit is reported with whatever the trace managed to learn, and so
-// the timing attributed to the exit measures the request that decides the
-// verdict rather than both.
+// proxyCheckOne 给单出口跑 trace 和可达性请求，先 trace，坏出口也尽量带回线索。
+// 计时只量决定结论的 API 请求，不把拍证件照时间算进跑步成绩。
 func proxyCheckOne(ctx context.Context, pool *probeClientPool, poolName string, index int, raw, model string) proxyCheckResult {
 	out := proxyCheckResult{Index: index, Pool: poolName, Proxy: probeShowProxy(raw), Verdict: proxyVerdictDead}
 
 	client, errClient := pool.get(raw)
 	if errClient != nil {
-		// A malformed exit never reaches the network. Saying so precisely matters:
-		// otherwise a typo in the pool is indistinguishable from a dead vendor.
+		// 出口格式错就不联网，明确报配置问题；打错门牌不能怪房东失踪。
 		out.Detail = "这条代理地址本身有问题：" + probeRedact(errClient.Error())
 		return out
 	}
 
-	// Two samples, so the declared pool can be checked against what the entry
-	// actually does. Both are best-effort; a trace outage costs the address and
-	// the verification, never the verdict.
+	// 取两次 trace 样本核对声明，均为尽力；trace 停摆只缺 IP 和轮换验证，不推翻 API 通行证。
 	if trace := proxyCheckTrace(ctx, client); trace != nil {
 		out.ExitIP, out.Country, out.Colo = trace["ip"], trace["loc"], trace["colo"]
 		if second := proxyCheckTrace(ctx, client); second != nil && second["ip"] != "" && out.ExitIP != "" {
 			out.Rotated = second["ip"] != out.ExitIP
 		}
 	}
-	// Only the direction that is actually proof. See proxyCheckResult.Rotated.
+	// 只按能证明的方向判矛盾，见 proxyCheckResult.Rotated；证据没到，锤子别先落。
 	if out.Rotated && poolName == proxyPoolStatic && raw != "" {
 		out.Mismatch = "这条在静态池里，但两次采样给了不同地址 —— 它其实是轮换的，应该移到轮换池。"
 	}
@@ -317,9 +246,8 @@ func proxyCheckOne(ctx context.Context, pool *probeClientPool, poolName string, 
 	return out
 }
 
-// proxyCheckReach is the request the verdict rests on: the probe's own endpoint,
-// the probe's own headers, and deliberately no credential. See the package
-// comment for why 401 is success.
+// proxyCheckReach 用探测自己的端点与头，但故意不带凭据。
+// 401 在这里证明抵达，问路被要求出示证件，说明至少找对了门。
 func proxyCheckReach(ctx context.Context, client *http.Client, model string) (int, error) {
 	payload := map[string]any{
 		"model":  model,
@@ -345,10 +273,8 @@ func proxyCheckReach(ctx context.Context, client *http.Client, model string) (in
 	if errNew != nil {
 		return 0, errNew
 	}
-	// Everything the probe sends except Authorization and Chatgpt-Account-Id. The
-	// headers are kept identical so the check exercises the same path the probe
-	// will: an edge that rejects on User-Agent or Originator should fail here too,
-	// rather than passing a check and then failing every harvest.
+	// 除了 Authorization、Chatgpt-Account-Id，其余头与探测一致。
+	// 边缘若拒 User-Agent 或 Originator，这里也应失败，不让体检穿礼服、正式上班换假胡子。
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
 	request.Header.Set("Originator", "codex-tui")
@@ -364,9 +290,8 @@ func proxyCheckReach(ctx context.Context, client *http.Client, model string) (in
 	return response.StatusCode, nil
 }
 
-// proxyCheckTrace reads Cloudflare's trace document through one exit. It returns
-// nil on any failure -- this is decoration, and the caller must not treat a
-// missing address as a bad exit.
+// proxyCheckTrace 通过出口读 Cloudflare trace，任意失败回 nil。
+// 这是补充线索，不是主判官，没拿到地址不能宣布出口有罪。
 func proxyCheckTrace(ctx context.Context, client *http.Client) map[string]string {
 	callCtx, cancel := context.WithTimeout(ctx, proxyCheckRequestTimeout)
 	defer cancel()
@@ -386,8 +311,7 @@ func proxyCheckTrace(ctx context.Context, client *http.Client) map[string]string
 		return nil
 	}
 
-	// key=value, one per line. Only three of them are worth showing, and pulling
-	// exactly those keeps anything new Cloudflare adds from reaching the page.
+	// 每行 key=value，只拿要展示的三个字段；Cloudflare 新添的菜别未经点单端上面板。
 	out := map[string]string{}
 	scanner := bufio.NewScanner(io.LimitReader(response.Body, proxyCheckMaxBody))
 	for scanner.Scan() {

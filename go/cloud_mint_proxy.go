@@ -12,7 +12,7 @@ import (
 
 const cloudMintTLSHandshakeTimeout = 10 * time.Second
 
-// 前置代理只作用于插件到 FC；不继承宿主环境代理，不改变 CPA 业务出口。
+// 前置代理只管插件到 FC 这一程，不继承宿主环境代理，也不替 CPA 业务改道。
 func parseCloudMintProxy(raw string) (*url.URL, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil
@@ -25,7 +25,7 @@ func parseCloudMintProxy(raw string) (*url.URL, error) {
 	switch proxy.Scheme {
 	case "http", "https", "socks5":
 	case "socks5h":
-		proxy.Scheme = "socks5" // Go 的 SOCKS5 本身将目标域名交给代理解析。
+		proxy.Scheme = "socks5" // Go SOCKS5 已把目标域名交代理解析，别又替司机认一遍路。
 	default:
 		return nil, errors.New("cloud_mint proxy supports http/https/socks5/socks5h only")
 	}
@@ -72,7 +72,7 @@ func newCloudMintTransport(raw string) (*http.Transport, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 独立 Transport，不复用或修改 http.DefaultTransport、CPA 全局代理和 TLS 设置。
+	// 单开 Transport，不借用或改动 http.DefaultTransport、CPA 全局代理及 TLS；自家换锅不拆邻居灶。
 	transport := &http.Transport{TLSHandshakeTimeout: cloudMintTLSHandshakeTimeout, ForceAttemptHTTP2: true}
 	if proxy != nil {
 		transport.Proxy = http.ProxyURL(proxy)

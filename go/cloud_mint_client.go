@@ -43,12 +43,14 @@ type cloudMintEntry struct {
 	IssuedAt, ExpiresAt time.Time
 }
 
-// 不信任重定向，避免把账号 Access Token 或 RELAY_KEY 转送到其他地址。
-func requestCloudMint(ctx context.Context, work cloudMintWork) (cloudMintEntry, error) {
+// doCloudMint 只跑一趟打票，带回原始结果和 HTTP 状态，不当验票员。
+// requestCloudMint 要合格票；modeltrace 即便票被拒（例如降级）也要从 attempt log 查实际 served，
+// 两者共用这位跑腿。重定向不跟，免得 Access Token 或 RELAY_KEY 被领去陌生包间。
+func doCloudMint(ctx context.Context, work cloudMintWork) (cloudMintResult, int, error) {
 	cfg, creds, model, key := work.cfg, work.creds, work.model, work.key
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, nil)
 	if err != nil {
-		return cloudMintEntry{}, errors.New("invalid cloud endpoint")
+		return cloudMintResult{}, 0, errors.New("invalid cloud endpoint")
 	}
 	req.Header.Set("X-Relay-Key", key)
 	req.Header.Set("X-Relay-Mint", cfg.Gateway)
@@ -63,31 +65,42 @@ func requestCloudMint(ctx context.Context, work cloudMintWork) (cloudMintEntry, 
 	if work.seedCookie != "" {
 		req.Header.Set("Cookie", work.seedCookie)
 	}
+	if work.sid != "" {
+		req.Header.Set("X-Mint-Sid", work.sid)
+	}
 	transport, err := newCloudMintTransport(work.proxyURL)
 	if err != nil {
-		return cloudMintEntry{}, err
+		return cloudMintResult{}, 0, err
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	res, err := client.Do(req)
 	if err != nil {
-		return cloudMintEntry{}, errors.New("cloud mint unavailable or timed out")
+		return cloudMintResult{}, 0, errors.New("cloud mint unavailable or timed out")
 	}
 	defer res.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(res.Body, cloudResponseLimit+1))
 	if err != nil || len(raw) > cloudResponseLimit {
-		return cloudMintEntry{}, errors.New("cloud mint response invalid or too large")
+		return cloudMintResult{}, res.StatusCode, errors.New("cloud mint response invalid or too large")
 	}
 	var result cloudMintResult
 	if json.Unmarshal(raw, &result) != nil {
-		return cloudMintEntry{}, errors.New("cloud mint response is not JSON")
+		return cloudMintResult{}, res.StatusCode, errors.New("cloud mint response is not JSON")
+	}
+	return result, res.StatusCode, nil
+}
+
+func requestCloudMint(ctx context.Context, work cloudMintWork) (cloudMintEntry, error) {
+	result, status, err := doCloudMint(ctx, work)
+	if err != nil {
+		return cloudMintEntry{}, err
 	}
 	logCloudAttempts(result.AttemptLog)
 	logCloudAttempts(result.Error.AttemptLog)
-	if res.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		return cloudMintEntry{}, errors.New("cloud mint rejected")
 	}
-	return validateCloudMint(result, cfg, model, time.Now())
+	return validateCloudMint(result, work.cfg, work.model, time.Now())
 }
 
 func cloudIssuedAt(ticket string) time.Time {
@@ -102,7 +115,7 @@ func cloudIssuedAt(ticket string) time.Time {
 	return time.Unix(int64(seconds), 0)
 }
 
-// 有效期只取更早的死线；网关同时核对返回声明及 Cookie 载荷，不仅信任展示文本。
+// 期限只认更早的死线；网关既查返回声明也查 Cookie 载荷，不因门口挂了招牌就信掌柜姓什么。
 func validateCloudMint(r cloudMintResult, cfg cloudMintConfig, model string, now time.Time) (cloudMintEntry, error) {
 	t, ok := r.Tickets[model]
 	if !ok || r.Transport != cfg.Transport || t.ServedModel != model || len(t.TurnState) != cfg.TicketLength || t.TicketLen != len(t.TurnState) {
@@ -112,7 +125,7 @@ func validateCloudMint(r cloudMintResult, cfg cloudMintConfig, model string, now
 	if issued.IsZero() || issued.After(now.Add(30*time.Second)) {
 		return cloudMintEntry{}, errors.New("invalid ticket issue time")
 	}
-	if r.Gateway != cfg.Gateway || cloudCookieGateway(r.Cookies) != cfg.Gateway {
+	if cfg.Gateway != "any" && (r.Gateway != cfg.Gateway || cloudCookieGateway(r.Cookies) != cfg.Gateway) {
 		return cloudMintEntry{}, errors.New("cloud target gateway mismatch")
 	}
 	cookies := map[string]string{}

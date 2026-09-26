@@ -11,7 +11,7 @@ const defaultCloudPluginID = "codex-turn-state"
 var cloudPluginID atomic.Value
 var cloudPluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
-// 宿主按文件名派生 ID，ResourceBasePath 才是配置键和页面路由的真实来源。
+// 宿主按文件名派生 ID；配置键与页面路由认 ResourceBasePath，店名不能冒充房产证。
 func setCloudPluginID(resourceBase string) {
 	id := strings.TrimPrefix(strings.TrimRight(resourceBase, "/"), "/v0/resource/plugins/")
 	if !strings.HasPrefix(resourceBase, "/v0/resource/plugins/") || !cloudPluginIDPattern.MatchString(id) {
@@ -31,7 +31,7 @@ func cloudRegisteredPath(path string) string {
 	return strings.Replace(path, "/"+defaultCloudPluginID+"/", "/"+currentCloudPluginID()+"/", 1)
 }
 
-// 将实际 ID 的合法路径归一到内部常量，资源鉴权判断仍保留原有路径前缀。
+// 把实际 ID 的合法路径归一到内部常量；资源鉴权仍查原前缀，换门牌不等于拆门锁。
 func cloudCanonicalPath(path string) string {
 	id := currentCloudPluginID()
 	if id == defaultCloudPluginID {

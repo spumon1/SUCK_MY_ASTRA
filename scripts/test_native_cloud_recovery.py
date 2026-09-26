@@ -78,7 +78,7 @@ class NativeHost:
         encoded = json.dumps(response).encode()
         buffer = ctypes.create_string_buffer(encoded)
         address = ctypes.addressof(buffer)
-        self.buffers[address] = buffer  # 持有宿主缓冲区，直到 Go 调用 free_buffer。
+        self.buffers[address] = buffer  # 宿主缓冲区先留座，Go 调用 free_buffer 才准撤椅子。
         output.contents.ptr, output.contents.length = address, len(encoded)
         return 0
 
@@ -150,7 +150,7 @@ def wait_ready(plugin):
 class NativeRecoveryTest(unittest.TestCase):
     def test_cold_503_recovers_and_disabled_account_stays_blocked(self):
         if os.environ.get(FIXTURE_ENV) != "1":
-            # Go 原生库使用启动时的环境快照，不能依赖加载后 Python 的 putenv。
+            # Go 原生库只认启动时那张环境合影；加载后 Python 再 putenv，也挤不进旧照片。
             env = {**os.environ, KEY_ENV: RELAY_KEY, FIXTURE_ENV: "1"}
             run = subprocess.run([sys.executable, str(Path(__file__).resolve())],
                                  env=env, capture_output=True, text=True, timeout=30)
