@@ -25,6 +25,12 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 @media(max-width:1100px){.shell{padding:20px 24px}.layout{grid-template-columns:minmax(0,1fr) 285px}th,td{padding-left:10px;padding-right:10px}.stat{padding:15px}.toolbar{flex-wrap:wrap}.search{flex-basis:100%}}
 @media(max-width:850px){.layout{grid-template-columns:minmax(0,1fr)}.stats{gap:10px}.table-wrap table{min-width:670px}.settings-body{max-width:650px}.mobile-only{display:block}}
 @media(max-width:520px){.shell{padding:17px 16px}.demo{align-items:flex-start;font-size:9px}.demo span{max-width:210px;text-align:right}.top{align-items:flex-start;padding:22px 0;flex-wrap:wrap}.brand h1{font-size:23px}.actions{width:100%;justify-content:flex-end}.actions .pill{margin-right:auto}.stats{grid-template-columns:1fr 1fr}.stat strong{font-size:28px}.stat{padding:13px 15px}.card-head{padding:14px}.toolbar{padding:11px}.logs{padding:0 14px}.entry-title{font-size:11px}.entry-title time{font-size:9px}.entry-body{padding-left:0}.foot{display:block;line-height:2}.card-foot{font-size:9px}.feed-head{gap:5px}}
+.checklist{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:6px;max-height:150px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:9px 11px;background:#fbfcf9}
+.checkitem{display:flex;align-items:center;gap:5px;font-size:11px;white-space:nowrap;cursor:pointer;color:var(--ink)}
+.checkitem input{margin:0}
+.checklist .empty{color:var(--muted);font-size:11px}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .checklist{background:#1a1d18}}
+:root[data-theme="dark"] .checklist{background:#1a1d18}
 </style>
 </head>
 <body>
@@ -34,7 +40,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 <header class="top"><div class="brand"><div class="logo" aria-hidden="true"><svg width="23" height="23" viewBox="0 0 24 24" fill="none"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4z" fill="currentColor"/><path d="M14 17h6M17 14v6" stroke="currentColor" stroke-width="2"/></svg></div><div><h1>云端打票</h1><p>CLOUD MINT · CPA NATIVE PLUGIN</p></div></div><div class="actions"><span class="pill" id="enabledStatus">状态未知</span><a class="button" href="#settings">打票设置</a><button class="button" id="reset" type="button">刷新状态</button></div></header>
 <section class="card" id="capabilityScope" aria-label="能力边界"><div class="settings-body"><strong>有限取票＋路由复用＋协议校验</strong><p class="help">取票受总次数与总时限约束；复用云端缓存中仍有效的目标路由 Cookie；校验格式、有效期及上游模型声明。</p><p class="help">780 仅是预期格式长度，节点编号和模型名称不证明模型实际能力。缓存就绪不代表质量评测通过。</p></div></section>
 <section class="stats" aria-label="全局池与灌池实时状态"><div class="stat"><label>池内有效 pair</label><strong id="poolUsable">—</strong><p id="poolTotalNote">随窗口起伏，并非固定库存</p></div><div class="stat"><label>覆盖网关数</label><strong id="poolGateways">—</strong><p>可用 pair 覆盖的 unified-N 数</p></div><div class="stat"><label>上轮灌池入池</label><strong id="fillPooled">—</strong><p id="fillAttemptNote">FC 逐账号逐模型打票</p></div><div class="stat"><label>灌池间隔</label><strong id="fillInterval">—</strong><p id="fillStateNote">灌池循环状态</p></div></section>
-<section class="card" id="modeltraceCard" aria-label="主动探测 ModelTrace"><div class="card-head"><h3>主动探测 · ModelTrace（WS 满血验证）</h3><small>真实打上游 · 消耗额度</small></div><div class="settings-body"><div class="field-row"><label class="field" for="mtModel">模型<input id="mtModel" value="gpt-6-astra"></label><label class="field" for="mtPath">验证路径<select id="mtPath"><option value="fc">FC 路径（验票本身满血）</option><option value="client">客户端路径（CPA 出口，验真实满血）</option><option value="bridge">桥接路径（FC 满血桥接·方案 B）</option></select></label><label class="field" for="mtSource">铸票源<select id="mtSource"><option value="fc">FC（阿里云函数）</option><option value="relay">本地 relay</option><option value="legacy">legacy（顶层 url）</option></select></label></div><div class="field-row"><label class="field" for="mtAccount">账号（可多选：Ctrl/⌘ 点选；多选=各账号同时打票）<select id="mtAccount" multiple size="4"><option value="">自动（第一个可用）</option></select></label><label class="field" for="mtTurns">探测次数<input id="mtTurns" type="number" min="1" max="10" value="3"></label></div><label class="field" for="mtApiKey">业务 api-key（仅客户端路径需要，走 CPA 本机回环鉴权）<input id="mtApiKey" type="password" autocomplete="off" placeholder="path=client 时填;不保存"></label><label class="field" for="mtURL">FC 地址覆盖（仅 FC 路径，可选）<input id="mtURL" placeholder="https://…fcapp.run/"></label><div class="settings-actions"><button class="button primary" id="mtRun" type="button">运行探测</button><button class="button" id="mtSweep" type="button">扫描满血网关</button></div><p class="help">对模型输出做**行为指纹**判定真实模型,不看声明标签。两条路径分开验:<b>FC 路径</b>=经 FC 铸票+回放,验票本身满血;<b>客户端路径</b>=插件本机回环打 CPA 业务端点(需 api-key),走真实客户端出口,验客户端实际拿到的是否满血。指纹匹配=真满血,不匹配=被降级(如实际 luna)。烧额度,结果只代表这几轮。</p><div id="mtResult" class="logs" style="margin-top:10px"></div></div></section>
+<section class="card" id="modeltraceCard" aria-label="主动探测 ModelTrace"><div class="card-head"><h3>主动探测 · ModelTrace（WS 满血验证）</h3><small>真实打上游 · 消耗额度</small></div><div class="settings-body"><div class="field-row"><label class="field" for="mtModel">模型<input id="mtModel" value="gpt-6-astra"></label><label class="field" for="mtPath">验证路径<select id="mtPath"><option value="fc">FC 路径（验票本身满血）</option><option value="client">客户端路径（CPA 出口，验真实满血）</option><option value="bridge">桥接路径（FC 满血桥接·方案 B）</option></select></label><label class="field" for="mtSource">铸票源<select id="mtSource"><option value="fc">FC（阿里云函数）</option><option value="relay">本地 relay</option><option value="legacy">legacy（顶层 url）</option></select></label></div><div class="field-row"><label class="field">账号（勾选；不勾=自动取第一个可用；勾多个=各账号同时探测/打票）<div id="mtAccount" class="checklist"><span class="empty">连接后加载账号…</span></div></label><label class="field" for="mtTurns">探测次数<input id="mtTurns" type="number" min="1" max="10" value="3"></label></div><label class="field" for="mtApiKey">业务 api-key（仅客户端路径需要，走 CPA 本机回环鉴权）<input id="mtApiKey" type="password" autocomplete="off" placeholder="path=client 时填;不保存"></label><label class="field" for="mtURL">FC 地址覆盖（仅 FC 路径，可选）<input id="mtURL" placeholder="https://…fcapp.run/"></label><div class="settings-actions"><button class="button primary" id="mtRun" type="button">运行探测</button><button class="button" id="mtSweep" type="button">扫描满血网关</button></div><p class="help">对模型输出做**行为指纹**判定真实模型,不看声明标签。两条路径分开验:<b>FC 路径</b>=经 FC 铸票+回放,验票本身满血;<b>客户端路径</b>=插件本机回环打 CPA 业务端点(需 api-key),走真实客户端出口,验客户端实际拿到的是否满血。指纹匹配=真满血,不匹配=被降级(如实际 luna)。烧额度,结果只代表这几轮。</p><div id="mtResult" class="logs" style="margin-top:10px"></div></div></section>
 <div class="layout"><div><section class="card"><div class="card-head"><h3>全局路由池</h3><small id="poolHead">尚未读取</small></div>
 <p class="help" id="fillLine" style="padding:0 18px">FC 灌池：后台用探测账号逐个打票，把合格的 __cflb/__oailb 灌进全局池，供所有账号业务请求复用。可用与否随窗口起伏，就绪不等于满血鉴定。</p>
 <div class="table-wrap"><table><thead><tr><th>目标网关</th><th>来源</th><th>状态</th><th>剩余有效期</th><th>已存活</th></tr></thead><tbody id="poolRows"></tbody></table></div>
@@ -66,7 +72,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 <label class="field" for="relayUrl">本机 relay 地址<input id="relayUrl" type="url" placeholder="http://127.0.0.1:9101/" autocomplete="off" spellcheck="false"><small>本机打票 relay 入口；住宅动态代理出口在 relay 内部配置（MINT_UPSTREAM_PROXY），不在这里填。</small></label>
 <label class="field" for="relayProxyUrl">relay 前置代理 / 可选<input id="relayProxyUrl" type="url" placeholder="一般留空" autocomplete="off" spellcheck="false"><small>只代理“插件 → 本机 relay”，通常留空。</small></label>
 <label class="field" for="poolFillIntervalMs">灌池间隔 / 毫秒<input id="poolFillIntervalMs" type="number" min="1000" max="3600000" step="1000" value="90000"><small>两轮灌池之间的等待；过小会加速烧号，建议不低于账号标记拉取周期（约 250 秒）。</small></label>
-<label class="field" for="mintAccounts" style="margin-top:14px">打票账号（灌池）：只用选中的账号打票灌池，其他账号不打票；打到的 cookie 全池共用。<b>不选=全部账号</b><select id="mintAccounts" multiple size="5"></select></label>
+<label class="field" style="margin-top:14px">打票账号（灌池）：勾选的账号才打票灌池，其他账号不打票；打到的 cookie 全池共用。<b>不勾=全部账号</b><div id="mintAccounts" class="checklist"><span class="empty">连接后加载账号…</span></div></label>
 <div class="settings-actions"><button class="button" id="saveMintAccounts" type="button">保存打票账号</button><span id="mintAccountsState" class="tiny muted"></span></div>
 <label class="switchline" style="margin-top:14px" for="poolFill">灌池（旧版单源）<input id="poolFill" type="checkbox" role="switch"></label>
 <span class="help">兼容旧配置：仅当上面两个源都关闭时，才用“云函数地址”作为单一灌池源。新配置请用上面两个源。</span>
@@ -83,7 +89,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </fieldset></form>
 <div class="note">总次数、总时限和轮间冷却由 FC 配置，不在此处修改；插件任务超时不替代云端限制。</div>
 </aside></div>
-<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260926-sid-acct</span><span>云端打票 · 双源灌池 · 主动探测</span></footer>
+<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260926-checkbox</span><span>云端打票 · 双源灌池 · 主动探测</span></footer>
 </main>
 <script>
 'use strict';
@@ -206,34 +212,42 @@ function showStatus(data){
  fillMintAccounts(data.modeltrace_accounts,data.mint_accounts);
  renderRows();renderPool();if(follow)renderLogs();
 }
+// 勾选列表:容器内每个账号一个 checkbox。checklistValues 读勾选值。
+function checklistValues(box){return box?Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(c=>c.value):[];}
+function renderChecklist(box,list,checkedSet){
+ box.replaceChildren();
+ const names=Array.isArray(list)?list:[];
+ if(!names.length){const s=document.createElement('span');s.className='empty';s.textContent='无可用账号';box.appendChild(s);return;}
+ names.forEach(name=>{
+  const lbl=document.createElement('label');lbl.className='checkitem';
+  const cb=document.createElement('input');cb.type='checkbox';cb.value=name;cb.checked=checkedSet.has(name);
+  lbl.appendChild(cb);lbl.appendChild(document.createTextNode(name));box.appendChild(lbl);
+ });
+}
 function fillMintAccounts(list,selected){
- const sel=$('mintAccounts');if(!sel)return;
- const chosen=new Set(Array.isArray(selected)?selected:[]);
- const prev=new Set(Array.from(sel.selectedOptions).map(o=>o.value));
- const useChosen=sel.dataset.init!=='1';
- sel.replaceChildren();
- (Array.isArray(list)?list:[]).forEach(name=>{const o=document.createElement('option');o.value=name;o.textContent=name;o.selected=useChosen?chosen.has(name):prev.has(name);sel.appendChild(o);});
- sel.dataset.init='1';
- const st=$('mintAccountsState');if(st)st.textContent=chosen.size?('当前打票账号：'+chosen.size+' 个'):'当前：全部账号打票';
+ const box=$('mintAccounts');if(!box)return;
+ // 首次用后端保存的 mint_accounts 预勾;之后保留用户当前勾选,避免刷新丢失编辑。
+ const checked=box.dataset.init==='1'?new Set(checklistValues(box)):new Set(Array.isArray(selected)?selected:[]);
+ renderChecklist(box,list,checked);
+ box.dataset.init='1';
+ const savedN=(Array.isArray(selected)?selected:[]).length;
+ const st=$('mintAccountsState');if(st)st.textContent=savedN?('当前打票账号：'+savedN+' 个'):'当前：全部账号打票';
 }
 async function saveMintAccounts(){
  if(!connected){message('请先连接管理接口。',true);return;}
- const sel=$('mintAccounts');const chosen=Array.from(sel.selectedOptions).map(o=>o.value);
- if(!window.confirm(chosen.length?('设为只用这 '+chosen.length+' 个账号打票灌池？其他账号不再打票（cookie 仍全池共用）。'):'清空打票账号选择＝改回全部账号打票？'))return;
+ const chosen=checklistValues($('mintAccounts'));
+ if(!window.confirm(chosen.length?('设为只用这 '+chosen.length+' 个账号打票灌池？其他账号不再打票（cookie 仍全池共用）。'):'不勾任何账号＝改回全部账号打票？'))return;
  const params=new URLSearchParams();params.set('fields','mint_accounts');params.set('confirm','1');chosen.forEach(a=>params.append('mint_account',a));
  try{
   const resp=await fetch(OPSSCOPE+'?'+params.toString(),{method:'GET',cache:'no-store'});
   if(!resp.ok){const d=await resp.json().catch(()=>({}));throw new Error(d.error||('HTTP '+resp.status));}
+  $('mintAccounts').dataset.init='';// 让下次刷新用后端返回的最新 mint_accounts 预勾
   message(chosen.length?('已设打票账号：'+chosen.length+' 个。'):'已改回全部账号打票。');refresh();
  }catch(e){message('保存打票账号失败：'+e.message,true);}
 }
 function fillMtAccounts(list){
- const sel=$('mtAccount');if(!sel)return;
- const cur=new Set(Array.from(sel.selectedOptions).map(o=>o.value));
- sel.replaceChildren();
- const auto=document.createElement('option');auto.value='';auto.textContent='自动（第一个可用）';sel.appendChild(auto);
- (Array.isArray(list)?list:[]).forEach(name=>{const o=document.createElement('option');o.value=name;o.textContent=name;sel.appendChild(o);});
- Array.from(sel.options).forEach(o=>{o.selected=cur.has(o.value);});
+ const box=$('mtAccount');if(!box)return;
+ renderChecklist(box,list,new Set(checklistValues(box)));// 保留当前勾选
 }
 function pathLabelOf(p){return p==='client'?'客户端路径(CPA 出口)':p==='bridge'?'桥接路径(FC 满血桥接)':'FC 路径(验票)';}
 function renderMtInto(box,r){
@@ -267,7 +281,7 @@ async function runModeltrace(){
  if(!connected){message('请先连接管理接口。',true);return;}
  if(busy)return;
  const turns=Math.max(1,Math.min(10,Number($('mtTurns').value)||3));
- const accounts=Array.from($('mtAccount').selectedOptions).map(o=>o.value).filter(v=>v!=='');
+ const accounts=checklistValues($('mtAccount')).filter(v=>v!=='');
  const body={model:$('mtModel').value.trim()||'gpt-6-astra',source:$('mtSource').value,path:$('mtPath').value,turns,accounts,account:accounts[0]||'',url:$('mtURL').value.trim(),api_key:$('mtApiKey').value.trim()};
  const multi=accounts.length>1;
  busy=true;$('mtRun').disabled=true;$('mtResult').replaceChildren(text('p',`探测中…（真实打上游${multi?('，'+accounts.length+' 个账号并发'):''}，最多约 ${turns} 轮，请稍候）`,'empty'));

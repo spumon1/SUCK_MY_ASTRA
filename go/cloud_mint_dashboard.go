@@ -12,7 +12,7 @@ import (
 )
 
 const routeCloudDashboardStatus = "/codex-turn-state/cloud-status"
-const cloudDashboardBuild = "cloud-mint-ui-20260926-sid-acct"
+const cloudDashboardBuild = "cloud-mint-ui-20260926-checkbox"
 const cloudDashboardLogLimit = 80
 
 type cloudDashboardLog struct {

@@ -43,17 +43,9 @@ resources:
         # transparent = 完全关闭 X-Relay-Mint 打票,所有请求只做透明中继。
         # 不设置时兼容旧行为(mint):普通请求透明中继,带 X-Relay-Mint 才打票。
         RELAY_MODE: ${env('RELAY_MODE')}
-        # 打票上游住宅代理:FC 连 chatgpt 走此出口(数据中心直连拿不到满血)。
-        # 部署时用 shell 注入,别写进本文件:export MINT_UPSTREAM_PROXY='socks5h://user:pass@host:port'
-        MINT_UPSTREAM_PROXY: ${env('MINT_UPSTREAM_PROXY')}
-        # 不限制网关:出口每次落到不同 unified-N,满血由 served_model/行为判定而非网关号。
-        # 每次部署自动带上,无需手动加。要定向某网关改成 unified-N 即可。
-        MINT_GATEWAY: any
-        # 动态住宅代理每次连接换出口 IP(FC 模式必开)。
-        MINT_ROTATE_SID: '1'
-        # 满血门:打到票后带该 turn-state 再发一轮,上游不下发新 state(或回同一个)=
-        # 满血才收,下发不同新 state = 已降级则拒。只收满血票进池。
-        MINT_VERIFY_STATE: '1'
+        # 已回到原始版本行为:不设住宅代理(直接用 FC 部署地域 us-west-1 阿里云出口)、
+        # 不开满血门(MINT_VERIFY_STATE)、不轮换出口。要恢复满血机制:部署前
+        # export MINT_UPSTREAM_PROXY=... 并把 MINT_VERIFY_STATE/MINT_ROTATE_SID 加回。
         # 打票(X-Relay-Mint)可选配置,默认值见 index.js / README.md:
         # MINT_GATEWAY: unified-88          # 目标网关,any 不查
         # MINT_MODELS: gpt-6-sol,gpt-6-luna,gpt-6-astra  # 打票模型集,逗号分隔
