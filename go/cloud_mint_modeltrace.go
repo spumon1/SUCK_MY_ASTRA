@@ -326,16 +326,21 @@ func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, ur
 			return report, nil
 		default:
 		}
-		// grade 轮偶发传输/上游错误(旋转出口坏 IP、ws_closed、ws_error_event),
-		// 重试最多 3 次,拿到输出即止 —— 让单次测试更可靠。
+		// grade 轮:第 1 次用和铸票同一出口(理想的"票从出生出口去用");若该出口
+		// 传输失败(坏 IP/SSL/掉线),后续重试换一个新的住宅出口,直到拿到能用的出口
+		// 出结果 —— 即"只用能用的出口"。最多 4 次。
 		var gr gradeResult
 		var gErr error
-		for attempt := 0; attempt < 3; attempt++ {
+		for attempt := 0; attempt < 4; attempt++ {
 			if ctx.Err() != nil {
 				break
 			}
+			gsid := sid
+			if attempt > 0 {
+				gsid = modeltraceSid() // 换一个新出口重试(每次一个稳定的新粘性会话)
+			}
 			gctx, gcancel := context.WithTimeout(ctx, perTurn)
-			gr, gErr = cloudGradeTurn(gctx, target.URL, key, creds2, model, entry.Ticket, pairCookie, ch.Prompt, proxyURL, sid)
+			gr, gErr = cloudGradeTurn(gctx, target.URL, key, creds2, model, entry.Ticket, pairCookie, ch.Prompt, proxyURL, gsid)
 			gcancel()
 			if gErr == nil && gr.OutputText != "" {
 				break
