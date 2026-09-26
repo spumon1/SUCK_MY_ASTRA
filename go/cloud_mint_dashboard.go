@@ -12,7 +12,7 @@ import (
 )
 
 const routeCloudDashboardStatus = "/codex-turn-state/cloud-status"
-const cloudDashboardBuild = "cloud-mint-ui-20260926-fp2paths"
+const cloudDashboardBuild = "cloud-mint-ui-20260926-gwsweep"
 const cloudDashboardLogLimit = 80
 
 type cloudDashboardLog struct {

@@ -55,6 +55,7 @@ type modeltraceReport struct {
 	Account           string                 `json:"account"`
 	Transport         string                 `json:"transport"`
 	DeclaredServed    string                 `json:"declared_served"`    // 铸票那轮声明的模型
+	MintGateway       string                 `json:"mint_gateway"`       // 这张票落在哪个网关(unified-N)
 	TicketFingerprint string                 `json:"ticket_fingerprint"` // 被验证的那张票(脱敏)
 	Turns             []modeltraceTurn       `json:"turns"`
 	Fingerprint       *modeltraceFingerprint `json:"fingerprint,omitempty"`
@@ -231,7 +232,7 @@ func modeltraceTarget(c cloudMintConfig, source, urlOverride string) (cloudFillT
 //     模型输出的数字;
 //  3) 把全部有效输出交给行为指纹分类器(bank),判定"实际是哪个模型",不看声明标签。
 // account 为空则取第一个可用 probe 账号,否则按 auth_id 精确选。
-func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, urlOverride, account, path, apiKey, cpaURL string, turns int) (modeltraceReport, error) {
+func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, urlOverride, account, path, apiKey, cpaURL, gateway string, turns int) (modeltraceReport, error) {
 	if path == "client" {
 		// Test B:走 CPA 本机回环的真实客户端路径,不铸票、不碰 FC。
 		return runClientPathProbe(ctx, cfg, model, apiKey, cpaURL, turns)
@@ -277,6 +278,9 @@ func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, ur
 	scfg := cfg.CloudMint
 	scfg.URL = target.URL
 	scfg.Transport = "websocket"
+	if gateway != "" {
+		scfg.Gateway = gateway // #2:测试固定网关铸票(留空沿用配置,通常 any)
+	}
 	perTurn := time.Duration(cfg.CloudMint.TimeoutMS) * time.Millisecond
 	if perTurn <= 0 {
 		perTurn = 90 * time.Second
@@ -291,6 +295,7 @@ func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, ur
 		return report, nil
 	}
 	report.DeclaredServed = model
+	report.MintGateway = entry.Gateway
 	report.TicketFingerprint = cloudFingerprint(entry.Ticket)
 	pairCookie := cloudPairCookie(entry.Cookies)
 
@@ -335,6 +340,7 @@ func handleModeltrace(body []byte) pluginapi.ManagementResponse {
 		Path    string `json:"path"`
 		APIKey  string `json:"api_key"`
 		CpaURL  string `json:"cpa_url"`
+		Gateway string `json:"gateway"`
 	}
 	if len(strings.TrimSpace(string(body))) > 0 {
 		if err := json.Unmarshal(body, &params); err != nil {
@@ -391,7 +397,7 @@ func handleModeltrace(body []byte) pluginapi.ManagementResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), perTurn*time.Duration(turns+1)+60*time.Second)
 	defer cancel()
 
-	report, err := runModeltraceProbe(ctx, cfg, model, source, params.URL, account, path, params.APIKey, params.CpaURL, turns)
+	report, err := runModeltraceProbe(ctx, cfg, model, source, params.URL, account, path, params.APIKey, params.CpaURL, params.Gateway, turns)
 	if err != nil {
 		return managementError(http.StatusBadGateway, err.Error())
 	}

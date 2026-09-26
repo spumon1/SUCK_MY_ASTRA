@@ -62,6 +62,8 @@ const (
 	// routeModeltrace 主动 WS 探针:对某个灌池源连打 N 轮,报每轮上游实际 served
 	// 模型(满血/降级)。带 key 的 POST,烧额度,和 selftest 一档。
 	routeModeltrace = "/codex-turn-state/modeltrace"
+	// routeGatewaySweep 多轮 FC modeltrace,按落点网关聚合满血率,找满血网关。
+	routeGatewaySweep = "/codex-turn-state/gateway-sweep"
 	// routeDashboard is relative to the plugin's own resource prefix, so the
 	// browser-facing URL is /v0/resource/plugins/codex-turn-state/dashboard.
 	routeDashboard = "/dashboard"
@@ -172,6 +174,7 @@ func managementRegister(raw []byte) ([]byte, error) {
 			{Method: http.MethodPost, Path: routeBucketsClear},
 			{Method: http.MethodPost, Path: routeSelftest},
 			{Method: http.MethodPost, Path: routeModeltrace},
+			{Method: http.MethodPost, Path: routeGatewaySweep},
 			// No Menu, like every other data route here. A GET route that
 			// declares one is re-registered under the unauthenticated resource
 			// prefix (routeDeclaresLegacyMenuResource in the host), which on this
@@ -298,6 +301,11 @@ func managementHandle(raw []byte) ([]byte, error) {
 			return okEnvelope(managementError(http.StatusMethodNotAllowed, "modeltrace is a POST route"))
 		}
 		return okEnvelope(handleModeltrace(req.Body))
+	case hasRouteSuffix(path, routeGatewaySweep):
+		if method != http.MethodPost {
+			return okEnvelope(managementError(http.StatusMethodNotAllowed, "gateway-sweep is a POST route"))
+		}
+		return okEnvelope(handleGatewaySweep(req.Body))
 	case hasRouteSuffix(path, routeOpsChoices):
 		// Deliberately not folded into the handleOpsResource group below. That
 		// function's contract is "everything past this point changes state or

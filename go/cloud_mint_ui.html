@@ -29,12 +29,12 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </head>
 <body>
 <main class="shell">
-<div class="demo"><b>cloud-mint-ui-20260926-fp2paths</b><span id="connectionState" role="status">尚未连接管理接口</span></div>
+<div class="demo"><b>cloud-mint-ui-20260926-gwsweep</b><span id="connectionState" role="status">尚未连接管理接口</span></div>
 <section class="card" style="margin-top:16px"><div class="settings-body"><label class="field" for="managementKey">CPA 管理密钥（不是 RELAY_KEY）<input id="managementKey" type="password" autocomplete="off" placeholder="只在当前页面内存使用，不保存到浏览器"></label><div class="settings-actions"><button class="button primary" id="connect" type="button">连接管理接口</button><button class="button" id="disconnect" type="button">断开</button></div><p class="help">只读取脱敏任务和日志；配置保存由 CPA 管理接口鉴权并写入配置文件。</p></div></section>
 <header class="top"><div class="brand"><div class="logo" aria-hidden="true"><svg width="23" height="23" viewBox="0 0 24 24" fill="none"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4z" fill="currentColor"/><path d="M14 17h6M17 14v6" stroke="currentColor" stroke-width="2"/></svg></div><div><h1>云端打票</h1><p>CLOUD MINT · CPA NATIVE PLUGIN</p></div></div><div class="actions"><span class="pill" id="enabledStatus">状态未知</span><a class="button" href="#settings">打票设置</a><button class="button" id="reset" type="button">刷新状态</button></div></header>
 <section class="card" id="capabilityScope" aria-label="能力边界"><div class="settings-body"><strong>有限取票＋路由复用＋协议校验</strong><p class="help">取票受总次数与总时限约束；复用云端缓存中仍有效的目标路由 Cookie；校验格式、有效期及上游模型声明。</p><p class="help">780 仅是预期格式长度，节点编号和模型名称不证明模型实际能力。缓存就绪不代表质量评测通过。</p></div></section>
 <section class="stats" aria-label="全局池与灌池实时状态"><div class="stat"><label>池内有效 pair</label><strong id="poolUsable">—</strong><p id="poolTotalNote">随窗口起伏，并非固定库存</p></div><div class="stat"><label>覆盖网关数</label><strong id="poolGateways">—</strong><p>可用 pair 覆盖的 unified-N 数</p></div><div class="stat"><label>上轮灌池入池</label><strong id="fillPooled">—</strong><p id="fillAttemptNote">FC 逐账号逐模型打票</p></div><div class="stat"><label>灌池间隔</label><strong id="fillInterval">—</strong><p id="fillStateNote">灌池循环状态</p></div></section>
-<section class="card" id="modeltraceCard" aria-label="主动探测 ModelTrace"><div class="card-head"><h3>主动探测 · ModelTrace（WS 满血验证）</h3><small>真实打上游 · 消耗额度</small></div><div class="settings-body"><div class="field-row"><label class="field" for="mtModel">模型<input id="mtModel" value="gpt-6-astra"></label><label class="field" for="mtPath">验证路径<select id="mtPath"><option value="fc">FC 路径（验票本身满血）</option><option value="client">客户端路径（CPA 出口，验真实满血）</option></select></label><label class="field" for="mtSource">铸票源<select id="mtSource"><option value="fc">FC（阿里云函数）</option><option value="relay">本地 relay</option><option value="legacy">legacy（顶层 url）</option></select></label></div><div class="field-row"><label class="field" for="mtAccount">账号<select id="mtAccount"><option value="">自动（第一个可用）</option></select></label><label class="field" for="mtTurns">探测次数<input id="mtTurns" type="number" min="1" max="10" value="3"></label></div><label class="field" for="mtApiKey">业务 api-key（仅客户端路径需要，走 CPA 本机回环鉴权）<input id="mtApiKey" type="password" autocomplete="off" placeholder="path=client 时填;不保存"></label><label class="field" for="mtURL">FC 地址覆盖（仅 FC 路径，可选）<input id="mtURL" placeholder="https://…fcapp.run/"></label><div class="settings-actions"><button class="button primary" id="mtRun" type="button">运行 WS 探测</button></div><p class="help">对模型输出做**行为指纹**判定真实模型,不看声明标签。两条路径分开验:<b>FC 路径</b>=经 FC 铸票+回放,验票本身满血;<b>客户端路径</b>=插件本机回环打 CPA 业务端点(需 api-key),走真实客户端出口,验客户端实际拿到的是否满血。指纹匹配=真满血,不匹配=被降级(如实际 luna)。烧额度,结果只代表这几轮。</p><div id="mtResult" class="logs" style="margin-top:10px"></div></div></section>
+<section class="card" id="modeltraceCard" aria-label="主动探测 ModelTrace"><div class="card-head"><h3>主动探测 · ModelTrace（WS 满血验证）</h3><small>真实打上游 · 消耗额度</small></div><div class="settings-body"><div class="field-row"><label class="field" for="mtModel">模型<input id="mtModel" value="gpt-6-astra"></label><label class="field" for="mtPath">验证路径<select id="mtPath"><option value="fc">FC 路径（验票本身满血）</option><option value="client">客户端路径（CPA 出口，验真实满血）</option></select></label><label class="field" for="mtSource">铸票源<select id="mtSource"><option value="fc">FC（阿里云函数）</option><option value="relay">本地 relay</option><option value="legacy">legacy（顶层 url）</option></select></label></div><div class="field-row"><label class="field" for="mtAccount">账号<select id="mtAccount"><option value="">自动（第一个可用）</option></select></label><label class="field" for="mtTurns">探测次数<input id="mtTurns" type="number" min="1" max="10" value="3"></label></div><label class="field" for="mtApiKey">业务 api-key（仅客户端路径需要，走 CPA 本机回环鉴权）<input id="mtApiKey" type="password" autocomplete="off" placeholder="path=client 时填;不保存"></label><label class="field" for="mtURL">FC 地址覆盖（仅 FC 路径，可选）<input id="mtURL" placeholder="https://…fcapp.run/"></label><div class="settings-actions"><button class="button primary" id="mtRun" type="button">运行探测</button><button class="button" id="mtSweep" type="button">扫描满血网关</button></div><p class="help">对模型输出做**行为指纹**判定真实模型,不看声明标签。两条路径分开验:<b>FC 路径</b>=经 FC 铸票+回放,验票本身满血;<b>客户端路径</b>=插件本机回环打 CPA 业务端点(需 api-key),走真实客户端出口,验客户端实际拿到的是否满血。指纹匹配=真满血,不匹配=被降级(如实际 luna)。烧额度,结果只代表这几轮。</p><div id="mtResult" class="logs" style="margin-top:10px"></div></div></section>
 <div class="layout"><div><section class="card"><div class="card-head"><h3>全局路由池</h3><small id="poolHead">尚未读取</small></div>
 <p class="help" id="fillLine" style="padding:0 18px">FC 灌池：后台用探测账号逐个打票，把合格的 __cflb/__oailb 灌进全局池，供所有账号业务请求复用。可用与否随窗口起伏，就绪不等于满血鉴定。</p>
 <div class="table-wrap"><table><thead><tr><th>目标网关</th><th>来源</th><th>状态</th><th>剩余有效期</th><th>已存活</th></tr></thead><tbody id="poolRows"></tbody></table></div>
@@ -81,7 +81,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </fieldset></form>
 <div class="note">总次数、总时限和轮间冷却由 FC 配置，不在此处修改；插件任务超时不替代云端限制。</div>
 </aside></div>
-<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260926-fp2paths</span><span>云端打票 · 双源灌池 · 主动探测</span></footer>
+<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260926-gwsweep</span><span>云端打票 · 双源灌池 · 主动探测</span></footer>
 </main>
 <script>
 'use strict';
@@ -89,6 +89,7 @@ const PLUGIN_ID=document.querySelector('meta[name="cpa-plugin-id"]').content;
 const STATUS='/v0/management/'+encodeURIComponent(PLUGIN_ID)+'/cloud-status';
 const CONFIG='/v0/management/plugins/'+encodeURIComponent(PLUGIN_ID)+'/config';
 const MODELTRACE='/v0/management/'+encodeURIComponent(PLUGIN_ID)+'/modeltrace';
+const GWSWEEP='/v0/management/'+encodeURIComponent(PLUGIN_ID)+'/gateway-sweep';
 const $=id=>document.getElementById(id);
 const fields={enabled:'enabled',poolFill:'pool_fill',endpoint:'url',proxyURL:'proxy_url',proxyEnv:'proxy_env',mintTransport:'transport',gateway:'gateway',ticketLength:'ticket_length',ttlSeconds:'ttl_seconds',poolFillIntervalMs:'pool_fill_interval_ms',keyEnv:'key_env',waitMs:'wait_ms',timeoutMs:'timeout_ms'};
 const defaults={enabled:false,pool_fill:false,url:'',proxy_url:'',proxy_env:'',transport:'sse',gateway:'unified-88',ticket_length:780,ttl_seconds:240,pool_fill_interval_ms:90000,key_env:'CPA_RELAY_KEY',wait_ms:2000,timeout_ms:90000,fc:{enabled:false,url:'',proxy_url:'',proxy_env:''},relay:{enabled:false,url:'',proxy_url:'',proxy_env:''}};
@@ -292,6 +293,31 @@ $('discardSettings').addEventListener('click',()=>{fillForm(saved);message('已�
 $('follow').addEventListener('click',()=>{follow=!follow;$('follow').setAttribute('aria-pressed',String(follow));$('follow').textContent=follow?'● 跟随最新':'○ 已暂停跟随';if(follow)refresh();});
 $('reset').addEventListener('click',refresh);
 $('mtRun').addEventListener('click',runModeltrace);
+function renderSweep(r){
+ const box=$('mtResult');box.replaceChildren();
+ box.appendChild(text('p',`网关扫描 · ${r.model} · ${r.rounds} 轮 · 满血网关: ${r.best||'无'}`));
+ if(r.best_note)box.appendChild(text('p',r.best_note));
+ (Array.isArray(r.gateways)?r.gateways:[]).forEach(g=>{
+  const preds=Object.entries(g.predictions||{}).map(([k,v])=>k+'×'+v).join('、');
+  box.appendChild(text('p',`${g.gateway} → 满血 ${g.full_strength}/${g.rounds} · ${preds}`,g.full_strength>0?'':'empty'));
+ });
+}
+async function runSweep(){
+ if(!connected){message('请先连接管理接口。',true);return;}
+ if(busy)return;
+ const turns=Math.max(1,Math.min(10,Number($('mtTurns').value)||2));
+ const body={model:$('mtModel').value.trim()||'gpt-6-astra',turns,rounds:6};
+ busy=true;$('mtSweep').disabled=true;$('mtResult').replaceChildren(text('p','扫描中…(多轮真实打上游,较慢,请耐心等)','empty'));
+ const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),900000);
+ try{
+  const resp=await fetch(GWSWEEP,{method:'POST',cache:'no-store',signal:ctrl.signal,headers:{Authorization:'Bearer '+credential,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const data=await resp.json().catch(()=>({}));
+  if(!resp.ok)throw new Error((data&&data.error)||('HTTP '+resp.status));
+  renderSweep(data);message('网关扫描完成:满血网关 '+(data.best||'无')+'。');
+ }catch(e){$('mtResult').replaceChildren(text('p',e.name==='AbortError'?'扫描超时。':e.message,'empty'));message('扫描失败:'+(e.name==='AbortError'?'超时':e.message),true);}
+ finally{clearTimeout(timer);busy=false;$('mtSweep').disabled=false;}
+}
+$('mtSweep').addEventListener('click',runSweep);
 renderRows();renderPool();renderLogs();setInterval(refresh,3000);
 </script>
 </body>

@@ -473,6 +473,7 @@ var authenticatedRoutes = []string{
 	"POST /codex-turn-state/buckets/clear",
 	"POST /codex-turn-state/selftest",
 	"POST /codex-turn-state/modeltrace",
+	"POST /codex-turn-state/gateway-sweep",
 }
 
 // The registration does not vary by role -- managementRegister reads nothing
