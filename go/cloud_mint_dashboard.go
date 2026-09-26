@@ -12,7 +12,7 @@ import (
 )
 
 const routeCloudDashboardStatus = "/codex-turn-state/cloud-status"
-const cloudDashboardBuild = "cloud-mint-ui-20260926-gwsweep"
+const cloudDashboardBuild = "cloud-mint-ui-20260926-sid-acct"
 const cloudDashboardLogLimit = 80
 
 type cloudDashboardLog struct {
@@ -122,11 +122,8 @@ func handleCloudDashboardStatus() pluginapi.ManagementResponse {
 	logs := append([]cloudDashboardLog{}, cloudDashboardLogs.items...)
 	cloudDashboardLogs.Unlock()
 	sort.SliceStable(logs, func(i, j int) bool { return logs[i].At.Before(logs[j].At) })
-	// 主动探针可选账号:只给指纹(不暴露原始 auth_id/邮箱),面板回传指纹,由 handler 映射。
-	mtAccounts := make([]string, 0, len(cfg.ProbeAccounts))
-	for _, a := range cfg.ProbeAccounts {
-		mtAccounts = append(mtAccounts, cloudFingerprint(a))
-	}
+	// 主动探针可选账号:直接给真实账号名(probe_accounts),面板下拉按名选、回传名。
+	mtAccounts := append([]string(nil), cfg.ProbeAccounts...)
 	return jsonResponse(http.StatusOK, map[string]any{
 		"plugin_id": currentCloudPluginID(), "build": cloudDashboardBuild, "enabled": cfg.CloudMint.Enabled, "role": cfg.Role, "dry_run": cfg.DryRun,
 		"modeltrace_accounts": mtAccounts,

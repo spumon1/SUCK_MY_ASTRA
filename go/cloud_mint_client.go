@@ -66,6 +66,9 @@ func doCloudMint(ctx context.Context, work cloudMintWork) (cloudMintResult, int,
 	if work.seedCookie != "" {
 		req.Header.Set("Cookie", work.seedCookie)
 	}
+	if work.sid != "" {
+		req.Header.Set("X-Mint-Sid", work.sid)
+	}
 	transport, err := newCloudMintTransport(work.proxyURL)
 	if err != nil {
 		return cloudMintResult{}, 0, err

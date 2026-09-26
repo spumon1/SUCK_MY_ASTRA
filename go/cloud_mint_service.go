@@ -68,6 +68,7 @@ type cloudMintWork struct {
 	model, key, id, group string
 	proxyURL              string
 	seedCookie            string
+	sid                   string // 钉住住宅出口 sid(modeltrace 让铸票+grade 同出口);空=沿用配置(旋转)
 }
 
 // 摘要包含账号、实际凭据版本、模型、传输和验收配置；缓存里不放 Access Token。

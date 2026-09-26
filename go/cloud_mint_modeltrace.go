@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,15 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+// modeltraceSid 生成一个字母数字 sid(≤32),用于钉住本次验证的住宅出口。
+func modeltraceSid() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "mtprobe0"
+	}
+	return fmt.Sprintf("%x", b[:])
+}
 
 // modeltrace 主动探针:用池账号对某个灌池源(默认 fc)以 WS 对目标模型连打 N 轮,
 // 报出每轮上游实际执行(served)的模型。满血 = served == 请求模型;降级则 served
@@ -71,7 +81,7 @@ type gradeResult struct {
 
 // cloudGradeTurn 让 FC 回放一张票发一轮真实 WS 请求(带挑战),回传模型输出文本。
 // 这是"两轮制"的第二轮:第一轮铸票拿到 token+pair,这里用它们发真实客户端式请求。
-func cloudGradeTurn(ctx context.Context, cfgURL, key string, creds cloudMintCredentials, model, token, pairCookie, prompt, proxyURL string) (gradeResult, error) {
+func cloudGradeTurn(ctx context.Context, cfgURL, key string, creds cloudMintCredentials, model, token, pairCookie, prompt, proxyURL, sid string) (gradeResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfgURL, nil)
 	if err != nil {
 		return gradeResult{}, errors.New("invalid cloud endpoint")
@@ -87,6 +97,9 @@ func cloudGradeTurn(ctx context.Context, cfgURL, key string, creds cloudMintCred
 	}
 	if pairCookie != "" {
 		req.Header.Set("Cookie", pairCookie)
+	}
+	if sid != "" {
+		req.Header.Set("X-Mint-Sid", sid)
 	}
 	transport, err := newCloudMintTransport(proxyURL)
 	if err != nil {
@@ -272,7 +285,7 @@ func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, ur
 		}
 		return report, errors.New("没有可用的 probe 账号凭据")
 	}
-	report.Account = cloudFingerprint(cred.name)
+	report.Account = cred.name
 	creds2 := cloudMintCredentials{AuthID: cred.name, AccessToken: cred.accessToken, AccountID: cred.accountID}
 
 	scfg := cfg.CloudMint
@@ -286,9 +299,13 @@ func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, ur
 		perTurn = 90 * time.Second
 	}
 
+	// 本次验证钉一个住宅出口 sid:铸票与后续 grade 走同一个出口 IP,票才是"从它出生
+	// 的出口去用",指纹结果才不被出口不一致污染。
+	sid := modeltraceSid()
+
 	// 第一轮:铸票(requestCloudMint 已校验 served==请求模型,拿到合格 token + pair)。
 	mctx, cancel := context.WithTimeout(ctx, perTurn)
-	entry, mErr := requestCloudMint(mctx, cloudMintWork{cfg: scfg, creds: creds2, model: model, key: key, proxyURL: proxyURL})
+	entry, mErr := requestCloudMint(mctx, cloudMintWork{cfg: scfg, creds: creds2, model: model, key: key, proxyURL: proxyURL, sid: sid})
 	cancel()
 	if mErr != nil {
 		report.Note = "铸票失败(无票可验证): " + mErr.Error()
@@ -309,9 +326,21 @@ func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, ur
 			return report, nil
 		default:
 		}
-		gctx, gcancel := context.WithTimeout(ctx, perTurn)
-		gr, gErr := cloudGradeTurn(gctx, target.URL, key, creds2, model, entry.Ticket, pairCookie, ch.Prompt, proxyURL)
-		gcancel()
+		// grade 轮偶发传输/上游错误(旋转出口坏 IP、ws_closed、ws_error_event),
+		// 重试最多 3 次,拿到输出即止 —— 让单次测试更可靠。
+		var gr gradeResult
+		var gErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if ctx.Err() != nil {
+				break
+			}
+			gctx, gcancel := context.WithTimeout(ctx, perTurn)
+			gr, gErr = cloudGradeTurn(gctx, target.URL, key, creds2, model, entry.Ticket, pairCookie, ch.Prompt, proxyURL, sid)
+			gcancel()
+			if gErr == nil && gr.OutputText != "" {
+				break
+			}
+		}
 		turn := modeltraceTurn{DeclaredServed: gr.Served, OutputLen: len(gr.OutputText)}
 		if gErr != nil {
 			turn.Error = gErr.Error()
@@ -374,11 +403,11 @@ func handleModeltrace(body []byte) pluginapi.ManagementResponse {
 	cfg := state.config
 	state.mu.Unlock()
 
-	// 面板只传账号指纹(不暴露原始 auth_id / 邮箱),这里映射回真实账号。空 = 取第一个。
+	// 面板传真实账号名(也兼容旧的指纹传参)。空 = 取第一个可用。
 	account := ""
 	if params.Account != "" {
 		for _, a := range cfg.ProbeAccounts {
-			if cloudFingerprint(a) == params.Account {
+			if a == params.Account || cloudFingerprint(a) == params.Account {
 				account = a
 				break
 			}

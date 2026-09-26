@@ -29,7 +29,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </head>
 <body>
 <main class="shell">
-<div class="demo"><b>cloud-mint-ui-20260926-gwsweep</b><span id="connectionState" role="status">尚未连接管理接口</span></div>
+<div class="demo"><b>cloud-mint-ui-20260926-sid-acct</b><span id="connectionState" role="status">尚未连接管理接口</span></div>
 <section class="card" style="margin-top:16px"><div class="settings-body"><label class="field" for="managementKey">CPA 管理密钥（不是 RELAY_KEY）<input id="managementKey" type="password" autocomplete="off" placeholder="只在当前页面内存使用，不保存到浏览器"></label><div class="settings-actions"><button class="button primary" id="connect" type="button">连接管理接口</button><button class="button" id="disconnect" type="button">断开</button></div><p class="help">只读取脱敏任务和日志；配置保存由 CPA 管理接口鉴权并写入配置文件。</p></div></section>
 <header class="top"><div class="brand"><div class="logo" aria-hidden="true"><svg width="23" height="23" viewBox="0 0 24 24" fill="none"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4z" fill="currentColor"/><path d="M14 17h6M17 14v6" stroke="currentColor" stroke-width="2"/></svg></div><div><h1>云端打票</h1><p>CLOUD MINT · CPA NATIVE PLUGIN</p></div></div><div class="actions"><span class="pill" id="enabledStatus">状态未知</span><a class="button" href="#settings">打票设置</a><button class="button" id="reset" type="button">刷新状态</button></div></header>
 <section class="card" id="capabilityScope" aria-label="能力边界"><div class="settings-body"><strong>有限取票＋路由复用＋协议校验</strong><p class="help">取票受总次数与总时限约束；复用云端缓存中仍有效的目标路由 Cookie；校验格式、有效期及上游模型声明。</p><p class="help">780 仅是预期格式长度，节点编号和模型名称不证明模型实际能力。缓存就绪不代表质量评测通过。</p></div></section>
@@ -81,7 +81,7 @@ button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,inpu
 </fieldset></form>
 <div class="note">总次数、总时限和轮间冷却由 FC 配置，不在此处修改；插件任务超时不替代云端限制。</div>
 </aside></div>
-<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260926-gwsweep</span><span>云端打票 · 双源灌池 · 主动探测</span></footer>
+<footer class="foot"><span>正式内嵌页面 · 构建 cloud-mint-ui-20260926-sid-acct</span><span>云端打票 · 双源灌池 · 主动探测</span></footer>
 </main>
 <script>
 'use strict';
@@ -204,13 +204,13 @@ function fillMtAccounts(list){
  const sel=$('mtAccount');if(!sel)return;const cur=sel.value;
  sel.replaceChildren();
  const auto=document.createElement('option');auto.value='';auto.textContent='自动（第一个可用）';sel.appendChild(auto);
- (Array.isArray(list)?list:[]).forEach(fp=>{const o=document.createElement('option');o.value=fp;o.textContent='#'+fp;sel.appendChild(o);});
+ (Array.isArray(list)?list:[]).forEach(name=>{const o=document.createElement('option');o.value=name;o.textContent=name;sel.appendChild(o);});
  sel.value=cur;if(sel.value!==cur)sel.value='';
 }
 function renderMt(r){
  const box=$('mtResult');box.replaceChildren();
  const pathLabel=r.path==='client'?'客户端路径(CPA 出口)':'FC 路径(验票)';
- box.appendChild(text('p',`请求 ${r.model} · ${pathLabel} · ${r.transport||''}${r.account?(' · 账号 #'+r.account):''}${r.ticket_fingerprint?(' · 票 #'+r.ticket_fingerprint):''}`));
+ box.appendChild(text('p',`请求 ${r.model} · ${pathLabel} · ${r.transport||''}${r.account?(' · 账号 '+r.account):''}${r.ticket_fingerprint?(' · 票 #'+r.ticket_fingerprint):''}`));
  const fp=r.fingerprint;
  if(fp){
   const verdict=fp.match?'✅ 指纹匹配(真满血)':'⛔ 指纹不匹配';
