@@ -23,8 +23,9 @@ import (
 // CPA 出口出网),插件在这里只当"客户端"。票不由这里回放,由 CPA 的注入链路负责。
 const wsClientReadCap = 8 << 20
 
-// clientTurnWS 对 CPA 发一轮 WS 业务请求(挑战),返回声明模型与输出文本。
-func clientTurnWS(ctx context.Context, endpoint, apiKey, model, prompt string) (served, output string, err error) {
+// clientTurnWS 对 CPA(或 FC 桥接)发一轮 WS 业务请求(挑战),返回声明模型与输出文本。
+// accountID 非空时带上 Chatgpt-Account-Id 头(FC 桥接铸票需要账号身份)。
+func clientTurnWS(ctx context.Context, endpoint, apiKey, accountID, model, prompt string) (served, output string, err error) {
 	u, err := url.Parse(endpoint)
 	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Host == "" {
 		return "", "", errors.New("invalid ws endpoint")
@@ -78,6 +79,9 @@ func clientTurnWS(ctx context.Context, endpoint, apiKey, model, prompt string) (
 	req.WriteString("Originator: codex-tui\r\n")
 	fmt.Fprintf(&req, "User-Agent: %s\r\n", probeUserAgent)
 	fmt.Fprintf(&req, "Authorization: Bearer %s\r\n", apiKey)
+	if accountID != "" {
+		fmt.Fprintf(&req, "Chatgpt-Account-Id: %s\r\n", accountID)
+	}
 	req.WriteString("\r\n")
 	if _, err := conn.Write([]byte(req.String())); err != nil {
 		return "", "", fmt.Errorf("write handshake: %w", err)

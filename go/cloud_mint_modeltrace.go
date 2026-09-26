@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -50,11 +52,11 @@ type modeltraceCandidate struct {
 
 // 行为指纹结论:对全部有效输出统计归因,得出上游"实际是哪个模型",不看声明标签。
 type modeltraceFingerprint struct {
-	Predicted    string                `json:"predicted"`
-	DisplayName  string                `json:"display_name"`
-	Confidence   float64               `json:"confidence"`
-	Match        bool                  `json:"match"` // 指纹判定 == 请求模型?
-	ValidOutputs int                   `json:"valid_outputs"`
+	Predicted     string                `json:"predicted"`
+	DisplayName   string                `json:"display_name"`
+	Confidence    float64               `json:"confidence"`
+	Match         bool                  `json:"match"` // 指纹判定 == 请求模型?
+	ValidOutputs  int                   `json:"valid_outputs"`
 	TopCandidates []modeltraceCandidate `json:"top_candidates"`
 }
 
@@ -157,7 +159,7 @@ func runClientPathProbe(ctx context.Context, cfg pluginConfig, model, apiKey, cp
 		default:
 		}
 		cctx, ccancel := context.WithTimeout(ctx, perTurn)
-		served, outText, cErr := clientTurnWS(cctx, cpaURL, apiKey, model, ch.Prompt)
+		served, outText, cErr := clientTurnWS(cctx, cpaURL, apiKey, "", model, ch.Prompt)
 		ccancel()
 		turn := modeltraceTurn{DeclaredServed: served, OutputLen: len(outText)}
 		if cErr != nil {
@@ -171,6 +173,86 @@ func runClientPathProbe(ctx context.Context, cfg pluginConfig, model, apiKey, cp
 	}
 	report.applyFingerprint(outputs, model)
 	return report, nil
+}
+
+// runBridgePathProbe 是方案 B 的灰度验证:连 FC 的满血桥接端点
+// (wss://<fc>/k/<relaykey>/backend-api/codex/responses),用所选账号的真实
+// access_token + account_id 发 turns 条业务挑战。FC 在同一连接内用住宅出口铸票、
+// 把满血 turn-state 注入 response.create 帧、双向中继,收集输出做指纹。指纹=astra
+// 即证明客户端经 FC 桥接可得满血。
+func runBridgePathProbe(ctx context.Context, cfg pluginConfig, model, source, urlOverride, account string, turns int) (modeltraceReport, error) {
+	report := modeltraceReport{Model: model, Source: source, Path: "bridge", Transport: "websocket", Turns: []modeltraceTurn{}}
+	target, err := modeltraceTarget(cfg.CloudMint, source, urlOverride)
+	if err != nil {
+		return report, err
+	}
+	key := os.Getenv(cfg.CloudMint.KeyEnv)
+	if key == "" {
+		return report, errors.New("relay key 环境变量未设")
+	}
+	accounts := cfg.ProbeAccounts
+	if account != "" {
+		accounts = []string{account}
+	}
+	var cred probeCredential
+	for _, c := range probeDownloadCreds(ctx, newProbeClient(cfg), accounts, time.Now()) {
+		if c.accessToken == "" {
+			continue
+		}
+		if account == "" || c.name == account {
+			cred = c
+			break
+		}
+	}
+	if cred.accessToken == "" {
+		return report, errors.New("无可用账号凭据(检查 probe_accounts / 账号 access_token)")
+	}
+	report.Account = cred.name
+	bridgeURL, err := bridgeWSURL(target.URL, key)
+	if err != nil {
+		return report, err
+	}
+	perTurn := time.Duration(cfg.CloudMint.TimeoutMS) * time.Millisecond
+	if perTurn <= 0 {
+		perTurn = 120 * time.Second
+	}
+	var outputs []string
+	for _, ch := range generateChallenges(turns) {
+		select {
+		case <-ctx.Done():
+			report.Turns = append(report.Turns, modeltraceTurn{Error: "cancelled"})
+			return report, nil
+		default:
+		}
+		cctx, ccancel := context.WithTimeout(ctx, perTurn)
+		served, outText, cErr := clientTurnWS(cctx, bridgeURL, cred.accessToken, cred.accountID, model, ch.Prompt)
+		ccancel()
+		turn := modeltraceTurn{DeclaredServed: served, OutputLen: len(outText)}
+		if cErr != nil {
+			turn.Error = cErr.Error()
+		}
+		if outText != "" {
+			turn.ParsedNumbers = len(parseNumbers(outText))
+			outputs = append(outputs, outText)
+		}
+		report.Turns = append(report.Turns, turn)
+	}
+	report.applyFingerprint(outputs, model)
+	return report, nil
+}
+
+// bridgeWSURL 把 FC 的 https 基址拼成桥接 WS 地址,relay key 走路径段(CPA 账号
+// base_url 指到 FC 时带不了 X-Relay-Key 头,故 key 编码进路径)。
+func bridgeWSURL(fcURL, key string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(fcURL))
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("FC 地址无效: %q", fcURL)
+	}
+	scheme := "wss"
+	if u.Scheme == "http" {
+		scheme = "ws"
+	}
+	return fmt.Sprintf("%s://%s/k/%s/backend-api/codex/responses", scheme, u.Host, url.PathEscape(key)), nil
 }
 
 // applyFingerprint 对收集到的输出做行为指纹归因,填进报告。
@@ -240,15 +322,21 @@ func modeltraceTarget(c cloudMintConfig, source, urlOverride string) (cloudFillT
 }
 
 // runModeltraceProbe 两轮制指纹验证:
-//  1) 经所选源(默认 FC)以 WS 铸一张票(拿到 token + __cflb/__oailb pair);
-//  2) 用这张票回放,发 turns 条挑战(真实客户端式 WS 请求,经 FC 住宅出口),收集
+//  1. 经所选源(默认 FC)以 WS 铸一张票(拿到 token + __cflb/__oailb pair);
+//  2. 用这张票回放,发 turns 条挑战(真实客户端式 WS 请求,经 FC 住宅出口),收集
 //     模型输出的数字;
-//  3) 把全部有效输出交给行为指纹分类器(bank),判定"实际是哪个模型",不看声明标签。
+//  3. 把全部有效输出交给行为指纹分类器(bank),判定"实际是哪个模型",不看声明标签。
+//
 // account 为空则取第一个可用 probe 账号,否则按 auth_id 精确选。
 func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, urlOverride, account, path, apiKey, cpaURL, gateway string, turns int) (modeltraceReport, error) {
 	if path == "client" {
 		// Test B:走 CPA 本机回环的真实客户端路径,不铸票、不碰 FC。
 		return runClientPathProbe(ctx, cfg, model, apiKey, cpaURL, turns)
+	}
+	if path == "bridge" {
+		// 方案 B:连 FC 满血桥接端点,用所选账号的真实 access_token 发业务挑战。
+		// FC 在同一连接内住宅铸票+注入+中继 —— 验证客户端经 FC 桥接是否满血。
+		return runBridgePathProbe(ctx, cfg, model, source, urlOverride, account, turns)
 	}
 	report := modeltraceReport{Model: model, Source: source, Path: path, Transport: "websocket", Turns: []modeltraceTurn{}}
 
@@ -366,15 +454,16 @@ func runModeltraceProbe(ctx context.Context, cfg pluginConfig, model, source, ur
 // {"model":"gpt-6-astra","turns":3,"source":"fc"}。
 func handleModeltrace(body []byte) pluginapi.ManagementResponse {
 	var params struct {
-		Model   string `json:"model"`
-		Turns   int    `json:"turns"`
-		Source  string `json:"source"`
-		URL     string `json:"url"`
-		Account string `json:"account"`
-		Path    string `json:"path"`
-		APIKey  string `json:"api_key"`
-		CpaURL  string `json:"cpa_url"`
-		Gateway string `json:"gateway"`
+		Model    string   `json:"model"`
+		Turns    int      `json:"turns"`
+		Source   string   `json:"source"`
+		URL      string   `json:"url"`
+		Account  string   `json:"account"`
+		Accounts []string `json:"accounts"`
+		Path     string   `json:"path"`
+		APIKey   string   `json:"api_key"`
+		CpaURL   string   `json:"cpa_url"`
+		Gateway  string   `json:"gateway"`
 	}
 	if len(strings.TrimSpace(string(body))) > 0 {
 		if err := json.Unmarshal(body, &params); err != nil {
@@ -393,8 +482,8 @@ func handleModeltrace(body []byte) pluginapi.ManagementResponse {
 	if path == "" {
 		path = "fc"
 	}
-	if path != "fc" && path != "client" {
-		return managementError(http.StatusBadRequest, "path 只能是 fc 或 client")
+	if path != "fc" && path != "client" && path != "bridge" {
+		return managementError(http.StatusBadRequest, "path 只能是 fc / client / bridge")
 	}
 	turns := params.Turns
 	if turns <= 0 {
@@ -408,18 +497,37 @@ func handleModeltrace(body []byte) pluginapi.ManagementResponse {
 	cfg := state.config
 	state.mu.Unlock()
 
-	// 面板传真实账号名(也兼容旧的指纹传参)。空 = 取第一个可用。
-	account := ""
-	if params.Account != "" {
+	// 账号选择:支持多选(accounts 数组)与单选(account),都传真实账号名或指纹。
+	// 空 = 取第一个可用(单账号自动)。面板多选时并发对每个账号各跑一份。
+	resolveAcct := func(sel string) string {
 		for _, a := range cfg.ProbeAccounts {
-			if a == params.Account || cloudFingerprint(a) == params.Account {
-				account = a
-				break
+			if a == sel || cloudFingerprint(a) == sel {
+				return a
 			}
 		}
-		if account == "" {
+		return ""
+	}
+	var accounts []string
+	seen := map[string]bool{}
+	for _, sel := range params.Accounts {
+		if strings.TrimSpace(sel) == "" {
+			continue
+		}
+		a := resolveAcct(sel)
+		if a == "" {
+			return managementError(http.StatusBadRequest, "未知账号选择: "+sel)
+		}
+		if !seen[a] {
+			seen[a] = true
+			accounts = append(accounts, a)
+		}
+	}
+	if len(accounts) == 0 && params.Account != "" {
+		a := resolveAcct(params.Account)
+		if a == "" {
 			return managementError(http.StatusBadRequest, "未知账号选择")
 		}
+		accounts = append(accounts, a)
 	}
 
 	// 整体时限给足:每轮 TimeoutMS 加富余,避免管理调用比单轮更早被砍。
@@ -427,19 +535,56 @@ func handleModeltrace(body []byte) pluginapi.ManagementResponse {
 	if perTurn <= 0 {
 		perTurn = 90 * time.Second
 	}
-	// 一轮铸票 + turns 轮 grade,整体时限给足。
+	// 一轮铸票 + turns 轮 grade,整体时限给足(多账号并发,墙钟相近)。
 	ctx, cancel := context.WithTimeout(context.Background(), perTurn*time.Duration(turns+1)+60*time.Second)
 	defer cancel()
 
-	report, err := runModeltraceProbe(ctx, cfg, model, source, params.URL, account, path, params.APIKey, params.CpaURL, params.Gateway, turns)
-	if err != nil {
-		return managementError(http.StatusBadGateway, err.Error())
+	// 单账号(或自动):保持原有单份报告返回结构,面板旧逻辑不受影响。
+	if len(accounts) <= 1 {
+		acct := ""
+		if len(accounts) == 1 {
+			acct = accounts[0]
+		}
+		report, err := runModeltraceProbe(ctx, cfg, model, source, params.URL, acct, path, params.APIKey, params.CpaURL, params.Gateway, turns)
+		if err != nil {
+			return managementError(http.StatusBadGateway, err.Error())
+		}
+		logModeltrace(model, path, &report)
+		return jsonResponse(http.StatusOK, report)
 	}
+
+	// 多账号:并发各跑一份,汇总返回。
+	type acctResult struct {
+		Account string            `json:"account"`
+		Report  *modeltraceReport `json:"report,omitempty"`
+		Error   string            `json:"error,omitempty"`
+	}
+	results := make([]acctResult, len(accounts))
+	var wg sync.WaitGroup
+	for i, acct := range accounts {
+		wg.Add(1)
+		go func(i int, acct string) {
+			defer wg.Done()
+			rep, err := runModeltraceProbe(ctx, cfg, model, source, params.URL, acct, path, params.APIKey, params.CpaURL, params.Gateway, turns)
+			if err != nil {
+				results[i] = acctResult{Account: acct, Error: err.Error()}
+				return
+			}
+			rep.Account = acct
+			logModeltrace(model, path, &rep)
+			results[i] = acctResult{Account: acct, Report: &rep}
+		}(i, acct)
+	}
+	wg.Wait()
+	return jsonResponse(http.StatusOK, map[string]any{"multi": true, "count": len(results), "results": results})
+}
+
+// logModeltrace 记一条探测结果日志(单/多账号共用)。
+func logModeltrace(model, path string, report *modeltraceReport) {
 	if report.Fingerprint != nil {
-		cloudRecordLog("modeltrace", "%s · 路径 %s · 指纹=%s 置信 %.0f%% 匹配=%v",
-			cloudSafeLabel(model), path, cloudSafeLabel(report.Fingerprint.Predicted), report.Fingerprint.Confidence*100, report.Fingerprint.Match)
+		cloudRecordLog("modeltrace", "%s · %s · 路径 %s · 指纹=%s 置信 %.0f%% 匹配=%v",
+			cloudSafeLabel(model), cloudSafeLabel(report.Account), path, cloudSafeLabel(report.Fingerprint.Predicted), report.Fingerprint.Confidence*100, report.Fingerprint.Match)
 	} else {
-		cloudRecordLog("modeltrace", "%s · 路径 %s · %s", cloudSafeLabel(model), path, report.Note)
+		cloudRecordLog("modeltrace", "%s · %s · 路径 %s · %s", cloudSafeLabel(model), cloudSafeLabel(report.Account), path, report.Note)
 	}
-	return jsonResponse(http.StatusOK, report)
 }

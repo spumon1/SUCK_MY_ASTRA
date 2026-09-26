@@ -1861,6 +1861,27 @@ function wsRelay(req, socket, head) {
     wsError(socket, 500, 'relay_misconfigured', err.message);
     return;
   }
+  // 业务满血桥接:路径 /k/<relaykey>/backend-api/codex/responses。CPA 账号 base_url
+  // 指到 FC 时带不了 X-Relay-Key 头,所以 key 走路径。命中即由 wsBridge 用住宅出口
+  // 铸票+注入+双向中继(满血),不进下面的透明中继分支。
+  {
+    const m = req.url.match(/^\/k\/([^/]+)(\/.*)$/);
+    if (m && cfg.mode !== 'transparent' && keyMatches(cfg.relayKey, decodeURIComponent(m[1]))) {
+      const authorization = first(req.headers['authorization']);
+      if (!authorization) {
+        logOnce();
+        wsError(socket, 400, 'bridge_no_auth', 'bridge needs the account Authorization header');
+        return;
+      }
+      const be = (first(req.headers['x-edge-ip']) || '').trim();
+      entry.bridge = true;
+      req.url = m[2]; // 去掉 /k/<key> 前缀
+      wsBridge(req, socket, head, cfg,
+        { authorization, accountId: first(req.headers['chatgpt-account-id']) },
+        net.isIP(be) && (cfg.allowPrivateEdge || isPublicIP(be)) ? be : '', logOnce);
+      return;
+    }
+  }
   if (!keyMatches(cfg.relayKey, first(req.headers['x-relay-key']))) {
     logOnce();
     wsError(socket, 403, 'bad_relay_key', 'bad or missing X-Relay-Key');
@@ -1979,6 +2000,266 @@ function wsRelay(req, socket, head) {
     else if (!up.readableEnded) socket.destroy();
     logOnce();
   });
+}
+
+// --- 业务满血桥接(方案 B)-------------------------------------------------
+// 客户端(CPA 的 codex WS executor,账号 base_url 指到 FC)用 WS 连过来,FC 在
+// 本次连接里:① 用住宅出口、钉一个本连接专属 sid 铸一张满血票(state-echo 验收)
+// ② 用同一个 sid 开上游 WS(住宅出口,与铸票同 IP)③ 把客户端的 response.create
+// 帧注入该票的 client_metadata['x-codex-turn-state'] 后转上游 ④ 上游帧原样回传客户端。
+// 铸与用同 IP + 帧内带满血票 → 满血(等价于已验证的 mint+grade,只是用客户端真实内容)。
+
+// 服务端帧:不掩码,支持 126/127 扩展长度(模型完整输出可能较大)。
+function wsServerFrame(opcode, payload) {
+  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  const n = body.length;
+  let header;
+  if (n < 126) { header = Buffer.alloc(2); header[1] = n; }
+  else if (n <= 65535) { header = Buffer.alloc(4); header[1] = 126; header.writeUInt16BE(n, 2); }
+  else { header = Buffer.alloc(10); header[1] = 127; header.writeUInt32BE(0, 2); header.writeUInt32BE(n, 6); }
+  header[0] = 0x80 | opcode;
+  return Buffer.concat([header, body]);
+}
+
+// 客户端帧(发给上游):掩码,支持 126/127(长对话的 response.create 可能超 64KiB)。
+function wsMaskedFrameBig(opcode, payload) {
+  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  const n = body.length;
+  let header;
+  if (n < 126) { header = Buffer.alloc(2); header[1] = 0x80 | n; }
+  else if (n <= 65535) { header = Buffer.alloc(4); header[1] = 0x80 | 126; header.writeUInt16BE(n, 2); }
+  else { header = Buffer.alloc(10); header[1] = 0x80 | 127; header.writeUInt32BE(0, 2); header.writeUInt32BE(n, 6); }
+  header[0] = 0x80 | opcode;
+  const mask = crypto.randomBytes(4);
+  const masked = Buffer.from(body);
+  for (let i = 0; i < masked.length; i += 1) masked[i] ^= mask[i % 4];
+  return Buffer.concat([header, mask, masked]);
+}
+
+// 把满血票塞进 response.create/response.append 的 client_metadata['x-codex-turn-state']
+//(与真实客户端续轮、grade 回放一致)。非该类帧或非 JSON 原样返回。
+function bridgeInjectState(text, token) {
+  let obj;
+  try { obj = JSON.parse(text); } catch { return text; }
+  if (!obj || (obj.type !== 'response.create' && obj.type !== 'response.append')) return text;
+  const meta = (obj.client_metadata && typeof obj.client_metadata === 'object') ? obj.client_metadata : {};
+  meta['x-codex-turn-state'] = token;
+  obj.client_metadata = meta;
+  return JSON.stringify(obj);
+}
+
+// 铸一张满血票(住宅出口,按 cfg.mintPinnedSid 钉出口)。返回 {ticket, cookieHeader,
+// edgeIp} 或 null。裸打(不带路由 cookie)让边缘分配新节点。
+// 逐次换 sid(住宅出口)铸票,直到拿到满血票;返回中选的 sid,供上游桥接钉同一 IP。
+// 池能满血靠的就是轮换出口找到满血节点,桥接同理 —— 固定单一 sid 若碰到坏出口会一路失败。
+async function bridgeMintTicket(baseCfg, edgeIp, creds, model) {
+  const attempts = Math.max(1, Math.min(baseCfg.mint?.maxAttempts || 12, 24));
+  let last = 'no_attempt';
+  for (let i = 0; i < attempts; i += 1) {
+    const sid = safeSid(crypto.randomBytes(8).toString('hex')) || undefined;
+    const cfg = { ...baseCfg, mintPinnedSid: sid };
+    let attempt;
+    try { attempt = await fireMintAttempt(cfg, edgeIp, creds, model, null).done; } catch (err) { last = `exc:${(err && err.code) || 'err'}`; continue; }
+    if (!mintStatusOK(attempt) || attempt.reason !== 'ok') { last = `mint:${attempt.status || 0}/${attempt.reason || '?'}`; continue; }
+    if (!attempt.ticket || !attempt.pairs || !attempt.pairs.__cflb || !attempt.pairs.__oailb) { last = `nopair:len${attempt.len || 0}`; continue; }
+    const cookieHeader = `__cflb=${attempt.pairs.__cflb}; __oailb=${attempt.pairs.__oailb}`;
+    if (cfg.mint.verifyState) {
+      const verdict = await verifyFullStrength(cfg, edgeIp, creds, attempt.ticket, cookieHeader, model);
+      if (!verdict.full) { last = `verify:${verdict.error || 'downgraded'}`; continue; }
+    }
+    return { ticket: attempt.ticket, cookieHeader, edgeIp: attempt.edgeIp || edgeIp, sid };
+  }
+  return { fail: last };
+}
+
+// 客户端→服务端帧解析:客户端帧必须带掩码(与 readMintWsFrame 的服务端帧相反),
+// 解掩码后交回。半帧返回 null 等待续包。
+function readClientWsFrame(buf, maxFrame) {
+  if (buf.length < 2) return null;
+  const fin = !!(buf[0] & 0x80);
+  const opcode = buf[0] & 0x0f;
+  if (buf[0] & 0x70) throw new Error('unexpected websocket flags');
+  if (![0, 1, 2, 8, 9, 10].includes(opcode)) throw new Error('unsupported websocket opcode');
+  if (!(buf[1] & 0x80)) throw new Error('client frame must be masked');
+  let length = buf[1] & 0x7f;
+  let offset = 2;
+  if (opcode >= 8 && (!fin || length > 125)) throw new Error('invalid websocket control frame');
+  if (length === 126) {
+    if (buf.length < 4) return null;
+    length = buf.readUInt16BE(2);
+    offset = 4;
+  } else if (length === 127) {
+    if (buf.length < 10) return null;
+    if (buf.readUInt32BE(2) !== 0) throw new Error('websocket frame too large');
+    length = buf.readUInt32BE(6);
+    offset = 10;
+  }
+  if (length > maxFrame) throw new Error('websocket frame too large');
+  if (buf.length < offset + 4 + length) return null;
+  const mask = buf.subarray(offset, offset + 4);
+  offset += 4;
+  const payload = Buffer.from(buf.subarray(offset, offset + length));
+  for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4];
+  return { fin, opcode, payload, consumed: offset + length };
+}
+
+// 客户端侧读取器:合并分片、控制帧穿插,pong 以无掩码服务端帧回。
+function wsClientSideReader(socket, onMessage, onStop, limits) {
+  const frameMax = limits?.frame ?? MINT_BODY_SCAN_BYTES;
+  const msgMax = limits?.msg ?? MINT_BODY_SCAN_BYTES;
+  const totalMax = limits?.total ?? MINT_BODY_SCAN_BYTES * 4;
+  let pending = Buffer.alloc(0);
+  let fragment = null;
+  let wireBytes = 0;
+  return (chunk) => {
+    try {
+      wireBytes += chunk.length;
+      if (wireBytes > totalMax) throw new Error('websocket scan limit');
+      pending = Buffer.concat([pending, chunk]);
+      while (pending.length) {
+        const frame = readClientWsFrame(pending, frameMax);
+        if (!frame) break;
+        pending = pending.subarray(frame.consumed);
+        if (frame.opcode === 8) { onStop('ws_closed'); return; }
+        if (frame.opcode === 9) { socket.write(wsServerFrame(10, frame.payload)); continue; }
+        if (frame.opcode === 10) continue;
+        if ((frame.opcode === 0) !== (fragment !== null)) throw new Error('invalid websocket continuation');
+        fragment = fragment === null ? frame.payload : Buffer.concat([fragment, frame.payload]);
+        if (fragment.length > msgMax) throw new Error('websocket message too large');
+        if (!frame.fin) continue;
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(fragment);
+        fragment = null;
+        if (onMessage(text)) return;
+      }
+    } catch { onStop('ws_protocol'); }
+  };
+}
+
+function wsBridge(req, socket, head, baseCfg, creds, edgeIp0, logOnce) {
+  socket.on('error', () => socket.destroy());
+  socket.setTimeout(0);
+  socket.setNoDelay(true);
+  const key = first(req.headers['sec-websocket-key']);
+  if (req.method !== 'GET' || (req.headers.upgrade || '').toLowerCase() !== 'websocket' || !key) {
+    wsError(socket, 400, 'bad_upgrade', 'only GET websocket upgrades are supported');
+    if (logOnce) logOnce();
+    return;
+  }
+  const accept = crypto.createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n'
+    + `sec-websocket-accept: ${accept}\r\n\r\n`);
+
+  let up = null;
+  let upReady = false;
+  let token = null;
+  let model = '';
+  let setupStarted = false;
+  let setupTries = 0;
+  let closed = false;
+  let producedOutput = false;
+  const BRIDGE_SETUP_MAX = 3;
+  const clientQueue = [];
+
+  const shutdown = (reason) => {
+    if (closed) return;
+    closed = true;
+    // TODO(灰度诊断): 还没产出任何上游输出就关闭时,把原因作为一条 output_text.delta
+    // 回给客户端,便于 modeltrace 探针看到失败原因(FC 未开日志)。灰度确认后删除。
+    if (!producedOutput && reason && typeof reason === 'string') {
+      try {
+        socket.write(wsServerFrame(1, Buffer.from(JSON.stringify({ type: 'response.output_text.delta', delta: `[bridge-diag] ${reason}` }))));
+        socket.write(wsServerFrame(1, Buffer.from(JSON.stringify({ type: 'response.completed', response: { model: `bridge-diag:${reason}` } }))));
+      } catch { /* best effort */ }
+    }
+    try { socket.write(wsServerFrame(0x8, Buffer.alloc(0))); } catch { /* best effort */ }
+    socket.destroy();
+    if (up) up.destroy();
+    if (logOnce) logOnce();
+  };
+
+  const sendUpstream = (text) => {
+    if (!up || up.destroyed) return;
+    up.write(wsMaskedFrameBig(1, Buffer.from(bridgeInjectState(text, token))));
+  };
+
+  // connectUpstream 用中选 sid 的 cfg 钉同一住宅 IP。升级前失败 → onPreFail(整体换 sid
+  // 重来);升级后失败 → shutdown(流已开始,不能再换 IP)。host 用域名而非 edgeIp:
+  // 经 SOCKS 隧道时 mint 记录的 edgeIp 是代理 IP,拿它当上游 host 会让代理去连自己
+  // (ERR_SSL_WRONG_VERSION_NUMBER)。IP 亲和靠同 sid,网关靠 cookie,不靠 edge 钉定。
+  const connectUpstream = (cfg, cookieHeader, onPreFail) => {
+    const { upstream } = cfg;
+    const hostname = upstream.hostname.replace(/^\[|\]$/g, '');
+    const secure = upstream.protocol === 'https:';
+    const headers = {
+      ...mintHeaders(creds, crypto.randomUUID(), cookieHeader),
+      host: upstream.host, connection: 'Upgrade', upgrade: 'websocket',
+      'sec-websocket-key': crypto.randomBytes(16).toString('base64'),
+      'sec-websocket-version': '13', 'openai-beta': 'responses_websockets=2026-02-06',
+    };
+    delete headers.accept;
+    delete headers['content-type'];
+    const request = (secure ? https : http).request({
+      host: hostname, port: upstream.port || (secure ? 443 : 80),
+      method: 'GET', path: MINT_PATH, headers, agent: mintUpstreamAgent(secure, cfg),
+      servername: secure && !net.isIP(hostname) ? hostname : undefined,
+      checkServerIdentity: (_host, cert) => tls.checkServerIdentity(hostname, cert),
+    });
+    armConnectTimeout(request, cfg.connectTimeoutMs);
+    let settled = false;
+    request.on('error', (err) => { if (settled) return; settled = true; onPreFail(`upstream_transport:${(err && err.code) || 'err'}`); });
+    request.on('response', (res) => { if (settled) return; settled = true; onPreFail(`upstream_rejected:${res.statusCode}`); });
+    request.on('upgrade', (_res, connection, uphead) => {
+      settled = true;
+      if (closed) { connection.destroy(); return; }
+      up = connection;
+      up.setNoDelay(true);
+      const reader = mintWsReader(up, (text) => {
+        producedOutput = true;
+        if (!closed && !socket.destroyed) socket.write(wsServerFrame(1, Buffer.from(text)));
+        return false;
+      }, (reason) => shutdown(`upstream_${reason}`), { frame: MINT_GRADE_FRAME_MAX, msg: MINT_GRADE_FRAME_MAX, total: MINT_GRADE_TOTAL_MAX });
+      up.on('data', reader);
+      up.on('close', () => shutdown('upstream_closed'));
+      up.on('error', (err) => shutdown(`upstream_error:${(err && err.code) || 'err'}`));
+      upReady = true;
+      for (const t of clientQueue) sendUpstream(t);
+      clientQueue.length = 0;
+      if (uphead && uphead.length) reader(uphead);
+    });
+    request.end();
+  };
+
+  // trySetup:铸票(逐次换 sid 找满血)→ 用中选 sid 开上游;上游升级前失败则整体换
+  // sid 重来(铸+连是一个单元,保证票与上游同 IP)。
+  const trySetup = async () => {
+    if (closed) return;
+    setupTries += 1;
+    if (setupTries > BRIDGE_SETUP_MAX) { shutdown('setup_exhausted'); return; }
+    let minted = null;
+    try { minted = await bridgeMintTicket(baseCfg, edgeIp0, creds, model); } catch (err) { shutdown(`mint_exception:${(err && err.message) || 'err'}`); return; }
+    if (closed) return;
+    if (!minted || !minted.ticket) { shutdown(`mint_failed:${(minted && minted.fail) || '?'}`); return; }
+    token = minted.ticket;
+    const cfg = { ...baseCfg, mintPinnedSid: minted.sid };
+    connectUpstream(cfg, minted.cookieHeader, () => { if (!closed) trySetup(); });
+  };
+
+  const startSetup = (firstText) => {
+    setupStarted = true;
+    try { const o = JSON.parse(firstText); if (o && typeof o.model === 'string') model = o.model; } catch { /* use default */ }
+    if (!model) model = (baseCfg.mint && baseCfg.mint.models && baseCfg.mint.models[0]) || 'gpt-6-astra';
+    trySetup();
+  };
+
+  const clientReader = wsClientSideReader(socket, (text) => {
+    if (closed) return true;
+    if (!setupStarted) { clientQueue.push(text); startSetup(text); return false; }
+    if (upReady) sendUpstream(text); else clientQueue.push(text);
+    return false;
+  }, (reason) => shutdown(`client_${reason}`), { frame: MINT_GRADE_FRAME_MAX, msg: MINT_GRADE_FRAME_MAX, total: MINT_GRADE_TOTAL_MAX });
+  socket.on('data', clientReader);
+  socket.on('close', () => shutdown('client_closed'));
+  if (head && head.length) clientReader(head);
 }
 
 function wsHandler(req, socket, head) {

@@ -124,9 +124,12 @@ func handleCloudDashboardStatus() pluginapi.ManagementResponse {
 	sort.SliceStable(logs, func(i, j int) bool { return logs[i].At.Before(logs[j].At) })
 	// 主动探针可选账号:直接给真实账号名(probe_accounts),面板下拉按名选、回传名。
 	mtAccounts := append([]string(nil), cfg.ProbeAccounts...)
+	fillAccts := append([]string(nil), cfg.fillAccounts()...)
 	return jsonResponse(http.StatusOK, map[string]any{
 		"plugin_id": currentCloudPluginID(), "build": cloudDashboardBuild, "enabled": cfg.CloudMint.Enabled, "role": cfg.Role, "dry_run": cfg.DryRun,
 		"modeltrace_accounts": mtAccounts,
+		"mint_accounts":        append([]string(nil), cfg.MintAccounts...), // 当前打票账号子集(空=全部)
+		"fill_accounts":        fillAccts,                                  // 实际用于灌池的账号(mint_accounts 或全部)
 		"effective": map[string]any{"enabled": cfg.CloudMint.Enabled, "transport": cfg.CloudMint.Transport, "gateway": cfg.CloudMint.Gateway,
 			"ticket_length": cfg.CloudMint.TicketLength, "ttl_seconds": cfg.CloudMint.TTLSeconds, "wait_ms": cfg.CloudMint.WaitMS, "timeout_ms": cfg.CloudMint.TimeoutMS,
 			"pool_fill": cfg.CloudMint.PoolFill, "pool_fill_interval_ms": cfg.CloudMint.poolFillIntervalMS()},

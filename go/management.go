@@ -1292,10 +1292,10 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 	}
 	for name := range requested {
 		switch name {
-		case "accounts", "models", "proxies", "rotating":
+		case "accounts", "models", "proxies", "rotating", "mint_accounts":
 		default:
 			return managementError(http.StatusBadRequest,
-				"unknown field "+name+"; expected accounts, models, proxies or rotating")
+				"unknown field "+name+"; expected accounts, models, proxies, rotating or mint_accounts")
 		}
 	}
 
@@ -1310,6 +1310,7 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 
 	accounts, models, proxies := cfg.ProbeAccounts, cfg.Models, cfg.ProbeProxies
 	rotating := cfg.ProbeProxiesRotating
+	mintAccounts := cfg.MintAccounts
 	if requested["accounts"] {
 		accounts = q["account"]
 	}
@@ -1322,15 +1323,29 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 	if requested["rotating"] {
 		rotating = q["rotating_proxy"]
 	}
+	if requested["mint_accounts"] {
+		mintAccounts = q["mint_account"]
+	}
 
 	accounts, models, proxies, rotating, problems := normaliseProbeScope(accounts, models, proxies, rotating)
+	// 打票账号只取非空白项;是否属于 probe_accounts 由 fillAccounts 兜底校验。
+	{
+		cleaned := mintAccounts[:0:0]
+		for _, a := range mintAccounts {
+			if s := strings.TrimSpace(a); s != "" {
+				cleaned = append(cleaned, s)
+			}
+		}
+		mintAccounts = cleaned
+	}
 
 	scope := probeScope{
-		Accounts:  accounts,
-		Models:    models,
-		Proxies:   proxies,
-		Rotating:  rotating,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Accounts:     accounts,
+		Models:       models,
+		Proxies:      proxies,
+		Rotating:     rotating,
+		MintAccounts: mintAccounts,
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	if errWrite := writeProbeScope(cfg.StoreDir, scope); errWrite != nil {
 		return managementError(http.StatusInternalServerError,
@@ -1346,8 +1361,12 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 	state.config.Models = models
 	state.config.ProbeProxies = proxies
 	state.config.ProbeProxiesRotating = rotating
+	state.config.MintAccounts = mintAccounts
 	state.configErrors = problems
+	liveCfg := state.config
 	state.mu.Unlock()
+	// 灌池账号子集(或探针账号)变了,让后台灌池器立即按新集合运行,不等宿主下次 reconfigure。
+	cloudPoolFillerReconfigure(liveCfg)
 
 	log.Printf(logPrefix+"probe scope saved: accounts=%d models=%d proxies=%d rotating=%d (fields=%s)",
 		len(accounts), len(models), len(proxies), len(rotating), q.Get("fields"))

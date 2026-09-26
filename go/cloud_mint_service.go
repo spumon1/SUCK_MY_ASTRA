@@ -217,7 +217,42 @@ func interceptCloudMint(req pluginapi.RequestInterceptRequest, cfg pluginConfig)
 	headers := http.Header{}
 	headers.Set(turnStateHeader, entry.Ticket)
 	headers.Set("Cookie", mergeRouteCookies(headerValue(req.Headers, "Cookie"), entry.Cookies))
-	return pluginapi.RequestInterceptResponse{ClearHeaders: []string{turnStateHeader, "Cookie"}, Headers: headers}
+	resp := pluginapi.RequestInterceptResponse{ClearHeaders: []string{turnStateHeader, "Cookie"}, Headers: headers}
+	// WS 业务:上游只认帧 body 里 client_metadata['x-codex-turn-state'],X-Codex-Turn-State
+	// 头形式对 WS 无效(header 停在 upgrade 握手,进不了 response.create 帧)。因此把票同时
+	// 写进 body —— SSE 仍靠 header,WS 靠 body,两条路径都满血。与真实客户端续轮、FC grade
+	// 回放(relay/index.js mintGradePayload)一致。body 非 JSON 或为空则保持原样只走 header。
+	if newBody, ok := injectTurnStateIntoBody(req.Body, entry.Ticket); ok {
+		resp.Body = newBody
+	}
+	return resp
+}
+
+// clientMetadataTurnStateKey 是上游在 response.create 帧内读取 turn-state 的字段名。
+const clientMetadataTurnStateKey = "x-codex-turn-state"
+
+// injectTurnStateIntoBody 把票写进请求体的 client_metadata['x-codex-turn-state'],保留体内
+// 已有的其它 client_metadata 键。返回改写后的体;体为空、非 JSON 对象、或票为空时返回
+// ok=false,由调用方保持原体不动(只走 header 注入)。
+func injectTurnStateIntoBody(body []byte, ticket string) ([]byte, bool) {
+	if len(body) == 0 || ticket == "" {
+		return nil, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	meta, _ := obj["client_metadata"].(map[string]any)
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	meta[clientMetadataTurnStateKey] = ticket
+	obj["client_metadata"] = meta
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 func cloudMintUnavailable() pluginapi.RequestInterceptResponse {

@@ -107,7 +107,7 @@ func cloudPoolFillerReconfigure(cfg pluginConfig) {
 	poolFillStatus.Lock()
 	poolFillStatus.running = true
 	poolFillStatus.intervalMS = cfg.CloudMint.poolFillIntervalMS()
-	poolFillStatus.accounts = len(cfg.ProbeAccounts)
+	poolFillStatus.accounts = len(cfg.fillAccounts())
 	poolFillStatus.models = len(cfg.Models)
 	poolFillStatus.gateway = cfg.CloudMint.Gateway
 	next := map[string]*fillSourceStat{}
@@ -124,8 +124,8 @@ func cloudPoolFillerReconfigure(cfg pluginConfig) {
 	ctx, cancel := context.WithCancel(context.Background())
 	poolFiller.cancel = cancel
 	go cloudPoolFillLoop(ctx, cfg)
-	log.Printf(logPrefix+"灌池循环启动:accounts=%d models=%d interval=%dms gateway=%s 源=[%s]",
-		len(cfg.ProbeAccounts), len(cfg.Models), cfg.CloudMint.poolFillIntervalMS(), cfg.CloudMint.Gateway, fillTargetsSummary(targets))
+	log.Printf(logPrefix+"灌池循环启动:打票账号=%d/%d models=%d interval=%dms gateway=%s 源=[%s]",
+		len(cfg.fillAccounts()), len(cfg.ProbeAccounts), len(cfg.Models), cfg.CloudMint.poolFillIntervalMS(), cfg.CloudMint.Gateway, fillTargetsSummary(targets))
 }
 
 // fillTargetsSummary 给日志用:源名 + 脱敏端点,不打印代理凭据。
@@ -165,7 +165,8 @@ func cloudPoolFillLoop(ctx context.Context, cfg pluginConfig) {
 // 成功则把 pair 灌进同一个全局池)。
 func cloudPoolFillOnce(ctx context.Context, cfg pluginConfig) {
 	targets := cfg.CloudMint.fillTargets()
-	if len(cfg.ProbeAccounts) == 0 || len(cfg.Models) == 0 || len(targets) == 0 {
+	fillAccts := cfg.fillAccounts()
+	if len(fillAccts) == 0 || len(cfg.Models) == 0 || len(targets) == 0 {
 		return
 	}
 	key := os.Getenv(cfg.CloudMint.KeyEnv)
@@ -174,7 +175,7 @@ func cloudPoolFillOnce(ctx context.Context, cfg pluginConfig) {
 		return
 	}
 	client := newProbeClient(cfg)
-	creds := probeDownloadCreds(ctx, client, cfg.ProbeAccounts, time.Now())
+	creds := probeDownloadCreds(ctx, client, fillAccts, time.Now())
 	for _, t := range targets {
 		select {
 		case <-ctx.Done():

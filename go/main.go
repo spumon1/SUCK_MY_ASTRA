@@ -275,6 +275,13 @@ type pluginConfig struct {
 	// bound to the account that minted it -- so this is a borrowing order, not
 	// a coverage list.
 	ProbeAccounts []string `yaml:"probe_accounts"`
+	// MintAccounts narrows which accounts the background pool-fill (灌池) uses to
+	// mint. When non-empty, only these accounts mint into the shared pool; the
+	// minted __cflb/__oailb pairs stay account-agnostic, so every account's
+	// business still reuses them. Empty = fall back to all ProbeAccounts
+	// (backward compatible). A name here that is not also a ProbeAccount is
+	// ignored, since probes borrow credentials only from ProbeAccounts.
+	MintAccounts []string `yaml:"mint_accounts"`
 	// ProbeProxies is the ordered list of exits the probe dials. Each exit IP
 	// lands on a different gateway node and mints a different pair, so the
 	// pool's coverage is exactly the exit list.
@@ -316,6 +323,33 @@ type pluginConfig struct {
 	// loopback listener because the plugin runs inside CPA: a probe talks to the
 	// process hosting it, not out across the network.
 	ProbeBaseURL string `yaml:"probe_base_url"`
+}
+
+// fillAccounts returns the accounts the background pool-fill should mint with:
+// the MintAccounts subset (validated to be real ProbeAccounts) when set, else
+// all ProbeAccounts. The pool is account-agnostic, so restricting who mints does
+// not restrict who can reuse the minted cookies.
+func (c pluginConfig) fillAccounts() []string {
+	if len(c.MintAccounts) == 0 {
+		return c.ProbeAccounts
+	}
+	allowed := make(map[string]bool, len(c.ProbeAccounts))
+	for _, a := range c.ProbeAccounts {
+		allowed[a] = true
+	}
+	out := make([]string, 0, len(c.MintAccounts))
+	seen := map[string]bool{}
+	for _, a := range c.MintAccounts {
+		if allowed[a] && !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	// 全部无效时退回全量,避免误配导致灌池完全停摆。
+	if len(out) == 0 {
+		return c.ProbeAccounts
+	}
+	return out
 }
 
 // defaultProbeBaseURL is CPA's own loopback listener. It is the default rather
@@ -747,6 +781,7 @@ func configure(raw []byte) error {
 		var savedProblems []string
 		cfg.ProbeAccounts, cfg.Models, cfg.ProbeProxies, cfg.ProbeProxiesRotating, savedProblems =
 			normaliseProbeScope(saved.Accounts, saved.Models, saved.Proxies, saved.Rotating)
+		cfg.MintAccounts = saved.MintAccounts
 		scopeProblems = append(scopeProblems, savedProblems...)
 		scopeSource = scopeFileName + " (saved " + saved.UpdatedAt + ")"
 	}
@@ -1550,8 +1585,11 @@ type probeScope struct {
 	Proxies  []string `json:"probe_proxies"`
 	// Absent in files written before the pools were split, which decodes to nil
 	// and is exactly right: everything saved back then was a static exit.
-	Rotating  []string `json:"probe_proxies_rotating,omitempty"`
-	UpdatedAt string   `json:"updated_at"`
+	Rotating []string `json:"probe_proxies_rotating,omitempty"`
+	// MintAccounts narrows which accounts the background pool-fill mints with;
+	// empty/absent = all Accounts. Absent in older files decodes to nil = all.
+	MintAccounts []string `json:"mint_accounts,omitempty"`
+	UpdatedAt    string   `json:"updated_at"`
 }
 
 // loadProbeScope reads the saved scope, or returns nil when none exists. A
