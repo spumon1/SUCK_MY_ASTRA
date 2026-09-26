@@ -92,6 +92,10 @@ func doCloudMint(ctx context.Context, work cloudMintWork) (cloudMintResult, int,
 }
 
 func requestCloudMint(ctx context.Context, work cloudMintWork) (cloudMintEntry, error) {
+	// 插件→FC 走 WS 隧道(fc_ws_tunnel=true):插件在隧道上自己铸票,不发 HTTP POST。
+	if work.cfg.FCWSTunnel {
+		return mintViaFCTunnel(ctx, work)
+	}
 	result, status, err := doCloudMint(ctx, work)
 	if err != nil {
 		return cloudMintEntry{}, err

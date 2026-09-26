@@ -25,6 +25,10 @@ type cloudMintConfig struct {
 	TTLSeconds   int    `yaml:"ttl_seconds"`
 	WaitMS       int    `yaml:"wait_ms"`
 	TimeoutMS    int    `yaml:"timeout_ms"`
+	// FCWSTunnel:true 时插件→FC 走 WS(透明中继隧道),插件在隧道上自己完成
+	// codex 铸票;false(默认)时插件→FC 走 HTTP POST 由 FC 铸票。仅改变 plugin→FC
+	// 这一跳的传输,票质量不受影响(取决于 FC 出口 + FC→上游那一跳)。
+	FCWSTunnel bool `yaml:"fc_ws_tunnel"`
 	// PoolFill 开启后台灌池循环:用 probe_accounts 的账号定期调 FC 打票,把满血
 	// __cflb/__oailb 灌进全局池,供所有账号复用(池模式下 enabled 可为 false)。
 	// 旧字段:当 FC / Relay 两个源都未启用时,退回用它 + 上面的 url/proxy 作为
