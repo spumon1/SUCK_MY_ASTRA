@@ -1795,7 +1795,7 @@ function websocketMintUpstream(script = () => ({}), server) {
       hit.payload = JSON.parse(data.toString());
       d.onCreate?.(socket, hit);
       if (d.silent) return;
-      const event = d.event || { type: 'codex.response.metadata', response: { id: 'ws-r1', model: d.model || hit.payload.model } };
+      const event = d.event || { type: 'response.created', response: { id: 'ws-r1', model: d.model || hit.payload.model } };
       const json = JSON.stringify(event);
       const frames = d.frames || (d.fragment ? [
         serverMintFrame(1, json.slice(0, 18), false), serverMintFrame(9, 'ping'),
@@ -1900,6 +1900,30 @@ test('WS 打票:metadata 无票字段时仍判 no_ticket', async (t) => {
   assert.equal(result.len, 0);
 });
 
+test('WS grade:回放票发挑战,累积 output_text 到 completed', async (t) => {
+  const upstream = websocketMintUpstream(() => ({
+    ticketLen: 0,
+    frames: [
+      serverMintFrame(1, JSON.stringify({ type: 'response.created', response: { id: 'g1', model: 'gpt-6-astra' } })),
+      serverMintFrame(1, JSON.stringify({ type: 'response.output_text.delta', delta: '12, 34, ' })),
+      serverMintFrame(1, JSON.stringify({ type: 'response.output_text.delta', delta: '56' })),
+      serverMintFrame(1, JSON.stringify({ type: 'response.completed', response: { id: 'g1', model: 'gpt-6-astra' } })),
+    ],
+  }));
+  const port = await serve(t, upstream.server);
+  const cfg = { upstream: new URL(`http://127.0.0.1:${port}`), connectTimeoutMs: 200, mint: { transport: 'websocket', attemptTimeoutMs: 200 } };
+  const attempt = _internals.fireWsGradeAttempt(cfg, '', { authorization: 'Bearer g' }, 'gpt-6-astra', '', 'give me numbers', ticketOf(780));
+  t.after(() => attempt.req.destroy());
+  const result = await attempt.done;
+  assert.equal(result.reason, 'ok');
+  assert.equal(result.served, 'gpt-6-astra');
+  assert.equal(result.output, '12, 34, 56');
+  // 客户端发出的正是 grade 帧:带挑战 input + 在 client_metadata 里回放票。
+  assert.equal(upstream.hits[0].payload.type, 'response.create');
+  assert.equal(upstream.hits[0].payload.client_metadata['x-codex-turn-state'], ticketOf(780));
+  assert.equal(upstream.hits[0].payload.input[0].content[0].text, 'give me numbers');
+});
+
 for (const reject of [401, 400]) {
   test(`WS 打票:握手 HTTP ${reject} 沿用永久拒绝处理`, async (t) => {
     const upstream = websocketMintUpstream(() => ({ reject }));
@@ -1940,7 +1964,7 @@ test('WS 打票:先响应 ping 为掩码 pong,再等待模型事件', async (t) 
   const f = await wsMintAttempt(t, () => ({
     frames: [serverMintFrame(9, 'alive')],
     onPong: (socket) => socket.write(serverMintFrame(1,
-      JSON.stringify({ type: 'codex.response.metadata', response: { id: 'r1', model: 'gpt-6-sol' } }))),
+      JSON.stringify({ type: 'response.created', response: { id: 'r1', model: 'gpt-6-sol' } }))),
   }));
   const result = await f.attempt.done;
   assert.equal(result.reason, 'ok');

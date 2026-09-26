@@ -1,0 +1,5 @@
+# 代码包只需 index.js:排除测试、文档、部署描述与本文件。
+index.test.js
+*.md
+s.yaml
+.fcignore

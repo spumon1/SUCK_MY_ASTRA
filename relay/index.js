@@ -98,7 +98,7 @@ const MINT_GATEWAY_RE = /unified[-_.]?(\d+)|gateway[-_.][a-z0-9-]+/i;
 const DROP_REQUEST_HEADERS = new Set([
   'host', 'connection', 'keep-alive', 'proxy-authorization', 'proxy-connection',
   'te', 'trailer', 'transfer-encoding', 'upgrade', 'expect',
-  'x-relay-key', 'x-edge-ip', 'x-relay-mint',
+  'x-relay-key', 'x-edge-ip', 'x-relay-mint', 'x-relay-grade',
   'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-port',
   'x-forwarded-proto', 'x-forwarded-scheme', 'x-forwarded-server',
   'x-real-ip', 'true-client-ip', 'client-ip', 'via',
@@ -113,7 +113,7 @@ const DROP_RESPONSE_HEADERS = new Set([
 const WS_DROP_REQUEST_HEADERS = new Set([
   'host', 'connection', 'upgrade', 'keep-alive', 'te', 'trailer',
   'transfer-encoding', 'content-length', 'proxy-authorization', 'proxy-connection', 'expect',
-  'x-relay-key', 'x-edge-ip', 'x-relay-mint',
+  'x-relay-key', 'x-edge-ip', 'x-relay-mint', 'x-relay-grade',
   'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-port',
   'x-forwarded-proto', 'x-forwarded-scheme', 'x-forwarded-server',
   'x-real-ip', 'true-client-ip', 'client-ip', 'via',
@@ -906,7 +906,8 @@ function mintWsClientFrame(opcode, payload) {
 }
 
 // 严格解析服务端帧头,大长度在分配消息缓冲之前拒绝。半帧返回 null 等待续包。
-function readMintWsFrame(buf) {
+// maxFrame 可放宽:铸票只读小消息(默认 16 KiB),grade 轮要收模型完整输出(更大)。
+function readMintWsFrame(buf, maxFrame = MINT_BODY_SCAN_BYTES) {
   if (buf.length < 2) return null;
   const fin = !!(buf[0] & 0x80);
   const opcode = buf[0] & 0x0f;
@@ -921,26 +922,32 @@ function readMintWsFrame(buf) {
     if (length < 126) throw new Error('noncanonical websocket length');
     offset = 4;
   } else if (length === 127) {
-    // 当前消息上限小于 65536,所有合法的 64 位长度帧必然超限。
-    throw new Error('websocket frame too large');
+    if (buf.length < 10) return null;
+    if (buf.readUInt32BE(2) !== 0) throw new Error('websocket frame too large'); // 高 32 位非零必超限
+    length = buf.readUInt32BE(6);
+    if (length <= 65535) throw new Error('noncanonical websocket length');
+    offset = 10;
   }
-  if (length > MINT_BODY_SCAN_BYTES) throw new Error('websocket frame too large');
+  if (length > maxFrame) throw new Error('websocket frame too large');
   if (buf.length < offset + length) return null;
   return { fin, opcode, payload: buf.subarray(offset, offset + length), consumed: offset + length };
 }
 
 // 合并文本分片,控制帧可以穿插。只有完整 UTF-8 JSON 消息进入模型判定。
-function mintWsReader(socket, onMessage, onStop) {
+function mintWsReader(socket, onMessage, onStop, limits) {
+  const frameMax = limits?.frame ?? MINT_BODY_SCAN_BYTES;
+  const msgMax = limits?.msg ?? MINT_BODY_SCAN_BYTES;
+  const totalMax = limits?.total ?? MINT_BODY_SCAN_BYTES * 4;
   let pending = Buffer.alloc(0);
   let fragment = null;
   let wireBytes = 0;
   return (chunk) => {
     try {
       wireBytes += chunk.length;
-      if (wireBytes > MINT_BODY_SCAN_BYTES * 4) throw new Error('websocket scan limit');
+      if (wireBytes > totalMax) throw new Error('websocket scan limit');
       pending = Buffer.concat([pending, chunk]);
       while (pending.length) {
-        const frame = readMintWsFrame(pending);
+        const frame = readMintWsFrame(pending, frameMax);
         if (!frame) break;
         pending = pending.subarray(frame.consumed);
         if (frame.opcode === 8) { onStop('ws_closed'); return; }
@@ -948,7 +955,7 @@ function mintWsReader(socket, onMessage, onStop) {
         if (frame.opcode === 10) continue;
         if ((frame.opcode === 0) !== (fragment !== null)) throw new Error('invalid websocket continuation');
         fragment = fragment === null ? frame.payload : Buffer.concat([fragment, frame.payload]);
-        if (fragment.length > MINT_BODY_SCAN_BYTES) throw new Error('websocket message too large');
+        if (fragment.length > msgMax) throw new Error('websocket message too large');
         if (!frame.fin) continue;
         const text = new TextDecoder('utf-8', { fatal: true }).decode(fragment);
         fragment = null;
@@ -1027,9 +1034,9 @@ function attachMintWebSocket({ res, socket, head, key, out, model, finish }) {
 }
 
 function wsMintMessage(text, out, finish) {
-  // 上游已把响应头和模型声明都搬进 codex.response.metadata 消息:票
-  // (x-codex-turn-state)不再出现在 101 握手头上,在这里取;模型声明也在同类
-  // 消息里(见下方 createdModelFromJson),故取票后不提前返回,继续校验模型。
+  // 上游把响应头搬进了 codex.response.metadata 消息:票(x-codex-turn-state)不再
+  // 出现在 101 握手头上,在这里取。模型声明可能在这条消息里、也可能在 response.created
+  // 里(见下方两者都认),故取票后不提前返回,继续校验模型。
   if (text.includes('"codex.response.metadata"')) {
     try {
       const meta = JSON.parse(text);
@@ -1044,13 +1051,167 @@ function wsMintMessage(text, out, finish) {
       terminalError: error.terminal });
     return true;
   }
-  const model = createdModelFromJson(text, '', 'codex.response.metadata');
+  // 上游 WS 的模型声明可能落在 codex.response.metadata,也可能仍在 response.created
+  // (实测两种形态都出现过);两者都认,哪个先带合格 response.id+model 就用哪个。
+  const model = createdModelFromJson(text, '', 'codex.response.metadata')
+    ?? createdModelFromJson(text);
   if (model !== undefined) {
     out.served = model;
     finish({ reason: 'ok' });
     return true;
   }
   return false;
+}
+
+// ── grade 轮(modeltrace 指纹验证)────────────────────────────────────────
+// 回放一张已铸的票发一轮真实 WS 请求,收集模型输出的文本,交由调用方做行为指纹。
+// 与铸票分开:铸票只读 response.created 取票即停;grade 要读到 response.completed。
+// 回放方式:把票放进 response.create 帧的 client_metadata['x-codex-turn-state'](与
+// 真实客户端续轮一致)。不带 reasoning.encrypted_content,避免超大帧。
+const MINT_GRADE_FRAME_MAX = 512 * 1024;
+const MINT_GRADE_TOTAL_MAX = 8 * 1024 * 1024;
+const MINT_GRADE_TIMEOUT_MS = 120000;
+
+function mintGradePayload(model, promptText, token) {
+  return JSON.stringify({
+    type: 'response.create',
+    model,
+    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: promptText }] }],
+    reasoning: { effort: 'low' },
+    store: false,
+    stream: true,
+    tool_choice: 'auto',
+    parallel_tool_calls: false,
+    client_metadata: { 'x-codex-turn-state': token },
+  });
+}
+
+// 累积 output_text.delta,记录 served 模型,读到终态即结束。
+function wsGradeMessage(text, out, finish) {
+  let event;
+  try { event = JSON.parse(text); } catch { return false; }
+  const type = event?.type;
+  if (type === 'response.output_text.delta') {
+    if (typeof event.delta === 'string') out.output += event.delta;
+    return false;
+  }
+  if (type === 'response.created' || type === 'response.in_progress') {
+    const m = event.response?.model;
+    if (typeof m === 'string' && m) out.served = m;
+    return false;
+  }
+  if (type === 'response.completed' || type === 'response.incomplete') {
+    const m = event.response?.model;
+    if (typeof m === 'string' && m) out.served = m;
+    finish({ reason: 'ok' });
+    return true;
+  }
+  const error = mintEventError(text);
+  if (error) {
+    if (error.status) out.status = error.status;
+    finish({ reason: error.code === 'unknown' ? 'ws_error_event' : `ws_error:${error.code}`, terminalError: error.terminal });
+    return true;
+  }
+  return false;
+}
+
+function attachGradeWebSocket({ res, socket, head, key, out, model, prompt, token, finish }) {
+  socket.on('error', () => finish({ reason: 'ws_transport' }));
+  socket.on('close', () => finish({ reason: 'ws_closed' }));
+  const accept = crypto.createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+  readMintHeaders(out, res);
+  if (res.statusCode !== 101 || res.headers['sec-websocket-accept'] !== accept
+      || res.headers.upgrade?.toLowerCase() !== 'websocket'
+      || !res.headers.connection?.toLowerCase().split(',').some((token) => token.trim() === 'upgrade')
+      || res.headers['sec-websocket-extensions'] || res.headers['sec-websocket-protocol']) {
+    finish({ reason: 'ws_bad_handshake' });
+    return;
+  }
+  const receive = mintWsReader(socket, (text) => wsGradeMessage(text, out, finish),
+    (reason) => finish({ reason }), { frame: MINT_GRADE_FRAME_MAX, msg: MINT_GRADE_FRAME_MAX, total: MINT_GRADE_TOTAL_MAX });
+  socket.on('data', receive);
+  socket.write(mintWsClientFrame(1, mintGradePayload(model, prompt, token)));
+  if (head.length) receive(head);
+}
+
+function fireWsGradeAttempt(cfg, edgeIp, creds, model, cookieHeader, prompt, token) {
+  let request;
+  let socket;
+  let timer;
+  let finished = false;
+  let finish;
+  const out = { transport: 'websocket', status: 0, len: 0, gateway: '', output: '', model };
+  const done = new Promise((resolve) => {
+    finish = (extra) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve({ ...out, ...extra });
+      socket?.destroy();
+      request?.destroy();
+    };
+    const key = crypto.randomBytes(16).toString('base64');
+    const hostname = cfg.upstream.hostname.replace(/^\[|\]$/g, '');
+    const secure = cfg.upstream.protocol === 'https:';
+    const headers = { ...mintHeaders(creds, crypto.randomUUID(), cookieHeader),
+      host: cfg.upstream.host, connection: 'Upgrade', upgrade: 'websocket',
+      'sec-websocket-key': key, 'sec-websocket-version': '13',
+      'openai-beta': 'responses_websockets=2026-02-06',
+    };
+    delete headers.accept;
+    delete headers['content-type'];
+    request = (secure ? https : http).request({
+      host: edgeIp || hostname, port: cfg.upstream.port || (secure ? 443 : 80),
+      method: 'GET', path: MINT_PATH, headers, agent: mintUpstreamAgent(secure, cfg),
+      servername: secure && !net.isIP(hostname) ? hostname : undefined,
+      checkServerIdentity: (_host, cert) => tls.checkServerIdentity(hostname, cert),
+    });
+    armConnectTimeout(request, cfg.connectTimeoutMs);
+    timer = setTimeout(() => finish({ reason: 'timeout' }), MINT_GRADE_TIMEOUT_MS);
+    request.on('error', (err) => finish({ reason: `transport:${err.code || 'err'}` }));
+    request.on('response', (res) => readWsMintRejection(res, out, finish));
+    request.on('upgrade', (res, connection, head) => {
+      socket = connection;
+      if (finished) { socket.destroy(); return; }
+      attachGradeWebSocket({ res, socket, head, key, out, model, prompt, token, finish });
+    });
+    request.end();
+  });
+  return { req: { destroy: () => finish({ reason: 'aborted' }) }, done };
+}
+
+// grade 请求入口:X-Relay-Grade 触发。回放 X-Mint-Replay-State 的票 + X-Mint-Prompt
+// 的挑战,发一轮真实 WS,回传模型输出文本供调用方做指纹。
+async function gradeTicket(req, res, cfg, entry, edgeIp) {
+  req.resume();
+  entry.grade = {};
+  const authorization = first(req.headers['authorization']);
+  if (!authorization) { sendError(res, 400, 'grade_no_auth', 'grade needs the request Authorization + Chatgpt-Account-Id'); return; }
+  const creds = { authorization, accountId: first(req.headers['chatgpt-account-id']) };
+  const model = (first(req.headers['x-mint-model']) || '').trim();
+  const token = (first(req.headers['x-mint-replay-state']) || '').trim();
+  const promptB64 = first(req.headers['x-mint-prompt']) || '';
+  if (!model || !token || !promptB64) {
+    sendError(res, 400, 'grade_bad_params', 'X-Mint-Model, X-Mint-Replay-State and X-Mint-Prompt (base64) are required');
+    return;
+  }
+  let prompt;
+  try { prompt = Buffer.from(promptB64, 'base64').toString('utf8'); } catch { prompt = ''; }
+  if (!prompt) { sendError(res, 400, 'grade_bad_params', 'X-Mint-Prompt must be base64-encoded text'); return; }
+  const cookieHeader = first(req.headers.cookie) || '';
+  entry.grade = { model, has_cookie: !!cookieHeader };
+  const attempt = fireWsGradeAttempt(cfg, edgeIp, creds, model, cookieHeader, prompt, token);
+  res.on('close', () => attempt.req.destroy());
+  const result = await attempt.done;
+  entry.grade.reason = result.reason;
+  entry.grade.served = result.served;
+  entry.grade.output_len = (result.output || '').length;
+  const ok = result.reason === 'ok';
+  res.writeHead(ok ? 200 : 502, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({
+    served: result.served || '', output_text: result.output || '',
+    status: result.status || 0, reason: result.reason || '',
+  }));
 }
 
 function readWsMintRejection(res, out, finish) {
@@ -1528,6 +1689,13 @@ function relay(req, res) {
   // 打票模式:控制头存在即触发,路径与方法都无意义,不进透传。
   // 透明模式完全关闭云端打票:即使客户端误带 X-Relay-Mint,也按普通请求
   // 继续透传；控制头会在 filterRequestHeaders 中被剥离，不会外发给上游。
+  if (cfg.mode !== 'transparent' && 'x-relay-grade' in req.headers) {
+    gradeTicket(req, res, cfg, entry, edgeIp).catch((err) => {
+      entry.error = String((err && err.stack) || err);
+      sendError(res, 500, 'internal', 'internal error');
+    });
+    return;
+  }
   if (cfg.mode !== 'transparent' && 'x-relay-mint' in req.headers) {
     mintTickets(req, res, cfg, entry, edgeIp).catch((err) => {
       entry.error = String((err && err.stack) || err);
@@ -1845,5 +2013,6 @@ module.exports = {
     isPublicIP, keyMatches, filterRequestHeaders, filterResponseHeaders,
     mintGatewayLabel, mintGatewayTarget, createdModelFromSse, createdModelFromJson, mintPairs,
     fernetIssuedAt, parseModels, mintAttemptTrace, mintFingerprint, fireMintAttempt, mintWsClientFrame, readMintWsFrame,
+    fireWsGradeAttempt, mintGradePayload,
   },
 };

@@ -12,7 +12,7 @@ import (
 )
 
 const routeCloudDashboardStatus = "/codex-turn-state/cloud-status"
-const cloudDashboardBuild = "cloud-mint-ui-20260925-dual-source"
+const cloudDashboardBuild = "cloud-mint-ui-20260926-fp2paths"
 const cloudDashboardLogLimit = 80
 
 type cloudDashboardLog struct {
@@ -122,8 +122,14 @@ func handleCloudDashboardStatus() pluginapi.ManagementResponse {
 	logs := append([]cloudDashboardLog{}, cloudDashboardLogs.items...)
 	cloudDashboardLogs.Unlock()
 	sort.SliceStable(logs, func(i, j int) bool { return logs[i].At.Before(logs[j].At) })
+	// 主动探针可选账号:只给指纹(不暴露原始 auth_id/邮箱),面板回传指纹,由 handler 映射。
+	mtAccounts := make([]string, 0, len(cfg.ProbeAccounts))
+	for _, a := range cfg.ProbeAccounts {
+		mtAccounts = append(mtAccounts, cloudFingerprint(a))
+	}
 	return jsonResponse(http.StatusOK, map[string]any{
 		"plugin_id": currentCloudPluginID(), "build": cloudDashboardBuild, "enabled": cfg.CloudMint.Enabled, "role": cfg.Role, "dry_run": cfg.DryRun,
+		"modeltrace_accounts": mtAccounts,
 		"effective": map[string]any{"enabled": cfg.CloudMint.Enabled, "transport": cfg.CloudMint.Transport, "gateway": cfg.CloudMint.Gateway,
 			"ticket_length": cfg.CloudMint.TicketLength, "ttl_seconds": cfg.CloudMint.TTLSeconds, "wait_ms": cfg.CloudMint.WaitMS, "timeout_ms": cfg.CloudMint.TimeoutMS,
 			"pool_fill": cfg.CloudMint.PoolFill, "pool_fill_interval_ms": cfg.CloudMint.poolFillIntervalMS()},

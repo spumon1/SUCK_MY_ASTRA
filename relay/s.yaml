@@ -12,14 +12,14 @@ access: default
 vars:
   # 函数地域 = 回源出口所在地。OpenAI 不向中国内地、香港等地区提供服务,须选它支持
   # 的国家/地区,例如 ap-southeast-1(新加坡)、ap-northeast-1(东京)、us-west-1(硅谷)。
-  region: ap-southeast-1
+  region: us-west-1
 
 resources:
   relay:
     component: fc3
     props:
       region: ${vars.region}
-      functionName: chatgpt-relay
+      functionName: chatgpt_relay
       description: chatgpt.com transparent relay (SSE streaming)
       # custom.debian10 内置 Node.js 20(/var/fc/lang/nodejs20);中继零依赖,不需要层。
       runtime: custom.debian10
@@ -57,7 +57,7 @@ resources:
         # MINT_MAX_ATTEMPTS: '24'           # 每模型循环上限 1-128
       # logConfig: auto             # 需要留存请求日志时打开(会创建 SLS project/logstore)
       triggers:
-        - triggerName: httpTrigger
+        - triggerName: defaultTrigger
           triggerType: http
           qualifier: LATEST
           triggerConfig:

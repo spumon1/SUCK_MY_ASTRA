@@ -7,3 +7,6 @@ go/cpa-plugin-codex-turn-state
 /node_modules/
 /package.json
 /package-lock.json
+
+# Claude Code local session config (not for the repo)
+/.claude/

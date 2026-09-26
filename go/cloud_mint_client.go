@@ -43,12 +43,15 @@ type cloudMintEntry struct {
 	IssuedAt, ExpiresAt time.Time
 }
 
+// doCloudMint 发一次打票请求并返回上游的原始结果与 HTTP 状态,不做验收。
+// requestCloudMint 与 modeltrace 探针共用它:前者要合格票,后者要在票被拒
+// (如降级)时也能从 attempt log 读出实际 served 模型。
 // 不信任重定向，避免把账号 Access Token 或 RELAY_KEY 转送到其他地址。
-func requestCloudMint(ctx context.Context, work cloudMintWork) (cloudMintEntry, error) {
+func doCloudMint(ctx context.Context, work cloudMintWork) (cloudMintResult, int, error) {
 	cfg, creds, model, key := work.cfg, work.creds, work.model, work.key
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, nil)
 	if err != nil {
-		return cloudMintEntry{}, errors.New("invalid cloud endpoint")
+		return cloudMintResult{}, 0, errors.New("invalid cloud endpoint")
 	}
 	req.Header.Set("X-Relay-Key", key)
 	req.Header.Set("X-Relay-Mint", cfg.Gateway)
@@ -65,29 +68,37 @@ func requestCloudMint(ctx context.Context, work cloudMintWork) (cloudMintEntry, 
 	}
 	transport, err := newCloudMintTransport(work.proxyURL)
 	if err != nil {
-		return cloudMintEntry{}, err
+		return cloudMintResult{}, 0, err
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	res, err := client.Do(req)
 	if err != nil {
-		return cloudMintEntry{}, errors.New("cloud mint unavailable or timed out")
+		return cloudMintResult{}, 0, errors.New("cloud mint unavailable or timed out")
 	}
 	defer res.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(res.Body, cloudResponseLimit+1))
 	if err != nil || len(raw) > cloudResponseLimit {
-		return cloudMintEntry{}, errors.New("cloud mint response invalid or too large")
+		return cloudMintResult{}, res.StatusCode, errors.New("cloud mint response invalid or too large")
 	}
 	var result cloudMintResult
 	if json.Unmarshal(raw, &result) != nil {
-		return cloudMintEntry{}, errors.New("cloud mint response is not JSON")
+		return cloudMintResult{}, res.StatusCode, errors.New("cloud mint response is not JSON")
+	}
+	return result, res.StatusCode, nil
+}
+
+func requestCloudMint(ctx context.Context, work cloudMintWork) (cloudMintEntry, error) {
+	result, status, err := doCloudMint(ctx, work)
+	if err != nil {
+		return cloudMintEntry{}, err
 	}
 	logCloudAttempts(result.AttemptLog)
 	logCloudAttempts(result.Error.AttemptLog)
-	if res.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		return cloudMintEntry{}, errors.New("cloud mint rejected")
 	}
-	return validateCloudMint(result, cfg, model, time.Now())
+	return validateCloudMint(result, work.cfg, work.model, time.Now())
 }
 
 func cloudIssuedAt(ticket string) time.Time {
