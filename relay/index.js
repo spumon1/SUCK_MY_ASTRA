@@ -418,9 +418,22 @@ function rotateProxySid(proxy) {
   return { ...proxy, user: proxy.user.replace(re, `$1${crypto.randomBytes(6).toString('hex')}`) };
 }
 
-function makeProxyConnect(proxy, timeoutMs, isHttps, defaultServername, rotate) {
+// 钉住动态代理会话:把 -sid-<token> 换成指定值(同一 sid = 同一 120min 粘性出口)。
+// 供 modeltrace 让铸票与 grade 走同一个出口 IP —— 否则票从"非出生出口"去用会失真。
+// 只接受安全的 sid(字母数字),避免注入进代理用户名。
+function safeSid(v) {
+  return /^[A-Za-z0-9]{1,32}$/.test(v || '') ? v : '';
+}
+
+function pinProxySid(proxy, sid) {
+  const re = /(-sid-)[^-]+/;
+  if (!proxy || !sid || !re.test(proxy.user || '')) return proxy;
+  return { ...proxy, user: proxy.user.replace(re, `$1${sid}`) };
+}
+
+function makeProxyConnect(proxy, timeoutMs, isHttps, defaultServername, rotate, pinnedSid) {
   return function (options, cb) {
-    const useProxy = rotate ? rotateProxySid(proxy) : proxy;
+    const useProxy = pinnedSid ? pinProxySid(proxy, pinnedSid) : (rotate ? rotateProxySid(proxy) : proxy);
     proxyRawConnect(useProxy, options.host, options.port, timeoutMs).then((raw) => {
       if (!isHttps) { cb(null, raw); return; }
       const tlsOpts = {
@@ -445,7 +458,7 @@ function mintUpstreamAgent(isHttps, cfg) {
   if (!cfg.mintProxy) return false;
   const Agent = isHttps ? https.Agent : http.Agent;
   const agent = new Agent({ keepAlive: false, maxSockets: Infinity });
-  agent.createConnection = makeProxyConnect(cfg.mintProxy, cfg.connectTimeoutMs, isHttps, cfg.upstream.hostname, cfg.mintProxyRotate);
+  agent.createConnection = makeProxyConnect(cfg.mintProxy, cfg.connectTimeoutMs, isHttps, cfg.upstream.hostname, cfg.mintProxyRotate, cfg.mintPinnedSid);
   return agent;
 }
 
@@ -1200,6 +1213,7 @@ async function gradeTicket(req, res, cfg, entry, edgeIp) {
   if (!prompt) { sendError(res, 400, 'grade_bad_params', 'X-Mint-Prompt must be base64-encoded text'); return; }
   const cookieHeader = first(req.headers.cookie) || '';
   entry.grade = { model, has_cookie: !!cookieHeader };
+  cfg = { ...cfg, mintPinnedSid: safeSid(first(req.headers['x-mint-sid'])) };
   const attempt = fireWsGradeAttempt(cfg, edgeIp, creds, model, cookieHeader, prompt, token);
   res.on('close', () => attempt.req.destroy());
   const result = await attempt.done;
@@ -1357,7 +1371,7 @@ async function mintTickets(req, res, cfg, entry, edgeIp) {
     sendError(res, 400, 'mint_bad_params', 'X-Mint-Transport must be sse or websocket');
     return;
   }
-  cfg = { ...cfg, mint: { ...cfg.mint, transport } };
+  cfg = { ...cfg, mint: { ...cfg.mint, transport }, mintPinnedSid: safeSid(first(req.headers['x-mint-sid'])) };
   const want = {
     gateway: mintGatewayTarget(
       // MINT_FORCE_GATEWAY 若设置则强制覆盖客户端发来的网关(设为 any/* 即接受任意网关);
