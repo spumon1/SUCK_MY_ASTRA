@@ -1795,7 +1795,7 @@ function websocketMintUpstream(script = () => ({}), server) {
       hit.payload = JSON.parse(data.toString());
       d.onCreate?.(socket, hit);
       if (d.silent) return;
-      const event = d.event || { type: 'response.created', response: { id: 'ws-r1', model: d.model || hit.payload.model } };
+      const event = d.event || { type: 'codex.response.metadata', response: { id: 'ws-r1', model: d.model || hit.payload.model } };
       const json = JSON.stringify(event);
       const frames = d.frames || (d.fragment ? [
         serverMintFrame(1, json.slice(0, 18), false), serverMintFrame(9, 'ping'),
@@ -1876,7 +1876,7 @@ test('WS 打票:票可从 codex.response.metadata 消息的 headers 取得(101 �
     frames: [
       serverMintFrame(1, JSON.stringify({ type: 'codex.response.metadata',
         headers: { 'x-codex-turn-state': ticket, 'x-codex-plan-type': 'test' } })),
-      serverMintFrame(1, JSON.stringify({ type: 'response.created', response: { id: 'ws-r1', model: 'gpt-6-sol' } })),
+      serverMintFrame(1, JSON.stringify({ type: 'codex.response.metadata', response: { id: 'ws-r1', model: 'gpt-6-sol' } })),
     ],
   }));
   const result = await f.attempt.done;
@@ -1891,7 +1891,7 @@ test('WS 打票:metadata 无票字段时仍判 no_ticket', async (t) => {
     ticketLen: 0,
     frames: [
       serverMintFrame(1, JSON.stringify({ type: 'codex.response.metadata', headers: { 'x-models-etag': 'x' } })),
-      serverMintFrame(1, JSON.stringify({ type: 'response.created', response: { id: 'ws-r1', model: 'gpt-6-sol' } })),
+      serverMintFrame(1, JSON.stringify({ type: 'codex.response.metadata', response: { id: 'ws-r1', model: 'gpt-6-sol' } })),
     ],
   }));
   const result = await f.attempt.done;
@@ -1940,7 +1940,7 @@ test('WS 打票:先响应 ping 为掩码 pong,再等待模型事件', async (t) 
   const f = await wsMintAttempt(t, () => ({
     frames: [serverMintFrame(9, 'alive')],
     onPong: (socket) => socket.write(serverMintFrame(1,
-      JSON.stringify({ type: 'response.created', response: { id: 'r1', model: 'gpt-6-sol' } }))),
+      JSON.stringify({ type: 'codex.response.metadata', response: { id: 'r1', model: 'gpt-6-sol' } }))),
   }));
   const result = await f.attempt.done;
   assert.equal(result.reason, 'ok');

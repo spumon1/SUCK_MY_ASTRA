@@ -557,12 +557,13 @@ function mintSeedPair(cookie, target) {
   return { pairs, gateway, expiresAt };
 }
 
-// SSE/WS 共用同一个严格判据:完整 JSON + created 类型 + 响应 ID + 模型字符串。
-// 这是上游的模型声明,不把其他事件或其他对象里的 model 当作执行模型证明。
-function createdModelFromJson(text, eventName = '') {
+// 同一套严格判据:完整 JSON + 指定类型 + 响应 ID + 模型字符串。这是上游的模型
+// 声明,不把其他事件或其他对象里的 model 当作执行模型证明。SSE(本地住宅)仍认
+// response.created;FC/WS 上游把声明搬进 codex.response.metadata,由调用方指定。
+function createdModelFromJson(text, eventName = '', type = 'response.created') {
   try {
     const event = JSON.parse(text);
-    if (event?.type !== 'response.created' || (eventName && eventName !== event.type)) return undefined;
+    if (event?.type !== type || (eventName && eventName !== event.type)) return undefined;
     const response = event.response;
     if (typeof response?.id !== 'string' || !response.id.trim()) return undefined;
     if (typeof response.model !== 'string' || !response.model.trim()) return undefined;
@@ -1026,15 +1027,15 @@ function attachMintWebSocket({ res, socket, head, key, out, model, finish }) {
 }
 
 function wsMintMessage(text, out, finish) {
-  // 上游已把响应头搬进 codex.response.metadata 消息:票(x-codex-turn-state)
-  // 不再出现在 101 握手头上,在这里取。其他头忽略,继续等 response.created。
+  // 上游已把响应头和模型声明都搬进 codex.response.metadata 消息:票
+  // (x-codex-turn-state)不再出现在 101 握手头上,在这里取;模型声明也在同类
+  // 消息里(见下方 createdModelFromJson),故取票后不提前返回,继续校验模型。
   if (text.includes('"codex.response.metadata"')) {
     try {
       const meta = JSON.parse(text);
       const ticket = meta?.headers?.['x-codex-turn-state'];
       if (typeof ticket === 'string' && ticket) { out.ticket = ticket; out.len = ticket.length; }
     } catch { /* 非完整 JSON,按普通消息继续 */ }
-    return false;
   }
   const error = mintEventError(text);
   if (error) {
@@ -1043,7 +1044,7 @@ function wsMintMessage(text, out, finish) {
       terminalError: error.terminal });
     return true;
   }
-  const model = createdModelFromJson(text);
+  const model = createdModelFromJson(text, '', 'codex.response.metadata');
   if (model !== undefined) {
     out.served = model;
     finish({ reason: 'ok' });
