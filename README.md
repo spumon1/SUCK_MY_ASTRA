@@ -1,4 +1,4 @@
-# codex-turn-state-cloud-mint
+# codex-turn-state-cloud-mint （山姆的葵花宝典）
 
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（CPA）原生插件 + 阿里云函数计算（FC）打票中继：为 Codex 业务请求在线铸取 `X-Codex-Turn-State` 票和 `__cflb`/`__oailb` 路由 Cookie，并在宿主选定凭据后注入——场面看着像开武馆，正经营生却只是发门票。
 
